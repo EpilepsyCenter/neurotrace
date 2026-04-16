@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from readers.heka_native.reader import HekaNativeReader
 from readers.heka_reader import HekaReader
 from readers.abf_reader import AbfReader
 from readers.neo_reader import NeoReader
@@ -13,7 +14,9 @@ router = APIRouter()
 # In-memory storage for the currently loaded recording
 _current_recording: Recording | None = None
 
-READERS = [HekaReader(), AbfReader(), NeoReader()]
+# Native HEKA reader first (handles .pgf stimulus parsing).
+# Myokit-based reader as fallback for older format versions.
+READERS = [HekaNativeReader(), HekaReader(), AbfReader(), NeoReader()]
 
 
 def get_current_recording() -> Recording:

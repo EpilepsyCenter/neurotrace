@@ -179,14 +179,14 @@ async def get_stimulus_for_sweep(
     if best_ch is None:
         return {"segments": [], "unit": ""}
 
-    # Unit conversion
+    # Unit conversion (same logic as reader.py: x1000 universally)
     dac_unit = best_ch.dac_unit.strip()
     if dac_unit in ('V', 'Volt'):
         unit_label = 'mV'
         scale = 1000.0
     elif dac_unit in ('A', 'Amp', 'Ampere'):
         unit_label = 'pA'
-        scale = 1e12
+        scale = 1000.0  # stored as nA, not SI Amperes
     else:
         unit_label = dac_unit
         scale = 1.0

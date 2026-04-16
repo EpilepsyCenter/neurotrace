@@ -196,16 +196,18 @@ def _extract_stimulus(stim: PgfStimulation, series_label: str) -> StimulusInfo |
     primary_ch = best_ch
 
     # Determine the unit and scale factor.
-    # Segment values are in SI (V for VC, A for CC) and are RELATIVE to
-    # chHolding (UseRelative flag is typically set). We add holding to get
-    # absolute values, then convert to display units (mV / pA).
+    # HEKA stores stimulus values with a universal x1000 conversion to
+    # display units: V -> mV (x1000). For CC mode, the 'A' unit actually
+    # stores values in nA, so the conversion nA -> pA is also x1000.
+    # This was verified empirically: 0.05 raw * 1000 = 50 pA per step
+    # gives Rin ~ 90 MOhm from the I-V trace, which is physiologically correct.
     dac_unit = primary_ch.dac_unit.strip()
     if dac_unit in ('V', 'Volt'):
         unit_label = 'mV'
         scale = 1000.0
     elif dac_unit in ('A', 'Amp', 'Ampere'):
         unit_label = 'pA'
-        scale = 1e12
+        scale = 1000.0  # stored as nA, not SI Amperes
     else:
         unit_label = dac_unit
         scale = 1.0

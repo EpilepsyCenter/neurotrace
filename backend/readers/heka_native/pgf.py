@@ -256,34 +256,42 @@ def _apply_increment(
     """Apply the per-sweep increment to a base value.
 
     Handles linear, logarithmic, alternating, and interleaved modes.
+
+    In HEKA files, when factor == 1.0 (or 0), the increment is always
+    additive regardless of the mode label. The "log" modes only use
+    multiplicative scaling when factor != 1.0 AND base != 0.
     """
-    if sweep_idx == 0 or (increment == 0 and factor == 0):
+    if sweep_idx == 0:
+        return base
+    if increment == 0 and (factor == 0 or factor == 1.0):
         return base
 
-    # Effective factor: if factor is 0 or 1, treat as pure additive
-    eff_factor = factor if (factor != 0 and factor != 1) else 1.0
+    # For truly multiplicative (log) modes: factor must differ from 1.0
+    # and base must be non-zero for multiplication to be meaningful.
+    use_multiplicative = (
+        factor != 0 and factor != 1.0 and base != 0 and
+        mode in (IncrementMode.LogInc, IncrementMode.LogDec,
+                 IncrementMode.LogIncInterleaved, IncrementMode.LogDecInterleaved,
+                 IncrementMode.LogAlternate)
+    )
 
-    if mode == IncrementMode.Inc:
-        return base + sweep_idx * increment * eff_factor
-    elif mode == IncrementMode.Dec:
-        return base - sweep_idx * increment * eff_factor
-    elif mode == IncrementMode.Alternate:
-        sign = 1 if (sweep_idx % 2 == 0) else -1
-        half_idx = (sweep_idx + 1) // 2
-        return base + sign * half_idx * increment * eff_factor
-    elif mode == IncrementMode.LogInc:
-        if eff_factor > 0:
-            return base * (eff_factor ** sweep_idx)
-        return base + sweep_idx * increment
-    elif mode == IncrementMode.LogDec:
-        if eff_factor > 0:
-            return base / (eff_factor ** sweep_idx)
+    if use_multiplicative:
+        if mode in (IncrementMode.LogInc, IncrementMode.LogIncInterleaved):
+            return base * (factor ** sweep_idx)
+        elif mode in (IncrementMode.LogDec, IncrementMode.LogDecInterleaved):
+            return base / (factor ** sweep_idx)
+        elif mode == IncrementMode.LogAlternate:
+            sign = 1 if (sweep_idx % 2 == 0) else -1
+            half = (sweep_idx + 1) // 2
+            return base * (factor ** (sign * half))
+
+    # Additive (linear) modes — the default for all modes when factor=1 or base=0
+    if mode in (IncrementMode.Dec, IncrementMode.DecInterleaved, IncrementMode.LogDec, IncrementMode.LogDecInterleaved):
         return base - sweep_idx * increment
-    elif mode in (IncrementMode.IncInterleaved, IncrementMode.DecInterleaved,
-                  IncrementMode.LogIncInterleaved, IncrementMode.LogDecInterleaved,
-                  IncrementMode.LogAlternate):
-        # For interleaved modes, the sweep_idx has already been reordered
-        # by PatchMaster. Just apply the linear increment.
-        return base + sweep_idx * increment * eff_factor
+    elif mode == IncrementMode.Alternate or mode == IncrementMode.LogAlternate:
+        sign = 1 if (sweep_idx % 2 == 0) else -1
+        half = (sweep_idx + 1) // 2
+        return base + sign * half * increment
     else:
-        return base + sweep_idx * increment * eff_factor
+        # Inc, IncInterleaved, LogInc (with factor=1), and anything else
+        return base + sweep_idx * increment

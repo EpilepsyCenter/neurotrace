@@ -55,6 +55,8 @@ export function TraceViewer() {
     showStimulusOverlay, toggleStimulusOverlay,
     showCursors,
     cursorVisibility,
+    sweepStimulusSegments,
+    sweepStimulusUnit,
   } = useAppStore()
 
   // Current series' stimulus info, if any.
@@ -63,7 +65,9 @@ export function TraceViewer() {
     return s.recording.groups[s.currentGroup]?.series[s.currentSeries]?.stimulus ?? null
   })
 
-  const hasStimulus = !!stimulus && stimulus.pulseEnd > stimulus.pulseStart
+  // Show stimulus checkbox whenever per-sweep or series-level stimulus data exists.
+  const hasStimulus = (sweepStimulusSegments && sweepStimulusSegments.length > 0) ||
+    (!!stimulus && (stimulus.segments?.length > 0 || stimulus.pulseEnd > stimulus.pulseStart))
 
   // Subscribe to theme so chart rebuilds on theme/font change
   const theme = useThemeStore((s) => s.theme)
@@ -203,37 +207,52 @@ export function TraceViewer() {
       })
     }
 
-    // Stimulus overlay — simplified to show ONLY the test pulse against a
-    // zero baseline. Rendering: y = 0 before and after the pulse, y =
-    // pulse level (absolute, from the protocol) during the pulse.
-    // This ignores the amplifier holding level by design.
+    // Stimulus overlay — uses per-sweep segments from the /api/traces/stimulus
+    // endpoint (which applies the .pgf increment math for the current sweep).
+    // Falls back to the series-level stimulus for backwards compatibility.
     let stimIdx: number | null = null
-    if (
-      showStimulusOverlay &&
-      stimulus &&
-      stimulus.pulseEnd > stimulus.pulseStart
-    ) {
+    if (showStimulusOverlay) {
       const n = time.length
-      const stimVals = new Array(n).fill(0)
-      const pulseLevel = stimulus.vStepAbsolute
-      for (let i = 0; i < n; i++) {
-        const t = time[i]
-        if (t >= stimulus.pulseStart && t < stimulus.pulseEnd) {
-          stimVals[i] = pulseLevel
+      // Prefer per-sweep segments (has correct I-V step levels per sweep)
+      const segs = sweepStimulusSegments ?? stimulus?.segments
+      const stimUnit = sweepStimulusUnit || stimulus?.unit || ''
+      let stimVals: (number | null)[] | null = null
+
+      if (segs && segs.length > 0) {
+        stimVals = new Array(n).fill(0)
+        for (let i = 0; i < n; i++) {
+          const t = time[i]
+          for (let s = 0; s < segs.length; s++) {
+            if (t >= segs[s].start && t < segs[s].end) {
+              stimVals[i] = segs[s].level
+              break
+            }
+          }
+        }
+      } else if (stimulus && stimulus.pulseEnd > stimulus.pulseStart) {
+        stimVals = new Array(n).fill(0)
+        for (let i = 0; i < n; i++) {
+          const t = time[i]
+          if (t >= stimulus.pulseStart && t < stimulus.pulseEnd) {
+            stimVals[i] = stimulus.vStepAbsolute
+          }
         }
       }
-      stimIdx = columns.length
-      columns.push(stimVals)
-      seriesOpts.push({
-        label: `Stim (${stimulus.unit})`,
-        stroke: cssVar('--stimulus-color'),
-        width: 1.75,
-        scale: 'stim',
-      } as uPlot.Series)
+
+      if (stimVals) {
+        stimIdx = columns.length
+        columns.push(stimVals as any)
+        seriesOpts.push({
+          label: `Stim (${stimUnit})`,
+          stroke: cssVar('--stimulus-color'),
+          width: 1.75,
+          scale: 'stim',
+        } as uPlot.Series)
+      }
     }
 
     return { data: columns as unknown as uPlot.AlignedData, seriesOpts, stimIdx }
-  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus])
+  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus, sweepStimulusSegments])
 
   // ================================================================
   // Create / recreate uPlot when data or overlays change

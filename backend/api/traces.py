@@ -131,3 +131,74 @@ async def get_average_trace(
         "label": f"Average ({len(indices)} sweeps)",
         "n_sweeps": len(indices),
     }
+
+
+@router.get("/stimulus")
+async def get_stimulus_for_sweep(
+    group: int = Query(0),
+    series: int = Query(0),
+    sweep: int = Query(0),
+):
+    """Get the stimulus segments for a specific sweep, with per-sweep
+    increment math applied. Returns the segment waveform for overlay."""
+    from api.files import _pgf_data
+
+    if _pgf_data is None:
+        return {"segments": [], "unit": ""}
+
+    # Linear index: count series across all groups
+    rec = get_current_recording()
+    stim_idx = 0
+    target_stim = None
+    for g in rec.groups:
+        for s in g.series_list:
+            if g.index == group and s.index == series:
+                target_stim = stim_idx
+            stim_idx += 1
+
+    if target_stim is None or target_stim >= len(_pgf_data.stimulations):
+        return {"segments": [], "unit": ""}
+
+    from readers.heka_native.pgf import PgfStimulation, PgfChannel, SegmentClass
+
+    stim: PgfStimulation = _pgf_data.stimulations[target_stim]
+
+    # Find the best channel (same logic as _extract_stimulus)
+    best_ch: PgfChannel | None = None
+    best_range = 0.0
+    for ch in stim.channels:
+        if not ch.segments:
+            continue
+        levels = [seg.voltage_at_sweep(sweep) for seg in ch.segments]
+        v_range = max(abs(v) for v in levels) if levels else 0
+        score = v_range * (2.0 if ch.do_write else 1.0)
+        if score > best_range or best_ch is None:
+            best_range = score
+            best_ch = ch
+
+    if best_ch is None:
+        return {"segments": [], "unit": ""}
+
+    # Unit conversion
+    dac_unit = best_ch.dac_unit.strip()
+    if dac_unit in ('V', 'Volt'):
+        unit_label = 'mV'
+        scale = 1000.0
+    elif dac_unit in ('A', 'Amp', 'Ampere'):
+        unit_label = 'pA'
+        scale = 1e12
+    else:
+        unit_label = dac_unit
+        scale = 1.0
+
+    # Build segments for this specific sweep
+    segments = []
+    t = 0.0
+    for seg in best_ch.segments:
+        dur = seg.duration_at_sweep(sweep)
+        level = seg.voltage_at_sweep(sweep) * scale
+        if dur > 0:
+            segments.append({"start": t, "end": t + dur, "level": level})
+        t += dur
+
+    return {"segments": segments, "unit": unit_label}

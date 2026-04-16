@@ -1,5 +1,7 @@
 """File management API endpoints."""
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -13,6 +15,8 @@ router = APIRouter()
 
 # In-memory storage for the currently loaded recording
 _current_recording: Recording | None = None
+# Raw pgf data from the native HEKA reader (for per-sweep stimulus)
+_pgf_data: Any = None  # PgfRoot or None
 
 # Native HEKA reader first (handles .pgf stimulus parsing).
 # Myokit-based reader as fallback for older format versions.
@@ -31,14 +35,18 @@ class OpenFileRequest(BaseModel):
 
 @router.post("/open")
 async def open_file(req: OpenFileRequest):
-    global _current_recording
+    global _current_recording, _pgf_data
 
     file_path = req.file_path
+    _pgf_data = None
 
     for reader in READERS:
         if reader.can_read(file_path):
             try:
                 _current_recording = reader.read(file_path)
+                # If native HEKA reader, stash the pgf data for per-sweep stimulus
+                if isinstance(reader, HekaNativeReader) and hasattr(reader, '_last_pgf'):
+                    _pgf_data = reader._last_pgf
                 return _current_recording.to_dict()
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Error reading file: {e}")

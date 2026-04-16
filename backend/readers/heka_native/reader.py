@@ -23,6 +23,10 @@ from .pgf import parse_pgf, PgfStimulation, PgfChannel, PgfSegment, SegmentClass
 class HekaNativeReader(BaseReader):
     """Native HEKA PatchMaster .dat reader — no myokit dependency."""
 
+    def __init__(self):
+        self._last_pgf = None  # PgfRoot, stashed for per-sweep stimulus queries
+        self._last_pgf_stims: list = []  # flat list of PgfStimulation
+
     @staticmethod
     def can_read(file_path: str) -> bool:
         if not file_path.lower().endswith('.dat'):
@@ -64,6 +68,10 @@ class HekaNativeReader(BaseReader):
                 pgf_root = parse_pgf(data, pgf_tree)
             except Exception:
                 pgf_root = None
+
+        # Stash pgf for per-sweep stimulus queries
+        self._last_pgf = pgf_root
+        self._last_pgf_stims = pgf_root.stimulations if pgf_root else []
 
         recording = Recording(
             file_path=file_path,

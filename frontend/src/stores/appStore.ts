@@ -155,6 +155,10 @@ interface AppState {
   showOverlay: boolean
   showAverage: boolean
 
+  // Per-sweep stimulus segments (fetched on sweep change for overlay)
+  sweepStimulusSegments: StimulusSegment[] | null
+  sweepStimulusUnit: string
+
   // Cursors
   cursors: CursorPositions
   cursorVisibility: CursorVisibility
@@ -250,6 +254,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     fitStart: 0.01,
     fitEnd: 0.1,
   },
+
+  sweepStimulusSegments: null,
+  sweepStimulusUnit: '',
 
   cursorVisibility: { baseline: true, peak: true, fit: true },
   filter: { enabled: false, type: 'lowpass', lowCutoff: 1, highCutoff: 5000, order: 4 },
@@ -387,19 +394,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(patch)
 
     try {
-      const data = await apiFetch(
-        backendUrl,
-        `/api/traces/data?group=${group}&series=${series}&sweep=${sweep}&trace=${trace}&max_points=0`
-      )
-      set({
+      // Fetch trace data and per-sweep stimulus in parallel
+      const [traceResp, stimResp] = await Promise.all([
+        apiFetch(backendUrl, `/api/traces/data?group=${group}&series=${series}&sweep=${sweep}&trace=${trace}&max_points=0`),
+        apiFetch(backendUrl, `/api/traces/stimulus?group=${group}&series=${series}&sweep=${sweep}`).catch(() => null),
+      ])
+
+      const updates: Partial<AppState> = {
         traceData: {
-          time: new Float64Array(data.time),
-          values: new Float64Array(data.values),
-          samplingRate: data.sampling_rate,
-          units: data.units,
-          label: data.label,
+          time: new Float64Array(traceResp.time),
+          values: new Float64Array(traceResp.values),
+          samplingRate: traceResp.sampling_rate,
+          units: traceResp.units,
+          label: traceResp.label,
         },
-      })
+      }
+
+      if (stimResp && stimResp.segments?.length > 0) {
+        updates.sweepStimulusSegments = stimResp.segments
+        updates.sweepStimulusUnit = stimResp.unit || ''
+      } else {
+        updates.sweepStimulusSegments = null
+        updates.sweepStimulusUnit = ''
+      }
+
+      set(updates)
     } catch (err: any) {
       set({ error: err.message })
     }

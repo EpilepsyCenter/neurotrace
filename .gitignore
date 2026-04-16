@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+
+# Build output
+dist/
+dist-electron/
+build/
+backend-dist/
+*.dmg
+*.exe
+*.AppImage
+
+# Data files (too large for git)
+sample_data/
+*.dat
+*.abf
+*.h5
+*.nwb
+*.wcp
+
+# Local environment
+.env
+.env.local
+venv/
+.venv/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Electron user data / preferences
+preferences.json
+
+# Claude Code scratch
+.claude/
+.vite/

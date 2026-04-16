@@ -23,13 +23,14 @@ function cssVar(name: string): string {
 const CURSOR_DEFS: {
   startKey: keyof CursorPositions
   endKey: keyof CursorPositions
-  fillVar: string   // CSS variable name for fill color
-  lineVar: string   // CSS variable name for line color
+  fillVar: string
+  lineVar: string
   label: string
+  visKey: 'baseline' | 'peak' | 'fit'
 }[] = [
-  { startKey: 'baselineStart', endKey: 'baselineEnd', fillVar: '--cursor-baseline-fill', lineVar: '--cursor-baseline', label: 'BL' },
-  { startKey: 'peakStart', endKey: 'peakEnd', fillVar: '--cursor-peak-fill', lineVar: '--cursor-peak', label: 'PK' },
-  { startKey: 'fitStart', endKey: 'fitEnd', fillVar: '--cursor-fit-fill', lineVar: '--cursor-fit', label: 'FT' },
+  { startKey: 'baselineStart', endKey: 'baselineEnd', fillVar: '--cursor-baseline-fill', lineVar: '--cursor-baseline', label: 'BL', visKey: 'baseline' },
+  { startKey: 'peakStart', endKey: 'peakEnd', fillVar: '--cursor-peak-fill', lineVar: '--cursor-peak', label: 'PK', visKey: 'peak' },
+  { startKey: 'fitStart', endKey: 'fitEnd', fillVar: '--cursor-fit-fill', lineVar: '--cursor-fit', label: 'FT', visKey: 'fit' },
 ]
 
 const SNAP_PX = 8
@@ -44,6 +45,7 @@ export function TraceViewer() {
   // current values without needing to be recreated.
   const cursorsRef = useRef<CursorPositions>(useAppStore.getState().cursors)
   const showCursorsRef = useRef<boolean>(useAppStore.getState().showCursors)
+  const cursorVisRef = useRef(useAppStore.getState().cursorVisibility)
 
   const {
     traceData, cursors, setCursors,
@@ -52,6 +54,7 @@ export function TraceViewer() {
     zoomMode,
     showStimulusOverlay, toggleStimulusOverlay,
     showCursors,
+    cursorVisibility,
   } = useAppStore()
 
   // Current series' stimulus info, if any.
@@ -71,6 +74,7 @@ export function TraceViewer() {
   // Sync the refs every render
   cursorsRef.current = cursors
   showCursorsRef.current = showCursors
+  cursorVisRef.current = cursorVisibility
 
   const [hoverCursor, setHoverCursor] = useState<string>('')
 
@@ -108,11 +112,12 @@ export function TraceViewer() {
     const cur = cursorsRef.current
 
     for (const def of CURSOR_DEFS) {
+      // Skip individually hidden cursors
+      if (!cursorVisRef.current[def.visKey]) continue
+
       const startVal = cur[def.startKey]
       const endVal = cur[def.endKey]
 
-      // valToPos with 3rd arg = true returns canvas-pixel position.
-      // Divide by dpr to get CSS-pixel position for our overlay canvas.
       const x0 = u.valToPos(startVal, 'x', true) / dpr
       const x1 = u.valToPos(endVal, 'x', true) / dpr
 
@@ -348,7 +353,25 @@ export function TraceViewer() {
   // ================================================================
   useEffect(() => {
     drawCursors()
-  }, [cursors, showCursors])
+  }, [cursors, showCursors, cursorVisibility])
+
+  // ================================================================
+  // Listen for axis range commands from the CursorPanel
+  // ================================================================
+  useEffect(() => {
+    try {
+      const ch = new BroadcastChannel('neurotrace-axis-range')
+      ch.onmessage = (ev) => {
+        if (ev.data?.type === 'set-axis-range') {
+          const u = plotRef.current
+          if (!u) return
+          if (ev.data.x) u.setScale('x', { min: ev.data.x.min, max: ev.data.x.max })
+          if (ev.data.y) u.setScale('y', { min: ev.data.y.min, max: ev.data.y.max })
+        }
+      }
+      return () => ch.close()
+    } catch { /* ignore */ }
+  }, [])
 
   // ================================================================
   // Resize: keep uPlot and canvas in sync with container
@@ -401,8 +424,10 @@ export function TraceViewer() {
     // First pass: check edge snapping (highest priority)
     let bestEdge: DragEdge | null = null
     let bestDist = SNAP_PX
+    const vis = cursorVisRef.current
 
     for (const def of CURSOR_DEFS) {
+      if (!vis[def.visKey]) continue
       const x0 = u.valToPos(cur[def.startKey], 'x', true) / dpr
       const x1 = u.valToPos(cur[def.endKey], 'x', true) / dpr
       if (!isFinite(x0) || !isFinite(x1)) continue
@@ -417,6 +442,7 @@ export function TraceViewer() {
 
     // Second pass: check if inside a region
     for (const def of CURSOR_DEFS) {
+      if (!vis[def.visKey]) continue
       const x0 = u.valToPos(cur[def.startKey], 'x', true) / dpr
       const x1 = u.valToPos(cur[def.endKey], 'x', true) / dpr
       if (!isFinite(x0) || !isFinite(x1)) continue
@@ -561,55 +587,34 @@ export function TraceViewer() {
   // When the mouse hovers near the bottom (x-axis), left (y-axis), or right
   // (stim axis) edge of the plot, the wheel zooms that scale. Anywhere else,
   // we let the wheel scroll the page normally.
+  // Mouse wheel zoom:
+  //   Scroll         → zoom X axis (anchored at cursor position)
+  //   Option + scroll → zoom Y axis
+  //   Shift + scroll  → zoom Stimulus axis (if visible)
   const handleWheel = useCallback((e: React.WheelEvent) => {
     const u = plotRef.current
     if (!u || !containerRef.current || !traceData) return
 
-    const rect = containerRef.current.getBoundingClientRect()
-    const cssX = e.clientX - rect.left
-    const cssY = e.clientY - rect.top
-    const dpr = devicePixelRatio || 1
-    const bbox = u.bbox // canvas-pixel coords
-    const bboxLeft = bbox.left / dpr
-    const bboxTop = bbox.top / dpr
-    const bboxRight = (bbox.left + bbox.width) / dpr
-    const bboxBottom = (bbox.top + bbox.height) / dpr
-
-    const EDGE = 60 // px — "near the axis" tolerance
-
-    // Determine which axis, if any, the wheel targets.
-    // Priority: edges outside the plot bbox > inside-plot edges.
-    let key: 'x' | 'y' | 'stim' | null = null
-
-    const nearBottom = cssY > bboxBottom - EDGE && cssY < bboxBottom + EDGE * 1.5
-    const nearLeft = cssX > bboxLeft - EDGE * 1.5 && cssX < bboxLeft + EDGE
-    const hasStim = stimSeriesIdxRef.current != null
-    const nearRight = hasStim && cssX > bboxRight - EDGE && cssX < bboxRight + EDGE * 1.5
-
-    if (nearRight) key = 'stim'
-    else if (nearLeft) key = 'y'
-    else if (nearBottom) key = 'x'
-
-    if (key == null) return
-
     e.preventDefault()
-    // Factor: wheel up (deltaY < 0) → zoom in (factor < 1)
-    const factor = e.deltaY < 0 ? 0.85 : 1.176  // 1/0.85
+    const factor = e.deltaY < 0 ? 0.85 : 1.176
 
-    // For X axis, anchor the zoom on the current mouse X so it behaves like
-    // "zoom to the value under the cursor". For Y/stim axes, keep it simple
-    // and zoom around the current center.
-    if (key === 'x') {
-      // Convert CSS-pixel mouse position to X-axis value
-      const canvasPx = cssX * dpr
+    if (e.altKey) {
+      // Option/Alt + scroll → zoom Y
+      zoomScale('y', factor)
+    } else if (e.shiftKey && stimSeriesIdxRef.current != null) {
+      // Shift + scroll → zoom Stimulus axis
+      zoomScale('stim', factor)
+    } else {
+      // Default scroll → zoom X, anchored at mouse position
+      const rect = containerRef.current.getBoundingClientRect()
+      const cssPx = e.clientX - rect.left
+      const canvasPx = cssPx * (devicePixelRatio || 1)
       const val = u.posToVal(canvasPx, 'x')
       if (isFinite(val)) {
         zoomScaleAt('x', factor, val)
       } else {
         zoomScale('x', factor)
       }
-    } else {
-      zoomScale(key, factor)
     }
   }, [traceData])
 

@@ -147,17 +147,45 @@ class HekaNativeReader(BaseReader):
 
 
 def _extract_stimulus(stim: PgfStimulation, series_label: str) -> StimulusInfo | None:
-    """Extract a StimulusInfo from a PgfStimulation, using the first DA channel."""
+    """Extract a StimulusInfo from a PgfStimulation.
 
-    # Find the primary DA channel (the one that does write, with segments)
-    primary_ch: PgfChannel | None = None
-    for ch in stim.channels:
-        if ch.segments:
-            if primary_ch is None or ch.do_write:
-                primary_ch = ch
-
-    if primary_ch is None or not primary_ch.segments:
+    Tries all channels and picks the most informative one — the channel
+    whose sweep-0 segments show the most variation (i.e., has a clear pulse
+    or step). This handles multi-channel protocols like LTP where the
+    stimulator trigger is on channel 1 but the amplifier command (channel 0)
+    is flat.
+    """
+    if not stim.channels:
         return None
+
+    # Score each channel: prefer the one with the largest voltage range at sweep 0
+    best_ch: PgfChannel | None = None
+    best_range = 0.0
+
+    for ch in stim.channels:
+        if not ch.segments:
+            continue
+        levels = [seg.voltage_at_sweep(0) for seg in ch.segments]
+        if not levels:
+            continue
+        v_range = max(abs(v) for v in levels) if levels else 0
+        # Bonus for channels that actually write data
+        score = v_range * (2.0 if ch.do_write else 1.0)
+        if score > best_range or best_ch is None:
+            best_range = score
+            best_ch = ch
+
+    if best_ch is None:
+        # Fall back to the first channel with segments
+        for ch in stim.channels:
+            if ch.segments:
+                best_ch = ch
+                break
+
+    if best_ch is None or not best_ch.segments:
+        return None
+
+    primary_ch = best_ch
 
     # Determine the unit and scale factor.
     # Segment values are in SI (V for VC, A for CC) and are RELATIVE to

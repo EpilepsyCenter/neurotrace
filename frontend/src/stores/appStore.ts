@@ -68,6 +68,20 @@ export interface CursorPositions {
   fitEnd: number
 }
 
+export interface CursorVisibility {
+  baseline: boolean
+  peak: boolean
+  fit: boolean
+}
+
+export interface FilterState {
+  enabled: boolean
+  type: 'lowpass' | 'highpass' | 'bandpass'
+  lowCutoff: number   // Hz
+  highCutoff: number  // Hz
+  order: number
+}
+
 export interface MeasurementResult {
   sweepIndex: number
   seriesIndex: number
@@ -143,6 +157,10 @@ interface AppState {
 
   // Cursors
   cursors: CursorPositions
+  cursorVisibility: CursorVisibility
+
+  // Filtering
+  filter: FilterState
 
   // Measurements
   results: MeasurementResult[]
@@ -163,6 +181,9 @@ interface AppState {
   toggleStimulusOverlay: () => void
   toggleCursors: () => void
   resetCursorsToDefaults: () => void
+  setCursorVisibility: (v: Partial<CursorVisibility>) => void
+  setFilter: (f: Partial<FilterState>) => void
+  applyFilter: () => Promise<void>
   openFile: (filePath: string) => Promise<void>
   selectSweep: (group: number, series: number, sweep: number, trace?: number) => Promise<void>
   setCursors: (cursors: Partial<CursorPositions>) => void
@@ -230,6 +251,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     fitEnd: 0.1,
   },
 
+  cursorVisibility: { baseline: true, peak: true, fit: true },
+  filter: { enabled: false, type: 'lowpass', lowCutoff: 1, highCutoff: 5000, order: 4 },
+
   results: [],
   resistanceResult: null,
   resistanceMonitor: null,
@@ -257,6 +281,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         fitEnd: 0.8 * duration,
       },
     })
+  },
+
+  setCursorVisibility: (v) =>
+    set((s) => ({ cursorVisibility: { ...s.cursorVisibility, ...v } })),
+
+  setFilter: (f) =>
+    set((s) => ({ filter: { ...s.filter, ...f } })),
+
+  applyFilter: async () => {
+    const { backendUrl, traceData, filter } = get()
+    if (!traceData || !filter.enabled || !backendUrl) return
+    // Filtering is applied server-side — the trace viewer will re-fetch
+    // with filter params. For now, just trigger a re-render.
+    // TODO: implement server-side filtering endpoint
   },
 
   initBackend: async () => {

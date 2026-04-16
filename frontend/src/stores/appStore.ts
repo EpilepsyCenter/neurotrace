@@ -166,6 +166,12 @@ interface AppState {
   // Filtering
   filter: FilterState
 
+  // Zero offset subtraction
+  zeroOffset: boolean
+
+  // Per-series axis ranges (saved when switching away, restored when switching back)
+  seriesAxisRanges: Record<string, { x?: { min: number; max: number }; y?: { min: number; max: number } }>
+
   // Measurements
   results: MeasurementResult[]
 
@@ -188,6 +194,9 @@ interface AppState {
   setCursorVisibility: (v: Partial<CursorVisibility>) => void
   setFilter: (f: Partial<FilterState>) => void
   applyFilter: () => Promise<void>
+  toggleZeroOffset: () => void
+  saveSeriesAxisRange: (group: number, series: number, ranges: { x?: { min: number; max: number }; y?: { min: number; max: number } }) => void
+  getSeriesAxisRange: (group: number, series: number) => { x?: { min: number; max: number }; y?: { min: number; max: number } } | null
   openFile: (filePath: string) => Promise<void>
   selectSweep: (group: number, series: number, sweep: number, trace?: number) => Promise<void>
   setCursors: (cursors: Partial<CursorPositions>) => void
@@ -217,6 +226,25 @@ const OVERLAY_COLORS = [
   '#4dd0e1', '#aed581', '#ffd54f', '#ff8a65', '#ce93d8',
   '#4fc3f7', '#a5d6a7', '#fff176', '#ef9a9a', '#b39ddb',
 ]
+
+/** Build the query string for trace data, including filter params if enabled. */
+function traceDataUrl(
+  group: number, series: number, sweep: number, trace: number,
+  filter: FilterState,
+): string {
+  let url = `/api/traces/data?group=${group}&series=${series}&sweep=${sweep}&trace=${trace}&max_points=0`
+  if (filter.enabled) {
+    url += `&filter_type=${filter.type}`
+    if (filter.type === 'lowpass' || filter.type === 'bandpass') {
+      url += `&filter_high=${filter.highCutoff}`
+    }
+    if (filter.type === 'highpass' || filter.type === 'bandpass') {
+      url += `&filter_low=${filter.lowCutoff}`
+    }
+    url += `&filter_order=${filter.order}`
+  }
+  return url
+}
 
 async function apiFetch(backendUrl: string, path: string, options?: RequestInit) {
   const resp = await fetch(`${backendUrl}${path}`, {
@@ -260,6 +288,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   cursorVisibility: { baseline: true, peak: true, fit: true },
   filter: { enabled: false, type: 'lowpass', lowCutoff: 1, highCutoff: 5000, order: 4 },
+  zeroOffset: false,
+  seriesAxisRanges: {},
 
   results: [],
   resistanceResult: null,
@@ -293,15 +323,47 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCursorVisibility: (v) =>
     set((s) => ({ cursorVisibility: { ...s.cursorVisibility, ...v } })),
 
-  setFilter: (f) =>
-    set((s) => ({ filter: { ...s.filter, ...f } })),
+  setFilter: (f) => {
+    set((s) => ({ filter: { ...s.filter, ...f } }))
+    // Re-fetch the current trace with updated filter params
+    const state = get()
+    if (state.traceData && state.backendUrl) {
+      const { backendUrl, currentGroup, currentSeries, currentSweep, currentTrace, filter } = state
+      apiFetch(backendUrl, traceDataUrl(currentGroup, currentSeries, currentSweep, currentTrace, filter))
+        .then((data) => {
+          set({
+            traceData: {
+              time: new Float64Array(data.time),
+              values: new Float64Array(data.values),
+              samplingRate: data.sampling_rate,
+              units: data.units,
+              label: data.label,
+            },
+          })
+        })
+        .catch(() => { /* ignore */ })
+    }
+  },
 
   applyFilter: async () => {
-    const { backendUrl, traceData, filter } = get()
-    if (!traceData || !filter.enabled || !backendUrl) return
-    // Filtering is applied server-side — the trace viewer will re-fetch
-    // with filter params. For now, just trigger a re-render.
-    // TODO: implement server-side filtering endpoint
+    const state = get()
+    if (state.backendUrl) {
+      state.selectSweep(state.currentGroup, state.currentSeries, state.currentSweep, state.currentTrace)
+    }
+  },
+
+  toggleZeroOffset: () => set((s) => ({ zeroOffset: !s.zeroOffset })),
+
+  saveSeriesAxisRange: (group, series, ranges) => {
+    const key = `${group}:${series}`
+    set((s) => ({
+      seriesAxisRanges: { ...s.seriesAxisRanges, [key]: ranges },
+    }))
+  },
+
+  getSeriesAxisRange: (group, series) => {
+    const key = `${group}:${series}`
+    return get().seriesAxisRanges[key] ?? null
   },
 
   initBackend: async () => {
@@ -395,8 +457,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       // Fetch trace data and per-sweep stimulus in parallel
+      const { filter } = get()
       const [traceResp, stimResp] = await Promise.all([
-        apiFetch(backendUrl, `/api/traces/data?group=${group}&series=${series}&sweep=${sweep}&trace=${trace}&max_points=0`),
+        apiFetch(backendUrl, traceDataUrl(group, series, sweep, trace, filter)),
         apiFetch(backendUrl, `/api/traces/stimulus?group=${group}&series=${series}&sweep=${sweep}`).catch(() => null),
       ])
 
@@ -441,12 +504,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleAverage: () => set((s) => ({ showAverage: !s.showAverage })),
 
   addOverlaySweep: async (sweep: number) => {
-    const { backendUrl, currentGroup, currentSeries, currentTrace, overlayEntries } = get()
+    const { backendUrl, currentGroup, currentSeries, currentTrace, overlayEntries, filter } = get()
     if (overlayEntries.some((e) => e.sweep === sweep)) return
     try {
       const data = await apiFetch(
         backendUrl,
-        `/api/traces/data?group=${currentGroup}&series=${currentSeries}&sweep=${sweep}&trace=${currentTrace}&max_points=0`
+        traceDataUrl(currentGroup, currentSeries, sweep, currentTrace, filter)
       )
       const color = OVERLAY_COLORS[overlayEntries.length % OVERLAY_COLORS.length]
       set({
@@ -477,7 +540,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearOverlays: () => set({ overlayEntries: [], showOverlay: false }),
 
   overlayAllSweeps: async () => {
-    const { recording, currentGroup, currentSeries, currentTrace, backendUrl } = get()
+    const { recording, currentGroup, currentSeries, currentTrace, backendUrl, filter } = get()
     if (!recording) return
     const ser = recording.groups[currentGroup]?.series[currentSeries]
     if (!ser) return
@@ -488,7 +551,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         const data = await apiFetch(
           backendUrl,
-          `/api/traces/data?group=${currentGroup}&series=${currentSeries}&sweep=${i}&trace=${currentTrace}&max_points=0`
+          traceDataUrl(currentGroup, currentSeries, i, currentTrace, filter)
         )
         entries.push({
           sweep: i,

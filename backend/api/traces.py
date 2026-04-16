@@ -57,11 +57,16 @@ async def get_trace_data(
     sweep: int = Query(0),
     trace: int = Query(0),
     max_points: int = Query(10000, description="Max points for downsampling (0 = no downsampling)"),
+    filter_type: str = Query("", description="Filter type: lowpass, highpass, bandpass, or empty for none"),
+    filter_low: float = Query(0, description="Low cutoff frequency (Hz) for highpass/bandpass"),
+    filter_high: float = Query(0, description="High cutoff frequency (Hz) for lowpass/bandpass"),
+    filter_order: int = Query(4, description="Butterworth filter order"),
 ):
-    """Get trace data, optionally downsampled for display."""
+    """Get trace data, optionally filtered and downsampled for display."""
+    from utils.filters import lowpass_filter, highpass_filter, bandpass_filter
+
     rec = get_current_recording()
 
-    # Validate indices
     if group >= rec.group_count:
         raise HTTPException(status_code=400, detail=f"Group index {group} out of range (max {rec.group_count - 1})")
     grp = rec.groups[group]
@@ -79,7 +84,20 @@ async def get_trace_data(
     tr = sw.traces[trace]
 
     time = tr.time_array
-    values = tr.data
+    values = tr.data.copy()  # copy so filtering doesn't modify the cached original
+
+    # Apply filter if requested
+    if filter_type and filter_type != "none":
+        sr = tr.sampling_rate
+        try:
+            if filter_type == "lowpass" and filter_high > 0:
+                values = lowpass_filter(values, filter_high, sr, filter_order)
+            elif filter_type == "highpass" and filter_low > 0:
+                values = highpass_filter(values, filter_low, sr, filter_order)
+            elif filter_type == "bandpass" and filter_low > 0 and filter_high > 0:
+                values = bandpass_filter(values, filter_low, filter_high, sr, filter_order)
+        except Exception:
+            pass  # if filter fails (bad params), return unfiltered
 
     # Downsample if needed
     if max_points > 0 and len(values) > max_points:
@@ -93,6 +111,7 @@ async def get_trace_data(
         "label": tr.label,
         "n_samples": len(tr.data),
         "duration": tr.duration,
+        "filtered": bool(filter_type),
     }
 
 

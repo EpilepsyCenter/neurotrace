@@ -99,6 +99,7 @@ export function CursorPanel() {
     showCursors, toggleCursors, resetCursorsToDefaults,
     cursorVisibility, setCursorVisibility,
     filter, setFilter,
+    zeroOffset, toggleZeroOffset,
   } = useAppStore()
 
   const measurements = useMemo(() => {
@@ -248,6 +249,19 @@ export function CursorPanel() {
         <button className="btn" onClick={applyAxisRange} style={{ width: '100%', fontSize: 'var(--font-size-xs)' }}>
           Apply ranges
         </button>
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 5, marginTop: 6,
+          cursor: 'pointer', userSelect: 'none', fontSize: 'var(--font-size-xs)',
+        }}>
+          <input type="checkbox" checked={zeroOffset} onChange={toggleZeroOffset}
+            style={{ margin: 0 }} />
+          Subtract zero offset
+        </label>
+        {zeroOffset && (
+          <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 2 }}>
+            Baseline (first 3 ms) subtracted — traces start at 0
+          </p>
+        )}
       </Section>
 
       {/* ---- Filter ---- */}

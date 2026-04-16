@@ -9,10 +9,11 @@ type DragEdge =
   | 'peakStart' | 'peakEnd'
   | 'fitStart' | 'fitEnd'
 
-/** What we're dragging: a single edge, or an entire region */
+/** What we're dragging: a single edge, an entire region, or panning the view */
 type DragTarget =
   | { kind: 'edge'; key: DragEdge }
   | { kind: 'region'; startKey: DragEdge; endKey: DragEdge; anchorVal: number; origStart: number; origEnd: number }
+  | { kind: 'pan'; lastClientX: number; lastClientY: number }
   | null
 
 /** Reads a CSS custom property from :root computed style */
@@ -57,6 +58,7 @@ export function TraceViewer() {
     cursorVisibility,
     sweepStimulusSegments,
     sweepStimulusUnit,
+    zeroOffset,
   } = useAppStore()
 
   // Current series' stimulus info, if any.
@@ -167,8 +169,24 @@ export function TraceViewer() {
     const columns: number[][] = [time]
     const seriesOpts: uPlot.Series[] = [{}]
 
-    // Primary trace
-    columns.push(Array.from(traceData.values))
+    // Compute zero offset from the first ~3ms of the trace (if enabled)
+    let offset = 0
+    if (zeroOffset && traceData.values.length > 0) {
+      const nSamples = Math.max(1, Math.min(
+        Math.round(0.003 * traceData.samplingRate),  // 3ms
+        traceData.values.length
+      ))
+      let sum = 0
+      for (let i = 0; i < nSamples; i++) sum += traceData.values[i]
+      offset = sum / nSamples
+    }
+
+    // Primary trace (with optional zero offset subtraction)
+    const primaryVals = Array.from(traceData.values)
+    if (offset !== 0) {
+      for (let i = 0; i < primaryVals.length; i++) primaryVals[i] -= offset
+    }
+    columns.push(primaryVals)
     seriesOpts.push({
       label: traceData.label || 'Trace',
       stroke: cssVar('--trace-color-1'),
@@ -176,12 +194,19 @@ export function TraceViewer() {
       scale: 'y',
     })
 
-    // Overlay sweeps
+    // Overlay sweeps (each gets its own zero offset if enabled)
     if (showOverlay && overlayEntries.length > 0) {
       for (const entry of overlayEntries) {
         const vals = new Array(time.length)
         const src = entry.data.values
-        for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] : null
+        // Compute per-sweep offset for overlay traces
+        let ovrOffset = 0
+        if (zeroOffset && src.length > 0) {
+          const n = Math.max(1, Math.min(Math.round(0.003 * entry.data.samplingRate), src.length))
+          let s = 0; for (let j = 0; j < n; j++) s += src[j]
+          ovrOffset = s / n
+        }
+        for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] - ovrOffset : null
         columns.push(vals)
         seriesOpts.push({
           label: entry.data.label,
@@ -252,13 +277,35 @@ export function TraceViewer() {
     }
 
     return { data: columns as unknown as uPlot.AlignedData, seriesOpts, stimIdx }
-  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus, sweepStimulusSegments])
+  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus, sweepStimulusSegments, zeroOffset])
 
   // ================================================================
+  // Track which series we last built the plot for, so we can save/restore ranges
+  const lastSeriesRef = useRef<string | null>(null)
+  const currentGroup = useAppStore((s) => s.currentGroup)
+  const currentSeries = useAppStore((s) => s.currentSeries)
+  const saveSeriesAxisRange = useAppStore((s) => s.saveSeriesAxisRange)
+  const getSeriesAxisRange = useAppStore((s) => s.getSeriesAxisRange)
+
   // Create / recreate uPlot when data or overlays change
   // ================================================================
   useEffect(() => {
     if (!containerRef.current || !traceData) return
+
+    // Save the current axis ranges before tearing down
+    const prevKey = lastSeriesRef.current
+    if (plotRef.current && prevKey) {
+      const u = plotRef.current
+      const xs = u.scales.x
+      const ys = u.scales.y
+      const ranges: any = {}
+      if (xs && xs.min != null && xs.max != null) ranges.x = { min: xs.min, max: xs.max }
+      if (ys && ys.min != null && ys.max != null) ranges.y = { min: ys.min, max: ys.max }
+      const [pg, ps] = prevKey.split(':').map(Number)
+      saveSeriesAxisRange(pg, ps, ranges)
+    }
+
+    lastSeriesRef.current = `${currentGroup}:${currentSeries}`
 
     // Tear down previous instance
     if (plotRef.current) {
@@ -357,10 +404,44 @@ export function TraceViewer() {
     }
 
     plotRef.current = new uPlot(opts, data, container)
+
+    // Restore saved axis ranges for this series (if any)
+    // Restore saved axis ranges — but if zero offset is on, center Y on 0
+    const savedRanges = getSeriesAxisRange(currentGroup, currentSeries)
+    if (zeroOffset) {
+      // Find the max absolute deviation in the offset-subtracted primary trace
+      const primaryData = data[1] as number[] | undefined
+      if (primaryData && primaryData.length > 0) {
+        let maxAbs = 0
+        for (const v of primaryData) {
+          if (v != null && isFinite(v)) {
+            const a = Math.abs(v)
+            if (a > maxAbs) maxAbs = a
+          }
+        }
+        const pad = maxAbs * 1.1 || 1
+        plotRef.current.setScale('y', { min: -pad, max: pad })
+      }
+      if (savedRanges?.x) plotRef.current.setScale('x', savedRanges.x)
+    } else if (savedRanges) {
+      if (savedRanges.x) plotRef.current.setScale('x', savedRanges.x)
+      if (savedRanges.y) plotRef.current.setScale('y', savedRanges.y)
+    }
+
     drawCursors()
 
     // Cleanup on unmount or before next recreation
     return () => {
+      // Save ranges before cleanup
+      const u = plotRef.current
+      if (u) {
+        const xs = u.scales.x
+        const ys = u.scales.y
+        const ranges: any = {}
+        if (xs && xs.min != null && xs.max != null) ranges.x = { min: xs.min, max: xs.max }
+        if (ys && ys.min != null && ys.max != null) ranges.y = { min: ys.min, max: ys.max }
+        saveSeriesAxisRange(currentGroup, currentSeries, ranges)
+      }
       plotRef.current?.destroy()
       plotRef.current = null
     }
@@ -478,47 +559,79 @@ export function TraceViewer() {
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return
+
     const hit = hitTest(e.clientX)
-    if (!hit) return
 
-    e.preventDefault()
-    e.stopPropagation()
+    if (hit) {
+      e.preventDefault()
+      e.stopPropagation()
 
-    if (hit.type === 'edge') {
-      dragRef.current = { kind: 'edge', key: hit.key }
-    } else {
-      // Region drag: record anchor position and original start/end values
-      const val = valFromClientX(e.clientX)
-      if (val === null) return
-      const cur = cursorsRef.current
-      dragRef.current = {
-        kind: 'region',
-        startKey: hit.def.startKey as DragEdge,
-        endKey: hit.def.endKey as DragEdge,
-        anchorVal: val,
-        origStart: cur[hit.def.startKey],
-        origEnd: cur[hit.def.endKey],
+      if (hit.type === 'edge') {
+        dragRef.current = { kind: 'edge', key: hit.key }
+      } else {
+        const val = valFromClientX(e.clientX)
+        if (val === null) return
+        const cur = cursorsRef.current
+        dragRef.current = {
+          kind: 'region',
+          startKey: hit.def.startKey as DragEdge,
+          endKey: hit.def.endKey as DragEdge,
+          anchorVal: val,
+          origStart: cur[hit.def.startKey],
+          origEnd: cur[hit.def.endKey],
+        }
       }
+    } else if (!zoomMode) {
+      // No cursor hit and zoom mode is off — start panning the view.
+      // When zoom mode is on, let uPlot handle the drag-to-zoom instead.
+      e.preventDefault()
+      dragRef.current = { kind: 'pan', lastClientX: e.clientX, lastClientY: e.clientY }
     }
   }
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const drag = dragRef.current
     if (drag) {
-      const val = valFromClientX(e.clientX)
-      if (val === null) return
-
       if (drag.kind === 'edge') {
-        setCursors({ [drag.key]: Math.max(0, val) })
-      } else {
-        // Region drag: shift both ends by the same delta
-        const delta = val - drag.anchorVal
-        const newStart = Math.max(0, drag.origStart + delta)
-        const newEnd = Math.max(0, drag.origEnd + delta)
-        setCursors({ [drag.startKey]: newStart, [drag.endKey]: newEnd })
+        const val = valFromClientX(e.clientX)
+        if (val !== null) setCursors({ [drag.key]: Math.max(0, val) })
+      } else if (drag.kind === 'region') {
+        const val = valFromClientX(e.clientX)
+        if (val !== null) {
+          const delta = val - drag.anchorVal
+          setCursors({ [drag.startKey]: Math.max(0, drag.origStart + delta), [drag.endKey]: Math.max(0, drag.origEnd + delta) })
+        }
+      } else if (drag.kind === 'pan') {
+        // Pan: convert pixel delta to axis value delta and shift both scales
+        const u = plotRef.current
+        if (u && containerRef.current) {
+          const dpr = devicePixelRatio || 1
+          const dxPx = (e.clientX - drag.lastClientX) * dpr
+          const dyPx = (e.clientY - drag.lastClientY) * dpr
+
+          // X pan: convert pixel delta to value delta
+          const xScale = u.scales.x
+          if (xScale && xScale.min != null && xScale.max != null) {
+            const plotW = u.bbox.width
+            const xRange = xScale.max - xScale.min
+            const dxVal = -(dxPx / plotW) * xRange
+            u.setScale('x', { min: xScale.min + dxVal, max: xScale.max + dxVal })
+          }
+
+          // Y pan
+          const yScale = u.scales.y
+          if (yScale && yScale.min != null && yScale.max != null) {
+            const plotH = u.bbox.height
+            const yRange = yScale.max - yScale.min
+            const dyVal = (dyPx / plotH) * yRange  // positive dy = move up = decrease values shown
+            u.setScale('y', { min: yScale.min + dyVal, max: yScale.max + dyVal })
+          }
+
+          drag.lastClientX = e.clientX
+          drag.lastClientY = e.clientY
+        }
       }
     } else {
-      // Update hover cursor style
       const hit = hitTest(e.clientX)
       let cur = ''
       if (hit?.type === 'edge') cur = 'col-resize'
@@ -751,7 +864,8 @@ export function TraceViewer() {
           position: 'relative',
           overflow: 'hidden',
           cursor: traceData
-            ? (dragRef.current?.kind === 'region' ? 'grabbing'
+            ? (dragRef.current?.kind === 'pan' ? 'move'
+               : dragRef.current?.kind === 'region' ? 'grabbing'
                : dragRef.current?.kind === 'edge' ? 'col-resize'
                : hoverCursor || undefined)
             : undefined,

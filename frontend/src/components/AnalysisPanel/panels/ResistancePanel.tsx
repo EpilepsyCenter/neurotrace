@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useAppStore } from '../../../stores/appStore'
+import { NumInput } from '../../common/NumInput'
 
 type RunMode = 'single' | 'averaged' | 'monitor'
 
@@ -130,11 +131,10 @@ export function ResistancePanel() {
           )}
         </label>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input
-            type="number"
+          <NumInput
             value={vStep}
             step={1}
-            onChange={(e) => onChangeVStep(parseFloat(e.target.value) || 0)}
+            onChange={onChangeVStep}
             style={{ flex: 1 }}
           />
           <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>mV</span>
@@ -200,21 +200,21 @@ export function ResistancePanel() {
           border: '1px solid var(--border)',
         }}>
           <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>sweeps</span>
-          <input
-            type="number"
+          <NumInput
             value={avgFrom}
             min={1}
             max={totalSweeps}
-            onChange={(e) => setAvgFrom(parseInt(e.target.value) || 1)}
+            step={1}
+            onChange={(v) => setAvgFrom(Math.max(1, Math.round(v)))}
             style={{ width: 48 }}
           />
           <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>–</span>
-          <input
-            type="number"
+          <NumInput
             value={avgTo}
             min={1}
             max={totalSweeps}
-            onChange={(e) => setAvgTo(parseInt(e.target.value) || 1)}
+            step={1}
+            onChange={(v) => setAvgTo(Math.max(1, Math.round(v)))}
             style={{ width: 48 }}
           />
         </div>

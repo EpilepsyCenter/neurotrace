@@ -3,6 +3,7 @@ import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { CursorPositions, StimulusInfo } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
+import { NumInput } from '../common/NumInput'
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -377,7 +378,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
             <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>
               V<sub>step</sub> (mV) {stimulus && <span style={{ color: 'var(--accent)' }}>auto</span>}
             </label>
-            <input type="number" value={vStep} step={1} onChange={(e) => setVStep(parseFloat(e.target.value) || 0)} style={{ width: 65 }} />
+            <NumInput value={vStep} step={1} onChange={setVStep} style={{ width: 65 }} />
           </div>
           <div>
             <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>Exp fit</label>
@@ -388,7 +389,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
           </div>
           <div>
             <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>Fit (ms)</label>
-            <input type="number" value={fitDurationMs} step={0.5} min={0.5} max={50} onChange={(e) => setFitDurationMs(parseFloat(e.target.value) || 5)} style={{ width: 55 }} />
+            <NumInput value={fitDurationMs} step={0.5} min={0.5} max={50} onChange={setFitDurationMs} style={{ width: 55 }} />
           </div>
           <div style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', background: 'var(--bg-primary)', padding: '3px 6px', borderRadius: 3, border: '1px solid var(--border)', lineHeight: 1.5 }}>
             BL: {cursors.baselineStart.toFixed(3)}→{cursors.baselineEnd.toFixed(3)}s
@@ -401,9 +402,9 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
           <button className="btn btn-primary" onClick={() => runSingle(currentSweep)} disabled={loading || totalSweeps === 0}>
             {loading ? 'Running…' : `Sweep ${currentSweep + 1}`}
           </button>
-          <input type="number" value={avgFrom} min={1} max={totalSweeps} onChange={(e) => setAvgFrom(parseInt(e.target.value) || 1)} style={{ width: 42 }} />
+          <NumInput value={avgFrom} min={1} max={totalSweeps} step={1} onChange={(v) => setAvgFrom(Math.max(1, Math.round(v)))} style={{ width: 42 }} />
           <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>–</span>
-          <input type="number" value={avgTo} min={1} max={totalSweeps} onChange={(e) => setAvgTo(parseInt(e.target.value) || 1)} style={{ width: 42 }} />
+          <NumInput value={avgTo} min={1} max={totalSweeps} step={1} onChange={(v) => setAvgTo(Math.max(1, Math.round(v)))} style={{ width: 42 }} />
           <button className="btn" onClick={runAveraged} disabled={loading || totalSweeps === 0}>Averaged</button>
           <button className="btn" onClick={runAllSweeps} disabled={loading || totalSweeps === 0}>All sweeps</button>
           {measurements.length > 0 && (

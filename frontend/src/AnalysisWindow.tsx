@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useThemeStore } from './stores/themeStore'
-import { CursorPositions } from './stores/appStore'
+import { CursorPositions, useAppStore } from './stores/appStore'
 import { ResistanceWindow } from './components/AnalysisWindows/ResistanceWindow'
+import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -34,6 +35,12 @@ export function AnalysisWindow({ view }: { view: string }) {
     fitEnd: 0.1,
   })
   const [currentSweep, setCurrentSweep] = useState(0)
+  // Current tree selection mirrored from the main window, so analysis
+  // windows can preselect the right group/series/trace without the user
+  // having to pick it again.
+  const [mainGroup, setMainGroup] = useState<number | null>(null)
+  const [mainSeries, setMainSeries] = useState<number | null>(null)
+  const [mainTrace, setMainTrace] = useState<number | null>(null)
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
 
@@ -45,6 +52,13 @@ export function AnalysisWindow({ view }: { view: string }) {
         ? await window.electronAPI.getBackendUrl()
         : 'http://localhost:8321'
       setBackendUrl(url)
+      // The analysis window runs in a separate Electron BrowserWindow with
+      // its own Zustand store instance. Inject the backend URL into that
+      // store so any store actions the analysis components call (e.g. the
+      // burst-detection actions on `useAppStore`) build absolute URLs — if
+      // we skip this the relative "/api/..." path falls back to the Vite
+      // dev-server origin and you get a 404 "Not Found".
+      useAppStore.setState({ backendUrl: url, backendReady: true })
 
       // Wait for backend
       for (let i = 0; i < 60; i++) {
@@ -88,9 +102,20 @@ export function AnalysisWindow({ view }: { view: string }) {
         if (ev.data?.type === 'sweep-update' && ev.data.sweep != null) {
           setCurrentSweep(ev.data.sweep)
         }
+        if (ev.data?.type === 'selection-update') {
+          if (ev.data.group != null) setMainGroup(ev.data.group)
+          if (ev.data.series != null) setMainSeries(ev.data.series)
+          if (ev.data.trace != null) setMainTrace(ev.data.trace)
+        }
         if (ev.data?.type === 'state-update') {
           if (ev.data.cursors) setCursors(ev.data.cursors)
           if (ev.data.sweep != null) setCurrentSweep(ev.data.sweep)
+          if (ev.data.group != null) setMainGroup(ev.data.group)
+          if (ev.data.series != null) setMainSeries(ev.data.series)
+          if (ev.data.trace != null) setMainTrace(ev.data.trace)
+          if (ev.data.fieldBursts) {
+            useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
+          }
         }
       }
 
@@ -161,6 +186,15 @@ export function AnalysisWindow({ view }: { view: string }) {
             fileInfo={fileInfo}
             cursors={cursors}
             currentSweep={currentSweep}
+          />
+        ) : view === 'bursts' ? (
+          <FieldBurstWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            currentSweep={currentSweep}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
           />
         ) : (
           <div style={{

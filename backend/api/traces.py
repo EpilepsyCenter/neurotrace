@@ -57,12 +57,20 @@ async def get_trace_data(
     sweep: int = Query(0),
     trace: int = Query(0),
     max_points: int = Query(10000, description="Max points for downsampling (0 = no downsampling)"),
+    t_start: Optional[float] = Query(None, description="Window start time in seconds (None = from beginning)"),
+    t_end: Optional[float] = Query(None, description="Window end time in seconds (None = to end)"),
     filter_type: str = Query("", description="Filter type: lowpass, highpass, bandpass, or empty for none"),
     filter_low: float = Query(0, description="Low cutoff frequency (Hz) for highpass/bandpass"),
     filter_high: float = Query(0, description="High cutoff frequency (Hz) for lowpass/bandpass"),
     filter_order: int = Query(4, description="Butterworth filter order"),
+    zero_offset: bool = Query(False, description="Subtract baseline computed from first ~3ms of the full sweep (post-filter, pre-slice)"),
+    zero_offset_ms: float = Query(3.0, description="Window (ms) at the start of the sweep used to compute the zero offset"),
 ):
-    """Get trace data, optionally filtered and downsampled for display."""
+    """Get trace data, optionally filtered, windowed, and downsampled for display.
+
+    Filtering is applied on the full trace first, then the [t_start, t_end]
+    window is sliced, then the slice is decimated to at most ``max_points``.
+    """
     from utils.filters import lowpass_filter, highpass_filter, bandpass_filter
 
     rec = get_current_recording()
@@ -83,35 +91,106 @@ async def get_trace_data(
         raise HTTPException(status_code=400, detail=f"Trace index {trace} out of range (max {sw.trace_count - 1})")
     tr = sw.traces[trace]
 
-    time = tr.time_array
-    values = tr.data.copy()  # copy so filtering doesn't modify the cached original
+    time_full = tr.time_array
+    data_full = tr.data
+    sr = tr.sampling_rate
+    original_n = len(data_full)
 
-    # Apply filter if requested
-    if filter_type and filter_type != "none":
-        sr = tr.sampling_rate
+    # Compute slice indices first — this lets us avoid copying the whole trace
+    # when no filter is applied, which is the common case for long sweeps.
+    want_window = t_start is not None or t_end is not None
+    if want_window:
+        i0 = max(0, int((t_start or 0.0) * sr))
+        i1 = original_n if t_end is None else min(original_n, int(t_end * sr) + 1)
+    else:
+        i0, i1 = 0, original_n
+
+    if i1 <= i0:
+        return {
+            "time": [],
+            "values": [],
+            "sampling_rate": sr,
+            "units": tr.units,
+            "label": tr.label,
+            "n_samples": original_n,
+            "duration": tr.duration,
+            "filtered": bool(filter_type),
+            "window": {"t_start": t_start, "t_end": t_end},
+            "decimated": False,
+            "returned_n": 0,
+        }
+
+    want_filter = (
+        filter_type
+        and filter_type != "none"
+        and (
+            (filter_type == "lowpass" and filter_high > 0)
+            or (filter_type == "highpass" and filter_low > 0)
+            or (filter_type == "bandpass" and filter_low > 0 and filter_high > 0)
+        )
+    )
+
+    if want_filter:
+        # Filter the FULL trace first so viewport edges match full-view values.
+        # We must copy here (filter mutates) — unavoidable for correctness.
+        values_full = data_full.copy()
         try:
-            if filter_type == "lowpass" and filter_high > 0:
-                values = lowpass_filter(values, filter_high, sr, filter_order)
-            elif filter_type == "highpass" and filter_low > 0:
-                values = highpass_filter(values, filter_low, sr, filter_order)
-            elif filter_type == "bandpass" and filter_low > 0 and filter_high > 0:
-                values = bandpass_filter(values, filter_low, filter_high, sr, filter_order)
+            if filter_type == "lowpass":
+                values_full = lowpass_filter(values_full, filter_high, sr, filter_order)
+            elif filter_type == "highpass":
+                values_full = highpass_filter(values_full, filter_low, sr, filter_order)
+            elif filter_type == "bandpass":
+                values_full = bandpass_filter(values_full, filter_low, filter_high, sr, filter_order)
         except Exception:
-            pass  # if filter fails (bad params), return unfiltered
+            values_full = data_full  # fall back silently on bad params
+    else:
+        # No filter — we work off a view unless we need to apply zero offset
+        # (which would mutate and must stay confined to our local array).
+        values_full = data_full
+
+    # Compute zero offset from the FIRST few ms of the full (filtered) sweep,
+    # then subtract. This ensures offset is per-SWEEP, independent of where
+    # the viewport is currently positioned.
+    offset = 0.0
+    if zero_offset:
+        n_baseline = max(1, min(int(zero_offset_ms * 1e-3 * sr), original_n))
+        offset = float(np.mean(values_full[:n_baseline]))
+        if offset != 0.0:
+            # Subtract only into the slice we're returning, not the cached
+            # full trace. If values_full is still a view of data_full (unfiltered
+            # path), take a sliced copy; if it's already our filter-output
+            # array, we can mutate its slice in place.
+            slice_copy = np.asarray(values_full[i0:i1]).copy()
+            slice_copy -= offset
+            values = slice_copy
+        else:
+            values = values_full[i0:i1]
+    else:
+        values = values_full[i0:i1]
+
+    time = time_full[i0:i1]
 
     # Downsample if needed
+    decimated = False
     if max_points > 0 and len(values) > max_points:
-        time, values = lttb_downsample(time, values, max_points)
+        # lttb_downsample requires arrays (not views). Cast once; it allocates
+        # only for the downsampled output size, not the input length.
+        time, values = lttb_downsample(np.ascontiguousarray(time), np.ascontiguousarray(values), max_points)
+        decimated = True
 
     return {
         "time": time.tolist(),
         "values": values.tolist(),
-        "sampling_rate": tr.sampling_rate,
+        "sampling_rate": sr,
         "units": tr.units,
         "label": tr.label,
-        "n_samples": len(tr.data),
+        "n_samples": original_n,
         "duration": tr.duration,
-        "filtered": bool(filter_type),
+        "filtered": want_filter,
+        "window": {"t_start": t_start, "t_end": t_end},
+        "decimated": decimated,
+        "returned_n": len(values),
+        "zero_offset": offset if zero_offset else 0.0,
     }
 
 

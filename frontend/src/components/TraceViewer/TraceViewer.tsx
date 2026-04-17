@@ -1,8 +1,21 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
-import { useAppStore, CursorPositions } from '../../stores/appStore'
+import { useAppStore, CursorPositions, STIMULUS_TRACE_INDEX } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
+import { ViewportBar, ViewportSlider } from './ViewportBar'
+import { TracesDropdown } from './TracesDropdown'
+
+// Palette for non-primary recorded channels. Must match TracesDropdown.
+const ADDITIONAL_CHANNEL_COLOR_VARS = [
+  '--trace-color-2', '--trace-color-3', '--trace-color-4', '--trace-color-5',
+]
+function colorForChannel(idx: number): string {
+  const name = idx === 0
+    ? '--trace-color-1'
+    : ADDITIONAL_CHANNEL_COLOR_VARS[(idx - 1) % ADDITIONAL_CHANNEL_COLOR_VARS.length]
+  return cssVar(name)
+}
 
 type DragEdge =
   | 'baselineStart' | 'baselineEnd'
@@ -47,19 +60,41 @@ export function TraceViewer() {
   const cursorsRef = useRef<CursorPositions>(useAppStore.getState().cursors)
   const showCursorsRef = useRef<boolean>(useAppStore.getState().showCursors)
   const cursorVisRef = useRef(useAppStore.getState().cursorVisibility)
+  // Burst-marker refs — drawCursors reads these on every paint without
+  // rebuilding itself.
+  const fieldBurstsRef = useRef(useAppStore.getState().fieldBursts)
+  const currentSweepRef = useRef(useAppStore.getState().currentSweep)
+  const showBurstMarkersRef = useRef(useAppStore.getState().showBurstMarkers)
+
+  // Tracks whether the CURRENT plot instance was built in Full (null viewport)
+  // mode. Used in cleanup so we only persist x-range as the "Full-mode saved
+  // range" when the plot actually rendered in Full mode — prevents a viewport
+  // change (which flips store.viewport → null synchronously) from racing ahead
+  // of the data-refetch and saving the stale windowed x-range as Full.
+  const builtInFullModeRef = useRef<boolean>(false)
 
   const {
     traceData, cursors, setCursors,
     overlayEntries, showOverlay,
     averageTrace, showAverage,
     zoomMode,
-    showStimulusOverlay, toggleStimulusOverlay,
     showCursors,
     cursorVisibility,
     sweepStimulusSegments,
     sweepStimulusUnit,
     zeroOffset,
+    additionalTraces,
+    currentTrace,
+    currentSweep,
+    fieldBursts,
+    showBurstMarkers,
   } = useAppStore()
+
+  // Visible-trace set for the current series — includes recorded channel
+  // indices plus the stimulus sentinel. Drives which series the plot draws.
+  const visibleTracesForSeries = useAppStore((s) =>
+    s.getVisibleTraces(s.currentGroup, s.currentSeries),
+  )
 
   // Current series' stimulus info, if any.
   const stimulus = useAppStore((s) => {
@@ -67,9 +102,13 @@ export function TraceViewer() {
     return s.recording.groups[s.currentGroup]?.series[s.currentSeries]?.stimulus ?? null
   })
 
-  // Show stimulus checkbox whenever per-sweep or series-level stimulus data exists.
-  const hasStimulus = (sweepStimulusSegments && sweepStimulusSegments.length > 0) ||
+  // Stimulus is drawn when it's in the visible set AND there is actual
+  // stimulus data to draw.
+  const stimulusDataPresent =
+    (sweepStimulusSegments && sweepStimulusSegments.length > 0) ||
     (!!stimulus && (stimulus.segments?.length > 0 || stimulus.pulseEnd > stimulus.pulseStart))
+  const showStimulusOverlay =
+    stimulusDataPresent && visibleTracesForSeries.includes(STIMULUS_TRACE_INDEX)
 
   // Subscribe to theme so chart rebuilds on theme/font change
   const theme = useThemeStore((s) => s.theme)
@@ -81,6 +120,9 @@ export function TraceViewer() {
   cursorsRef.current = cursors
   showCursorsRef.current = showCursors
   cursorVisRef.current = cursorVisibility
+  fieldBurstsRef.current = fieldBursts
+  currentSweepRef.current = currentSweep
+  showBurstMarkersRef.current = showBurstMarkers
 
   const [hoverCursor, setHoverCursor] = useState<string>('')
 
@@ -107,14 +149,15 @@ export function TraceViewer() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, cssW, cssH)
 
-    // If cursors are globally hidden, just clear and return.
-    if (!showCursorsRef.current) return
-
     // uPlot bbox is in CSS pixels — use directly, no dpr division.
     const { left, top, width: pw, height: ph } = u.bbox
     const by = top / dpr
     const bh = ph / dpr
+    const bx = left / dpr
+    const bw = pw / dpr
 
+    // --- Cursor overlays --- (gated by the cursors visibility toggle)
+    if (showCursorsRef.current) {
     const cur = cursorsRef.current
 
     for (const def of CURSOR_DEFS) {
@@ -153,6 +196,113 @@ export function TraceViewer() {
       ctx.font = `${cssVar('--font-size-label')} ${cssVar('--font-ui')}`
       ctx.fillText(def.label, x0 + 3, by + 12)
     }
+    } // end cursors block
+
+    // ---- Burst markers ----
+    // Burst dots + baseline/threshold lines render INDEPENDENTLY of the
+    // cursor-visibility toggle — they're their own layer, gated by the
+    // `Bursts` checkbox in the sidebar.
+    //
+    // Burst records carry RAW signal y values. If zero-offset is on the
+    // displayed trace has been DC-shifted by `currentZeroOffset`; markers
+    // must shift by the same amount to stay visually aligned with the trace.
+    if (!showBurstMarkersRef.current) return
+    const st = useAppStore.getState()
+    const fbKey = `${st.currentGroup}:${st.currentSeries}`
+    const fb = fieldBurstsRef.current[fbKey]
+    const yOffset = st.zeroOffset ? st.currentZeroOffset : 0
+    if (fb) {
+      // Horizontal dashed lines spanning the plot: detection baseline and
+      // thresholds from the last detection run on this series.
+      const hLine = (y: number, color: string, label: string) => {
+        const py = u.valToPos(y - yOffset, 'y', true) / dpr
+        if (!isFinite(py)) return
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1
+        ctx.setLineDash([5, 4])
+        ctx.beginPath()
+        ctx.moveTo(bx, py)
+        ctx.lineTo(bx + bw, py)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.fillStyle = color
+        ctx.font = `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`
+        ctx.fillText(label, bx + 4, py - 3)
+      }
+      hLine(fb.baselineValue, 'rgba(158,158,158,0.8)', 'baseline')
+      if (fb.thresholdHigh != null) {
+        hLine(fb.thresholdHigh, 'rgba(229,115,115,0.7)', 'thr ↑')
+      }
+      if (fb.thresholdLow != null && fb.thresholdLow !== fb.thresholdHigh) {
+        hLine(fb.thresholdLow, 'rgba(229,115,115,0.7)', 'thr ↓')
+      }
+    }
+    if (fb && fb.bursts.length > 0) {
+      const xScale = u.scales.x
+      const xMin = xScale?.min ?? -Infinity
+      const xMax = xScale?.max ?? Infinity
+      const sweep = currentSweepRef.current
+      const selected = fb.selectedIdx
+      const colors = {
+        baseline: '#9e9e9e',   // neutral grey
+        peak: '#e57373',       // red
+        decay: '#ffb74d',      // orange
+        end: '#81c784',        // green
+      }
+
+      for (let i = 0; i < fb.bursts.length; i++) {
+        const b = fb.bursts[i]
+        if (b.sweepIndex !== sweep) continue
+        if (b.endS < xMin || b.startS > xMax) continue
+
+        const toPx = (x: number, y: number): [number, number] => {
+          const px = u.valToPos(x, 'x', true) / dpr
+          const py = u.valToPos(y - yOffset, 'y', true) / dpr
+          return [px, py]
+        }
+        const peakY = b.preBurstBaseline + b.peakSigned
+        const [px0, py0] = toPx(b.startS, b.preBurstBaseline)
+        const [px1, py1] = toPx(b.peakTimeS, peakY)
+        const [px3, py3] = toPx(b.endS, b.preBurstBaseline)
+        const decayCoord =
+          b.decayHalfTimeMs != null
+            ? toPx(
+                b.peakTimeS + b.decayHalfTimeMs / 1000,
+                b.preBurstBaseline + b.peakSigned * 0.5,
+              )
+            : null
+
+        const isSel = i === selected
+        const r = isSel ? 6 : 4
+
+        const drawDot = (px: number, py: number, color: string) => {
+          if (!isFinite(px) || !isFinite(py)) return
+          ctx.beginPath()
+          ctx.arc(px, py, r, 0, 2 * Math.PI)
+          ctx.fillStyle = color
+          ctx.fill()
+          ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.6)'
+          ctx.lineWidth = isSel ? 2 : 1
+          ctx.stroke()
+        }
+
+        drawDot(px0, py0, colors.baseline)
+        drawDot(px1, py1, colors.peak)
+        if (decayCoord) drawDot(decayCoord[0], decayCoord[1], colors.decay)
+        drawDot(px3, py3, colors.end)
+
+        // Faint vertical bar from pre-baseline to peak to anchor the group
+        // visually; muted so it doesn't fight the trace.
+        ctx.strokeStyle = 'rgba(229,115,115,0.35)'
+        ctx.lineWidth = 1
+        ctx.setLineDash([3, 3])
+        ctx.beginPath()
+        ctx.moveTo(px1, py0)
+        ctx.lineTo(px1, py1)
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
+    }
   }
 
   // Index of the stimulus series in the data array (when present), so we
@@ -169,44 +319,51 @@ export function TraceViewer() {
     const columns: number[][] = [time]
     const seriesOpts: uPlot.Series[] = [{}]
 
-    // Compute zero offset from the first ~3ms of the trace (if enabled)
-    let offset = 0
-    if (zeroOffset && traceData.values.length > 0) {
-      const nSamples = Math.max(1, Math.min(
-        Math.round(0.003 * traceData.samplingRate),  // 3ms
-        traceData.values.length
-      ))
-      let sum = 0
-      for (let i = 0; i < nSamples; i++) sum += traceData.values[i]
-      offset = sum / nSamples
-    }
+    // Zero offset is now applied server-side (per-sweep, from the first ~3ms
+    // of the full sweep) — frontend does no subtraction of its own.
 
-    // Primary trace (with optional zero offset subtraction)
-    const primaryVals = Array.from(traceData.values)
-    if (offset !== 0) {
-      for (let i = 0; i < primaryVals.length; i++) primaryVals[i] -= offset
-    }
-    columns.push(primaryVals)
+    // Visibility for the current series.
+    const primaryVisible = visibleTracesForSeries.includes(currentTrace)
+
+    // Primary trace (the channel `currentTrace` points at — always the one
+    // analyses run on). Hidden iff the user has it unchecked in the dropdown.
+    columns.push(Array.from(traceData.values))
     seriesOpts.push({
       label: traceData.label || 'Trace',
-      stroke: cssVar('--trace-color-1'),
+      stroke: colorForChannel(currentTrace),
       width: 1.5,
       scale: 'y',
-    })
+      show: primaryVisible,
+    } as uPlot.Series)
 
-    // Overlay sweeps (each gets its own zero offset if enabled)
+    // Additional recorded channels the user has turned on.
+    const primaryUnits = traceData.units || ''
+    for (const chIdx of visibleTracesForSeries) {
+      if (chIdx < 0 || chIdx === currentTrace) continue
+      const td = additionalTraces[chIdx]
+      if (!td) continue  // fetch may still be in flight
+      // Align to the primary time array by index (backend returns same length
+      // decimation for the same viewport). If lengths differ (rare edge on
+      // boundary fetches), pad with nulls.
+      const vals = new Array(time.length)
+      const src = td.values
+      for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] : null
+      columns.push(vals)
+      const sameUnits = (td.units || '') === primaryUnits
+      seriesOpts.push({
+        label: td.label || `Ch ${chIdx + 1}`,
+        stroke: colorForChannel(chIdx),
+        width: 1.25,
+        scale: sameUnits ? 'y' : 'y_alt',
+      } as uPlot.Series)
+    }
+
+    // Overlay sweeps — data already reflects zero_offset from the server.
     if (showOverlay && overlayEntries.length > 0) {
       for (const entry of overlayEntries) {
         const vals = new Array(time.length)
         const src = entry.data.values
-        // Compute per-sweep offset for overlay traces
-        let ovrOffset = 0
-        if (zeroOffset && src.length > 0) {
-          const n = Math.max(1, Math.min(Math.round(0.003 * entry.data.samplingRate), src.length))
-          let s = 0; for (let j = 0; j < n; j++) s += src[j]
-          ovrOffset = s / n
-        }
-        for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] - ovrOffset : null
+        for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] : null
         columns.push(vals)
         seriesOpts.push({
           label: entry.data.label,
@@ -277,7 +434,7 @@ export function TraceViewer() {
     }
 
     return { data: columns as unknown as uPlot.AlignedData, seriesOpts, stimIdx }
-  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus, sweepStimulusSegments, zeroOffset])
+  }, [traceData, overlayEntries, showOverlay, averageTrace, showAverage, theme, showStimulusOverlay, stimulus, sweepStimulusSegments, zeroOffset, visibleTracesForSeries, additionalTraces, currentTrace])
 
   // ================================================================
   // Track which series we last built the plot for, so we can save/restore ranges
@@ -342,9 +499,97 @@ export function TraceViewer() {
     ]
 
     // Build scales object. The `stim` scale is only present when needed.
+    //
+    // X and Y `range` hooks read the CURRENT store on every call (not a
+    // closure snapshot), so user actions (Apply ranges, drag-zoom, zoom-
+    // controls) that save to the store immediately take effect on the next
+    // draw. The setScale hook (below, in `hooks`) writes the store whenever
+    // the user changes a scale, keeping the two in lock-step.
     const scales: uPlot.Scales = {
-      x: { time: false },
-      y: {},
+      x: {
+        time: false,
+        range: (_u, dataMin, dataMax) => {
+          const vp = useAppStore.getState().viewport
+          if (vp) return [vp.start, vp.end]
+          const savedX = useAppStore.getState().getSeriesAxisRange(currentGroup, currentSeries)?.x
+          if (savedX) return [savedX.min, savedX.max]
+          return [dataMin, dataMax]
+        },
+      },
+      y: {
+        range: (_u, dataMin, dataMax) => {
+          const savedY = useAppStore.getState().getSeriesAxisRange(currentGroup, currentSeries)?.y
+          if (savedY) {
+            // Sanity check: if the saved range doesn't cover any of the data
+            // (e.g. user switched to a series with a completely different Y
+            // baseline), fall through to auto-fit instead of showing an empty
+            // plot. Triggers when the data is entirely outside the saved
+            // range, or when the saved range covers < 5% of the data span.
+            const dataSpan = dataMax - dataMin
+            const savedSpan = savedY.max - savedY.min
+            const entirelyOutside = dataMax < savedY.min || dataMin > savedY.max
+            const savedTooNarrow =
+              dataSpan > 0 && savedSpan > 0 && savedSpan < 0.05 * dataSpan
+            if (!entirelyOutside && !savedTooNarrow) {
+              return [savedY.min, savedY.max]
+            }
+            // fall through to auto behavior below
+          }
+          // In zero-offset mode with no saved range, default to symmetric
+          // around 0 based on the currently-drawn data.
+          if (zeroOffset) {
+            const primary = data[1] as number[] | undefined
+            let maxAbs = 0
+            if (primary) {
+              for (const v of primary) {
+                if (v != null && isFinite(v)) {
+                  const a = Math.abs(v)
+                  if (a > maxAbs) maxAbs = a
+                }
+              }
+            }
+            const pad = maxAbs * 1.1 || 1
+            return [-pad, pad]
+          }
+          return [dataMin, dataMax]
+        },
+      },
+    }
+
+    // Add y_alt scale + right-side axis if any visible additional channel
+    // uses different units from the primary. (Iterate via series opts — the
+    // scale name is already assigned in buildSeriesData.)
+    const hasAltScale = seriesOpts.some((s) => (s as any).scale === 'y_alt')
+    if (hasAltScale) {
+      // Find the first series on 'y_alt' to label the axis with its units.
+      const altSeriesIdx = seriesOpts.findIndex((s) => (s as any).scale === 'y_alt')
+      const altCols: any = data[altSeriesIdx]
+      void altCols  // unused — kept for clarity
+      // We don't know per-series units inside here, but additionalTraces
+      // does. Find the first additional channel with different units.
+      let altUnits = ''
+      for (const chIdx of visibleTracesForSeries) {
+        if (chIdx < 0 || chIdx === currentTrace) continue
+        const td = additionalTraces[chIdx]
+        if (td && td.units !== traceData.units) {
+          altUnits = td.units
+          break
+        }
+      }
+      scales.y_alt = {
+        range: (_u, dataMin, dataMax) => [dataMin, dataMax],
+      }
+      axes.push({
+        stroke: cssVar('--chart-axis'),
+        grid: { show: false },
+        ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+        label: altUnits || 'Alt',
+        labelSize: 16,
+        font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+        labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        scale: 'y_alt',
+        side: 1,
+      })
     }
 
     if (stimIdx !== null && stimulus) {
@@ -391,7 +636,13 @@ export function TraceViewer() {
         drag: {
           x: zoomMode,
           y: zoomMode,
-          uni: 50,
+          // We intercept the drag-zoom via the `setSelect` hook (below) and
+          // drive the scale changes ourselves, so disable uPlot's built-in
+          // auto-setScale. This lets us route X through the viewport system
+          // (triggering a re-fetch at higher resolution) rather than letting
+          // uPlot fight our X range hook.
+          setScale: false,
+          // No `uni` threshold — any rectangle drag zooms both axes.
         },
         focus: { prox: 30 },
       },
@@ -400,46 +651,134 @@ export function TraceViewer() {
       series: seriesOpts,
       hooks: {
         draw: [() => drawCursors()],
+        // Drag-zoom rectangle completed: apply it ourselves.
+        // Route X through the viewport system so we refetch at the zoomed
+        // resolution; apply Y directly via setScale + persist to the store.
+        setSelect: [
+          (u: uPlot) => {
+            const sel = u.select
+            if (!sel || sel.width < 2 || sel.height < 2) {
+              // Too small — treat as click, just clear selection
+              u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false)
+              return
+            }
+            // Pixel rect → data-space bounds. Y is inverted on screen.
+            const xMin = u.posToVal(sel.left, 'x')
+            const xMax = u.posToVal(sel.left + sel.width, 'x')
+            const yMax = u.posToVal(sel.top, 'y')
+            const yMin = u.posToVal(sel.top + sel.height, 'y')
+
+            const st = useAppStore.getState()
+
+            // X: viewport-mode routes to setViewport (triggers refetch).
+            //    Full-mode uses u.setScale directly.
+            if (st.viewport) {
+              st.setViewport({ start: xMin, end: xMax })
+            } else if (isFinite(xMin) && isFinite(xMax) && xMax > xMin) {
+              u.setScale('x', { min: xMin, max: xMax })
+            }
+
+            // Y: set the scale now AND save to store so rebuilds preserve it.
+            if (isFinite(yMin) && isFinite(yMax) && yMax > yMin) {
+              u.setScale('y', { min: yMin, max: yMax })
+              const cur = st.getSeriesAxisRange(currentGroup, currentSeries)
+              st.saveSeriesAxisRange(currentGroup, currentSeries, {
+                ...cur,
+                y: { min: yMin, max: yMax },
+              })
+            }
+
+            // Clear the visual selection rectangle.
+            u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false)
+          },
+        ],
+        // When the user drag-zooms on X (zoom mode), uPlot calls setScale('x')
+        // with the new bounds. Since our X range hook would otherwise force
+        // the scale back to the current viewport on the next redraw, we sync
+        // the viewport to the user's zoom selection here. This both persists
+        // the zoom AND triggers a refetch at the right resolution.
+        setScale: [
+          (u: uPlot, key: string) => {
+            const st = useAppStore.getState()
+
+            if (key === 'x') {
+              const vp = st.viewport
+              if (!vp) return  // Full mode — uPlot manages X freely
+              const xs = u.scales.x
+              if (xs?.min == null || xs?.max == null) return
+              const EPS = 1e-6
+              // Snap: scale matches viewport, nothing to do.
+              if (Math.abs(xs.min - vp.start) < EPS && Math.abs(xs.max - vp.end) < EPS) return
+              const newLen = xs.max - xs.min
+              if (newLen <= 0 || !isFinite(newLen)) return
+              // Mid-pan: update state only, no fetch per-frame.
+              if (dragRef.current?.kind === 'pan') {
+                useAppStore.setState({ viewport: { start: xs.min, end: xs.max } })
+              } else {
+                // Drag-zoom, Apply-ranges, or zoom-button: deliberate viewport
+                // change — update + refetch at higher resolution.
+                st.setViewport({ start: xs.min, end: xs.max })
+              }
+              return
+            }
+
+            if (key === 'y') {
+              const ys = u.scales.y
+              if (ys?.min == null || ys?.max == null) return
+              // Persist the Y range to the store so the range hook returns it
+              // on subsequent rebuilds (viewport scroll, etc). Without this,
+              // drag-zooms on Y would be wiped when the data next changes.
+              const EPS = 1e-6
+              const cur = st.getSeriesAxisRange(currentGroup, currentSeries)
+              const sameY =
+                cur?.y &&
+                Math.abs(cur.y.min - ys.min) < EPS &&
+                Math.abs(cur.y.max - ys.max) < EPS
+              if (sameY) return
+              st.saveSeriesAxisRange(currentGroup, currentSeries, {
+                ...cur,
+                y: { min: ys.min, max: ys.max },
+              })
+            }
+          },
+        ],
       },
     }
 
     plotRef.current = new uPlot(opts, data, container)
 
-    // Restore saved axis ranges for this series (if any)
-    // Restore saved axis ranges — but if zero offset is on, center Y on 0
-    const savedRanges = getSeriesAxisRange(currentGroup, currentSeries)
-    if (zeroOffset) {
-      // Find the max absolute deviation in the offset-subtracted primary trace
-      const primaryData = data[1] as number[] | undefined
-      if (primaryData && primaryData.length > 0) {
-        let maxAbs = 0
-        for (const v of primaryData) {
-          if (v != null && isFinite(v)) {
-            const a = Math.abs(v)
-            if (a > maxAbs) maxAbs = a
-          }
-        }
-        const pad = maxAbs * 1.1 || 1
-        plotRef.current.setScale('y', { min: -pad, max: pad })
-      }
-      if (savedRanges?.x) plotRef.current.setScale('x', savedRanges.x)
-    } else if (savedRanges) {
-      if (savedRanges.x) plotRef.current.setScale('x', savedRanges.x)
-      if (savedRanges.y) plotRef.current.setScale('y', savedRanges.y)
-    }
+    // Remember what viewport mode this plot was built with — used by cleanup.
+    builtInFullModeRef.current = !useAppStore.getState().viewport
+
+    // Scale ranges are handled by the `range` hooks in the scales config
+    // above — no post-creation setScale needed. The hooks read viewport and
+    // saved-range state, so the initial draw uses the correct bounds.
 
     drawCursors()
 
     // Cleanup on unmount or before next recreation
     return () => {
-      // Save ranges before cleanup
+      // Save ranges before cleanup — carefully.
+      //
+      // X is only saved as the Full-mode range when the plot we're tearing
+      // down was ACTUALLY rendered in Full mode. If the user just clicked
+      // "Full" (viewport flipped to null synchronously) but the plot still
+      // has a windowed x-scale on screen, saving x here would record the
+      // windowed range and the next Full-mode rebuild would wrongly apply
+      // it, shrinking the view to the old window.
+      //
+      // Y always persists regardless of viewport mode.
       const u = plotRef.current
       if (u) {
         const xs = u.scales.x
         const ys = u.scales.y
         const ranges: any = {}
-        if (xs && xs.min != null && xs.max != null) ranges.x = { min: xs.min, max: xs.max }
-        if (ys && ys.min != null && ys.max != null) ranges.y = { min: ys.min, max: ys.max }
+        if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
+          ranges.x = { min: xs.min, max: xs.max }
+        }
+        if (ys && ys.min != null && ys.max != null) {
+          ranges.y = { min: ys.min, max: ys.max }
+        }
         saveSeriesAxisRange(currentGroup, currentSeries, ranges)
       }
       plotRef.current?.destroy()
@@ -453,7 +792,7 @@ export function TraceViewer() {
   // ================================================================
   useEffect(() => {
     drawCursors()
-  }, [cursors, showCursors, cursorVisibility])
+  }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers])
 
   // ================================================================
   // Listen for axis range commands from the CursorPanel
@@ -474,11 +813,50 @@ export function TraceViewer() {
   }, [])
 
   // ================================================================
+  // Keyboard viewport navigation:
+  //   ←  / →             scroll by one window
+  //   Shift-← / Shift-→  scroll by two windows (fast)
+  //   Home / End          jump to start / end
+  // ================================================================
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Skip when the user is typing in an input
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+
+      const st = useAppStore.getState()
+      if (!st.viewport) return
+      const len = st.viewport.end - st.viewport.start
+      const step = e.shiftKey ? 2 * len : len
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        st.scrollViewport(-step)
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        st.scrollViewport(step)
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        st.setViewportStart(0)
+      } else if (e.key === 'End') {
+        e.preventDefault()
+        st.setViewportStart(Math.max(0, st.sweepDuration - len))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // ================================================================
   // Resize: keep uPlot and canvas in sync with container
   // ================================================================
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
+
+    // Debounced max_points update: when the plot is resized, the ideal
+    // resolution for the current viewport is ~ pixel-width × DPR. We don't
+    // want to re-fetch on every frame of a resize drag, so we coalesce.
+    let resizeTimer: number | null = null
 
     const observer = new ResizeObserver(() => {
       const u = plotRef.current
@@ -488,12 +866,52 @@ export function TraceViewer() {
       if (w > 0 && h > 0) {
         // setSize triggers uPlot's draw hook, which calls drawCursors()
         u.setSize({ width: w, height: h })
+
+        // Tie fetch resolution to display resolution (×2 for min/max-style
+        // density, no point going higher).
+        const dpr = window.devicePixelRatio || 1
+        const targetPoints = Math.max(500, Math.floor(w * dpr * 2))
+        const state = useAppStore.getState()
+        if (targetPoints !== state.viewportMaxPoints) {
+          if (resizeTimer !== null) window.clearTimeout(resizeTimer)
+          resizeTimer = window.setTimeout(() => {
+            const latest = useAppStore.getState()
+            latest.setViewportMaxPoints(targetPoints)
+            // Only re-fetch if a viewport is set (otherwise the full sweep
+            // is already shown and max_points=0 behavior is fine).
+            if (latest.viewport) {
+              latest.refetchViewport().catch(() => { /* ignore */ })
+            }
+          }, 150)
+        }
       }
     })
 
     observer.observe(container)
-    return () => observer.disconnect()
+    return () => {
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer)
+      observer.disconnect()
+    }
   }, []) // stable — reads plotRef.current at call time
+
+  // Keyboard: Left/Right scrolls the viewport by one window
+  // (Shift+arrow = half-window for overlap).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Skip when the user is typing in an input/textarea
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const state = useAppStore.getState()
+      if (!state.viewport) return
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      e.preventDefault()
+      const len = state.viewport.end - state.viewport.start
+      const step = e.shiftKey ? len / 2 : len
+      state.scrollViewport(e.key === 'ArrowLeft' ? -step : step)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // ================================================================
   // Draggable cursor edges + region drag
@@ -640,7 +1058,15 @@ export function TraceViewer() {
     }
   }
 
-  const handleMouseUp = () => { dragRef.current = null }
+  const handleMouseUp = () => {
+    const wasPanning = dragRef.current?.kind === 'pan'
+    dragRef.current = null
+    // If we just finished panning in a viewport mode, fire a single refetch
+    // so the data matches the new viewport at proper resolution.
+    if (wasPanning && useAppStore.getState().viewport) {
+      useAppStore.getState().refetchViewport().catch(() => { /* ignore */ })
+    }
+  }
 
   // ================================================================
   // Axis zoom controls
@@ -769,17 +1195,8 @@ export function TraceViewer() {
           minHeight: 26,
         }}
       >
-        {hasStimulus && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }}>
-            <input
-              type="checkbox"
-              checked={showStimulusOverlay}
-              onChange={toggleStimulusOverlay}
-              style={{ margin: 0, accentColor: 'var(--stimulus-color)' }}
-            />
-            <span style={{ color: 'var(--stimulus-color)', fontWeight: 600 }}>Show stimulus</span>
-          </label>
-        )}
+        {/* Traces dropdown: per-channel + reconstructed-stimulus visibility */}
+        <TracesDropdown />
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {/* X-axis zoom */}
@@ -830,11 +1247,11 @@ export function TraceViewer() {
             >auto</button>
           </div>
 
-          {/* Stim Y-axis zoom — only when overlay is visible */}
-          {hasStimulus && showStimulusOverlay && (
+          {/* Stim Y-axis zoom — only when stimulus is a visible trace */}
+          {showStimulusOverlay && stimulus && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
               <span style={{ color: 'var(--stimulus-color)', marginRight: 4 }}>
-                {stimulus!.unit}:
+                {stimulus.unit}:
               </span>
               <button
                 className="zoom-btn"
@@ -855,6 +1272,9 @@ export function TraceViewer() {
           )}
         </div>
       </div>
+
+      {/* --- Viewport bar (window size, scroll, time readout) --- */}
+      <ViewportBar />
 
       {/* --- Plot container --- */}
       <div
@@ -908,6 +1328,9 @@ export function TraceViewer() {
           }}
         />
       </div>
+
+      {/* --- Viewport scroll slider --- */}
+      <ViewportSlider />
     </div>
   )
 }

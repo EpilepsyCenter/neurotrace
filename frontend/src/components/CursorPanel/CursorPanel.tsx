@@ -1,67 +1,114 @@
 import React, { useMemo, useEffect, useRef, useState, useCallback } from 'react'
 import { useAppStore, CursorPositions } from '../../stores/appStore'
+import { NumInput } from '../common/NumInput'
 
-// ---- Reusable number input that doesn't lose focus on every keystroke ----
-// Uses local state while editing, commits to external handler on blur/Enter.
-function NumInput({
-  value,
-  onChange,
-  step,
-  min,
-  max,
-  placeholder,
-  style,
+// ---- Stable, module-level sub-components ----
+//
+// Previously these were defined INSIDE CursorPanel. Every re-render of the
+// parent created a new function identity for each, so React saw them as
+// different component types and fully unmounted + remounted all descendants.
+// That killed focus on any `<input>` the user was typing into whenever a
+// sibling input caused the parent to re-render — which is exactly why typing
+// in the axis-range boxes kept dropping on the second keystroke. Hoisting
+// these out fixes it.
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {title && (
+        <div
+          style={{
+            fontSize: 'var(--font-size-label)',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: 0.4,
+            color: 'var(--text-muted)',
+            marginBottom: 4,
+          }}
+        >
+          {title}
+        </div>
+      )}
+      {children}
+    </div>
+  )
+}
+
+function Readout({ label, value, unit }: { label: string; value: number; unit: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
+      <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)' }}>{label}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
+        {value.toFixed(2)} {unit}
+      </span>
+    </div>
+  )
+}
+
+function CursorInput({
+  label, color, startKey, endKey, visKey,
 }: {
-  value: number
-  onChange: (v: number) => void
-  step?: number
-  min?: number
-  max?: number
-  placeholder?: string
-  style?: React.CSSProperties
+  label: string; color: string
+  startKey: keyof CursorPositions; endKey: keyof CursorPositions
+  visKey: 'baseline' | 'peak' | 'fit'
 }) {
-  const [local, setLocal] = useState(String(value))
-  const [focused, setFocused] = useState(false)
-
-  // Sync from external value when NOT focused (store changed elsewhere)
-  useEffect(() => {
-    if (!focused) setLocal(String(value))
-  }, [value, focused])
-
-  const commit = () => {
-    const n = parseFloat(local)
-    if (isFinite(n)) onChange(n)
-    else setLocal(String(value))
-  }
+  // Read what we need directly from the store — keeps this a stable
+  // module-level component and avoids threading props through every render.
+  const cursors = useAppStore((s) => s.cursors)
+  const setCursors = useAppStore((s) => s.setCursors)
+  const cursorVisibility = useAppStore((s) => s.cursorVisibility)
+  const setCursorVisibility = useAppStore((s) => s.setCursorVisibility)
 
   return (
-    <input
-      type="number"
-      value={local}
-      step={step}
-      min={min}
-      max={max}
-      placeholder={placeholder}
-      style={style}
-      onChange={(e) => setLocal(e.target.value)}
-      onFocus={() => setFocused(true)}
-      onBlur={() => { setFocused(false); commit() }}
-      onKeyDown={(e) => { if (e.key === 'Enter') { commit(); (e.target as HTMLInputElement).blur() } }}
-    />
+    <div style={{ marginBottom: 6, opacity: cursorVisibility[visKey] ? 1 : 0.5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+        <input
+          type="checkbox"
+          checked={cursorVisibility[visKey]}
+          onChange={() => setCursorVisibility({ [visKey]: !cursorVisibility[visKey] })}
+          style={{ margin: 0, accentColor: color }}
+        />
+        <span
+          style={{ fontSize: 'var(--font-size-xs)', fontWeight: 600, color, cursor: 'pointer' }}
+          onClick={() => setCursorVisibility({ [visKey]: !cursorVisibility[visKey] })}
+        >
+          {label}
+        </span>
+      </div>
+      <div style={{ display: 'flex', gap: 3, alignItems: 'center', paddingLeft: 18 }}>
+        <NumInput
+          value={cursors[startKey]}
+          step={0.001}
+          onChange={(v) => setCursors({ [startKey]: v })}
+          style={{ width: 70 }}
+        />
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>{'\u2192'}</span>
+        <NumInput
+          value={cursors[endKey]}
+          step={0.001}
+          onChange={(v) => setCursors({ [endKey]: v })}
+          style={{ width: 70 }}
+        />
+      </div>
+    </div>
   )
 }
 
 // ---- String input for axis ranges (allows empty = "auto") ----
+// Uses type="text" with inputMode="decimal" so intermediate states like
+// "", "-", "1.", "-1.2e" stay editable — the browser's native type="number"
+// control rejects these and forces React to reset the value mid-keystroke.
+// State is updated on every keystroke so the Apply button reads fresh values.
 function RangeInput({
-  value, onChange, step, placeholder, style,
+  value, onChange, step: _step, placeholder, style,
 }: {
   value: string; onChange: (v: string) => void; step?: number; placeholder?: string; style?: React.CSSProperties
 }) {
   return (
     <input
-      type="number"
+      type="text"
+      inputMode="decimal"
       value={value}
-      step={step}
       placeholder={placeholder}
       style={style}
       onChange={(e) => onChange(e.target.value)}
@@ -100,14 +147,32 @@ export function CursorPanel() {
     cursorVisibility, setCursorVisibility,
     filter, setFilter,
     zeroOffset, toggleZeroOffset,
+    showBurstMarkers, toggleBurstMarkers,
+    fieldBursts,
   } = useAppStore()
+
+  // Does the CURRENT sweep in the CURRENT series have any detected bursts?
+  // Drives the enabled/disabled state of the Bursts visibility checkbox.
+  const hasBurstsInCurrentSweep = useAppStore((s) => {
+    const key = `${s.currentGroup}:${s.currentSeries}`
+    const entry = s.fieldBursts[key]
+    if (!entry || entry.bursts.length === 0) return false
+    return entry.bursts.some((b) => b.sweepIndex === s.currentSweep)
+  })
+  // Total burst count in the current series (shown next to the label).
+  const currentSeriesBurstCount = useAppStore((s) => {
+    const key = `${s.currentGroup}:${s.currentSeries}`
+    return s.fieldBursts[key]?.bursts.filter((b) => b.sweepIndex === s.currentSweep).length ?? 0
+  })
+  void fieldBursts  // subscribe the component to changes
 
   const measurements = useMemo(() => {
     if (!traceData) return null
     return quickMeasure(traceData.time, traceData.values, cursors, traceData.samplingRate)
   }, [traceData, cursors])
 
-  // Broadcast cursors + sweep to analysis windows
+  // Broadcast cursors + sweep to analysis windows; also receive pushes from
+  // analysis windows (burst-detection results + filter config).
   const channelRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
     try {
@@ -116,7 +181,33 @@ export function CursorPanel() {
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'state-request' || ev.data?.type === 'cursor-request') {
           const state = useAppStore.getState()
-          ch.postMessage({ type: 'state-update', cursors: state.cursors, sweep: state.currentSweep })
+          ch.postMessage({
+            type: 'state-update',
+            cursors: state.cursors,
+            sweep: state.currentSweep,
+            group: state.currentGroup,
+            series: state.currentSeries,
+            trace: state.currentTrace,
+            fieldBursts: state.fieldBursts,
+          })
+        }
+        // Bursts pushed from an analysis window → adopt them here so the
+        // main TraceViewer's burst-marker overlay has data to draw.
+        if (ev.data?.type === 'bursts-update' && ev.data.fieldBursts) {
+          useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
+        }
+        // Detection filter pushed from an analysis window → adopt in the
+        // main viewer's filter panel so the displayed trace has the same
+        // processing as what the markers were computed against.
+        if (ev.data?.type === 'detection-filter' && ev.data.filter) {
+          const f = ev.data.filter
+          useAppStore.getState().setFilter({
+            enabled: !!f.enabled,
+            type: f.type,
+            lowCutoff: Number(f.lowCutoff ?? 1),
+            highCutoff: Number(f.highCutoff ?? 50),
+            order: Number(f.order ?? 4),
+          })
         }
       }
       return () => ch.close()
@@ -128,9 +219,23 @@ export function CursorPanel() {
   }, [cursors])
 
   const currentSweep = useAppStore((s) => s.currentSweep)
+  const currentGroup = useAppStore((s) => s.currentGroup)
+  const currentSeries = useAppStore((s) => s.currentSeries)
+  const currentTrace = useAppStore((s) => s.currentTrace)
   useEffect(() => {
     channelRef.current?.postMessage({ type: 'sweep-update', sweep: currentSweep })
   }, [currentSweep])
+  // Live-sync the group/series/trace selection so analysis windows can
+  // follow along (e.g. FieldBurstWindow preselects the same series as the
+  // main tree).
+  useEffect(() => {
+    channelRef.current?.postMessage({
+      type: 'selection-update',
+      group: currentGroup,
+      series: currentSeries,
+      trace: currentTrace,
+    })
+  }, [currentGroup, currentSeries, currentTrace])
 
   // Axis range state (local strings, applied on button click)
   const [xMin, setXMin] = useState('')
@@ -148,52 +253,6 @@ export function CursorPanel() {
       ch.close()
     } catch { /* ignore */ }
   }
-
-  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-    <div style={{ marginBottom: 10 }}>
-      {title && <div style={{
-        fontSize: 'var(--font-size-label)', fontWeight: 600, textTransform: 'uppercase',
-        letterSpacing: 0.4, color: 'var(--text-muted)', marginBottom: 4,
-      }}>{title}</div>}
-      {children}
-    </div>
-  )
-
-  const CursorInput = ({
-    label, color, startKey, endKey, visKey,
-  }: {
-    label: string; color: string
-    startKey: keyof CursorPositions; endKey: keyof CursorPositions
-    visKey: 'baseline' | 'peak' | 'fit'
-  }) => (
-    <div style={{ marginBottom: 6, opacity: cursorVisibility[visKey] ? 1 : 0.5 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-        <input type="checkbox" checked={cursorVisibility[visKey]}
-          onChange={() => setCursorVisibility({ [visKey]: !cursorVisibility[visKey] })}
-          style={{ margin: 0, accentColor: color }} />
-        <span style={{ fontSize: 'var(--font-size-xs)', fontWeight: 600, color, cursor: 'pointer' }}
-          onClick={() => setCursorVisibility({ [visKey]: !cursorVisibility[visKey] })}>
-          {label}
-        </span>
-      </div>
-      <div style={{ display: 'flex', gap: 3, alignItems: 'center', paddingLeft: 18 }}>
-        <NumInput value={cursors[startKey]} step={0.001}
-          onChange={(v) => setCursors({ [startKey]: v })} style={{ width: 70 }} />
-        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>{'\u2192'}</span>
-        <NumInput value={cursors[endKey]} step={0.001}
-          onChange={(v) => setCursors({ [endKey]: v })} style={{ width: 70 }} />
-      </div>
-    </div>
-  )
-
-  const Readout = ({ label, value, unit }: { label: string; value: number; unit: string }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-      <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)' }}>{label}</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
-        {value.toFixed(2)} {unit}
-      </span>
-    </div>
-  )
 
   return (
     <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -230,6 +289,49 @@ export function CursorPanel() {
         </Section>
       )}
 
+      {/* ---- Detected events visibility toggle ----
+           Generic label ("Show/hide detected events") so this reuses cleanly
+           when we add minis, action potentials, etc. — not just bursts. */}
+      <Section title="">
+        <label
+          title={
+            hasBurstsInCurrentSweep
+              ? 'Toggle markers (baseline / threshold lines + event dots) for all detected events on the main viewer'
+              : 'No detected events for the current sweep — run detection in an Analyses window first'
+          }
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            cursor: hasBurstsInCurrentSweep ? 'pointer' : 'not-allowed',
+            userSelect: 'none',
+            fontSize: 'var(--font-size-label)',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: 0.4,
+            color: hasBurstsInCurrentSweep ? 'var(--text-muted)' : 'var(--text-disabled, #666)',
+            opacity: hasBurstsInCurrentSweep ? 1 : 0.5,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showBurstMarkers}
+            onChange={toggleBurstMarkers}
+            disabled={!hasBurstsInCurrentSweep}
+            style={{ margin: 0, accentColor: 'var(--accent)' }}
+          />
+          Show/hide detected events
+          {hasBurstsInCurrentSweep && (
+            <span style={{
+              marginLeft: 4, fontWeight: 400, letterSpacing: 0,
+              textTransform: 'none',
+            }}>
+              ({currentSeriesBurstCount})
+            </span>
+          )}
+        </label>
+      </Section>
+
       {/* ---- Axis Ranges ---- */}
       <Section title="Axis ranges">
         <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
@@ -241,10 +343,37 @@ export function CursorPanel() {
         </div>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4 }}>
           <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', width: 14 }}>Y</span>
-          <RangeInput step={1} placeholder="min" value={yMin} onChange={setYMin} style={{ width: 65 }} />
+          <RangeInput
+            step={1}
+            placeholder="min"
+            value={yMin}
+            onChange={(v) => {
+              setYMin(v)
+              // When zero-offset is on, mirror to enforce symmetry around 0.
+              if (zeroOffset && v !== '') {
+                const n = parseFloat(v)
+                if (isFinite(n)) setYMax(String(Math.abs(n)))
+              }
+            }}
+            style={{ width: 65 }}
+          />
           <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>{'\u2192'}</span>
-          <RangeInput step={1} placeholder="max" value={yMax} onChange={setYMax} style={{ width: 65 }} />
-          <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>{traceData?.units || ''}</span>
+          <RangeInput
+            step={1}
+            placeholder="max"
+            value={yMax}
+            onChange={(v) => {
+              setYMax(v)
+              if (zeroOffset && v !== '') {
+                const n = parseFloat(v)
+                if (isFinite(n)) setYMin(String(-Math.abs(n)))
+              }
+            }}
+            style={{ width: 65 }}
+          />
+          <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+            {traceData?.units || ''}{zeroOffset && ' (symmetric)'}
+          </span>
         </div>
         <button className="btn" onClick={applyAxisRange} style={{ width: '100%', fontSize: 'var(--font-size-xs)' }}>
           Apply ranges

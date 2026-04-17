@@ -114,6 +114,29 @@ class Recording:
 
     def to_dict(self) -> dict:
         """Serialize to dict for JSON API response (without trace data)."""
+
+        def _channel_kind(units: str) -> str:
+            u = units.strip().lower()
+            if u in ("mv", "v", "volt", "volts"):
+                return "voltage"
+            if u in ("pa", "na", "a", "amp", "amps", "ampere", "amperes"):
+                return "current"
+            return "other"
+
+        def _channels_for_series(s: Series) -> list[dict]:
+            """Probe the first sweep to learn per-channel label/units."""
+            if not s.sweeps or not s.sweeps[0].traces:
+                return []
+            return [
+                {
+                    "index": i,
+                    "label": t.label or f"Ch {i + 1}",
+                    "units": t.units,
+                    "kind": _channel_kind(t.units),
+                }
+                for i, t in enumerate(s.sweeps[0].traces)
+            ]
+
         return {
             "filePath": self.file_path,
             "fileName": self.file_name,
@@ -137,6 +160,7 @@ class Recording:
                                 }
                                 for sw in s.sweeps
                             ],
+                            "channels": _channels_for_series(s),
                             "rs": s.rs,
                             "cm": s.cm,
                             "holding": s.holding,

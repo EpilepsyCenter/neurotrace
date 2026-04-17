@@ -21,12 +21,20 @@ export function AnalysisPanel() {
   const { traceData } = useAppStore()
   const [analysisType, setAnalysisType] = useState<AnalysisType>('resistance')
 
+  const onChangeType = (t: AnalysisType) => {
+    setAnalysisType(t)
+    // Analyses that have their own dedicated window: open it on selection.
+    if (t === 'bursts' && window.electronAPI?.openAnalysisWindow) {
+      window.electronAPI.openAnalysisWindow('bursts').catch(() => { /* ignore */ })
+    }
+  }
+
   return (
     <div className="panel" style={{ borderTop: '1px solid var(--border)' }}>
       <div className="panel-title">Analysis</div>
       <select
         value={analysisType}
-        onChange={(e) => setAnalysisType(e.target.value as AnalysisType)}
+        onChange={(e) => onChangeType(e.target.value as AnalysisType)}
         style={{ width: '100%', marginBottom: 10 }}
         disabled={!traceData}
       >
@@ -41,6 +49,17 @@ export function AnalysisPanel() {
         </p>
       ) : analysisType === 'resistance' ? (
         <ResistancePanel />
+      ) : analysisType === 'bursts' ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)', fontStyle: 'italic' }}>
+          Burst detection runs in its own window.{' '}
+          <button
+            className="btn"
+            style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
+            onClick={() => window.electronAPI?.openAnalysisWindow?.('bursts')}
+          >
+            Open
+          </button>
+        </p>
       ) : (
         <GenericJsonPanel analysisType={analysisType} />
       )}

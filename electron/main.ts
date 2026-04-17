@@ -208,7 +208,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   events: 'Event Detection',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
-  field_potential: 'Field Potential',
+  field_potential: 'Field PSP',
   spectral: 'Spectral Analysis',
 }
 

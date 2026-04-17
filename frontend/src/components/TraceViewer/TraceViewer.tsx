@@ -464,12 +464,18 @@ export function TraceViewer() {
       const u = plotRef.current
       const xs = u.scales.x
       const ys = u.scales.y
+      const stimS = u.scales.stim
+      const [pg, ps] = prevKey.split(':').map(Number)
       const ranges: any = {}
       if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
         ranges.x = { min: xs.min, max: xs.max }
       }
-      if (ys && ys.min != null && ys.max != null) ranges.y = { min: ys.min, max: ys.max }
-      const [pg, ps] = prevKey.split(':').map(Number)
+      if (ys && ys.min != null && ys.max != null) {
+        ranges.y = { min: ys.min, max: ys.max }
+      }
+      if (stimS && stimS.min != null && stimS.max != null) {
+        ranges.stim = { min: stimS.min, max: stimS.max }
+      }
       saveSeriesAxisRange(pg, ps, ranges)
     }
 
@@ -617,13 +623,24 @@ export function TraceViewer() {
       const pulse = stimulus.vStepAbsolute
       const needed = Math.abs(pulse)
 
-      if (needed <= halfWindow) {
-        scales.stim = { range: () => [-halfWindow, halfWindow] }
-      } else {
-        const pad = needed * 0.2 || 1
-        const lo = Math.min(0, pulse) - pad
-        const hi = Math.max(0, pulse) + pad
-        scales.stim = { range: () => [lo, hi] }
+      // Default range: ±halfWindow centered on 0 (small pulses), else
+      // 20% pad around the pulse level.
+      const defaultRange: [number, number] = needed <= halfWindow
+        ? [-halfWindow, halfWindow]
+        : (() => {
+            const pad = needed * 0.2 || 1
+            return [Math.min(0, pulse) - pad, Math.max(0, pulse) + pad]
+          })()
+
+      // Reads saved stim range live from the store (if any), so stim zooms
+      // persist across sweep/series changes the same way X/Y do.
+      scales.stim = {
+        range: () => {
+          const saved = useAppStore.getState()
+            .getSeriesAxisRange(currentGroup, currentSeries)?.stim
+          if (saved) return [saved.min, saved.max]
+          return defaultRange
+        },
       }
 
       // Right-side axis in the stimulus color
@@ -843,12 +860,16 @@ export function TraceViewer() {
       if (u) {
         const xs = u.scales.x
         const ys = u.scales.y
+        const stimS = u.scales.stim
         const ranges: any = {}
         if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
           ranges.x = { min: xs.min, max: xs.max }
         }
         if (ys && ys.min != null && ys.max != null) {
           ranges.y = { min: ys.min, max: ys.max }
+        }
+        if (stimS && stimS.min != null && stimS.max != null) {
+          ranges.stim = { min: stimS.min, max: stimS.max }
         }
         saveSeriesAxisRange(currentGroup, currentSeries, ranges)
       }
@@ -1119,7 +1140,14 @@ export function TraceViewer() {
           setCursors({ [drag.startKey]: Math.max(0, drag.origStart + delta), [drag.endKey]: Math.max(0, drag.origEnd + delta) })
         }
       } else if (drag.kind === 'pan') {
-        // Pan: convert pixel delta to axis value delta and shift both scales
+        // Pan: convert pixel delta to axis value delta and shift both scales.
+        //
+        // X in viewport mode MUST NOT go through u.setScale('x', ...) — the
+        // X range hook would read the current (stale) viewport from the
+        // store and clobber the shift. We update the viewport state in the
+        // store directly; the range hook reads the fresh value on next draw.
+        // (Refetch is deferred to mouseup via handleMouseUp to avoid one
+        // fetch per mousemove.)
         const u = plotRef.current
         if (u && containerRef.current) {
           const dpr = devicePixelRatio || 1
@@ -1132,10 +1160,40 @@ export function TraceViewer() {
             const plotW = u.bbox.width
             const xRange = xScale.max - xScale.min
             const dxVal = -(dxPx / plotW) * xRange
-            u.setScale('x', { min: xScale.min + dxVal, max: xScale.max + dxVal })
+            const newMin = xScale.min + dxVal
+            const newMax = xScale.max + dxVal
+
+            const st = useAppStore.getState()
+            if (st.viewport) {
+              // Clamp to sweep edges so we can't pan off-end and poison the
+              // viewport store.
+              const dur = st.sweepDuration
+              let start = newMin
+              let end = newMax
+              if (dur > 0) {
+                start = Math.max(0, Math.min(start, dur))
+                end = Math.max(start, Math.min(end, dur))
+              }
+              // Write viewport FIRST so the X range hook reads the new
+              // values when uPlot calls it during the setScale below.
+              useAppStore.setState({ viewport: { start, end } })
+              u.setScale('x', { min: start, max: end })
+            } else {
+              // Full mode: the X range hook returns savedX if present, which
+              // would clobber the shifted values here. Write savedX in the
+              // store FIRST, then setScale — the hook reads fresh and
+              // returns the panned range.
+              const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+              st.saveSeriesAxisRange(currentGroup, currentSeries, {
+                ...cur,
+                x: { min: newMin, max: newMax },
+              })
+              u.setScale('x', { min: newMin, max: newMax })
+            }
           }
 
-          // Y pan
+          // Y pan — setScale observer rewrites savedY from u.scales.y, so
+          // the range hook returns the shifted range on next draw.
           const yScale = u.scales.y
           if (yScale && yScale.min != null && yScale.max != null) {
             const plotH = u.bbox.height
@@ -1206,6 +1264,14 @@ export function TraceViewer() {
       u.setScale('y', { min, max })
       return
     }
+    if (key === 'stim') {
+      // Persist stim range per-series so zooming the stimulus axis survives
+      // sweep switches (same pattern as X and Y).
+      const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, stim: { min, max } })
+      u.setScale('stim', { min, max })
+      return
+    }
     u.setScale(key, { min, max })
   }
 
@@ -1237,15 +1303,13 @@ export function TraceViewer() {
 
     if (key === 'x') {
       const st = useAppStore.getState()
-      // Viewport mode: "auto X" = show the whole sweep — switch to Full mode.
-      if (st.viewport) {
-        st.setViewport(null)
-        // Also clear any saved X range so the new Full-mode render auto-fits.
-        const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
-        if (cur.x) {
-          const { x: _x, ...rest } = cur
-          st.saveSeriesAxisRange(currentGroup, currentSeries, rest)
-        }
+      // Viewport mode: "auto X" = expand the viewport to the whole sweep.
+      // Staying in viewport mode means mouse pan + zoom keep working through
+      // the viewport system (properly refetched data), instead of flipping
+      // to Full mode where you pan through a decimated 5000-point view of
+      // the whole sweep with no sensible mid-drag refetch.
+      if (st.viewport && st.sweepDuration > 0) {
+        st.setViewport({ start: 0, end: st.sweepDuration })
         return
       }
       // Full mode: clear the saved X range so the hook returns [dataMin, dataMax].
@@ -1289,6 +1353,17 @@ export function TraceViewer() {
     }
     if (!isFinite(min) || !isFinite(max) || max === min) return
     const pad = (max - min) * 0.05
+    // Persist the result so it survives sweep switches. For 'stim', clear
+    // the saved range entirely so the range hook falls back to the
+    // protocol-derived default on the next rebuild (simplest "reset" UX).
+    const st = useAppStore.getState()
+    const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+    if (key === 'y') {
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, y: { min: min - pad, max: max + pad } })
+    } else if (key === 'stim') {
+      const { stim: _stim, ...rest } = cur
+      st.saveSeriesAxisRange(currentGroup, currentSeries, rest)
+    }
     u.setScale(key, { min: min - pad, max: max + pad })
   }
 

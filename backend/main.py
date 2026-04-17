@@ -15,6 +15,7 @@ from api.macros import router as macros_router
 from api.resistance import router as resistance_router
 from api.results import router as results_router
 from api.iv import router as iv_router
+from api.fpsp import router as fpsp_router
 
 
 @asynccontextmanager
@@ -42,6 +43,7 @@ app.include_router(macros_router, prefix="/api/macros", tags=["macros"])
 app.include_router(resistance_router, prefix="/api/resistance", tags=["resistance"])
 app.include_router(results_router, prefix="/api/results", tags=["results"])
 app.include_router(iv_router, prefix="/api/iv", tags=["iv"])
+app.include_router(fpsp_router, prefix="/api/fpsp", tags=["fpsp"])
 
 
 @app.get("/health")

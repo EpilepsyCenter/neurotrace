@@ -283,7 +283,7 @@ export function FieldBurstWindow({
               signal: median {entry.diag.median.toFixed(3)}, MAD {entry.diag.mad.toFixed(3)},
               range [{entry.diag.min.toFixed(3)}, {entry.diag.max.toFixed(3)}],
               max |dev| {entry.diag.maxAbsDev.toFixed(3)} · {entry.diag.durationS.toFixed(1)} s
-              {' '}({entry.diag.nSamples.toLocaleString()} samples)
+              {' '}({entry.diag.nSamples.toString()} samples)
             </div>
           )}
           {entry.bursts.length === 0 && entry.diag && entry.thresholdHigh != null && (

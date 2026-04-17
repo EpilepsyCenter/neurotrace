@@ -181,6 +181,42 @@ function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
   } catch { /* ignore */ }
 }
 
+/** Load/save fPSP data per-recording via Electron preferences. */
+async function _loadPersistedFPsp(filePath: string): Promise<Record<string, FPspData> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedFPspCurves as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedFPsp(filePath: string, fpspCurves: Record<string, FPspData>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedFPspCurves as Record<string, any>) ?? {}
+    if (Object.keys(fpspCurves).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = fpspCurves
+    }
+    await api.setPreferences({ ...prefs, savedFPspCurves: store })
+  } catch { /* ignore */ }
+}
+
+function _broadcastFPsp(fpspCurves: Record<string, FPspData>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'fpsp-update', fpspCurves })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 /** Broadcast field-burst state + detection filter to other windows via the
  *  shared `neurotrace-sync` channel. Called from the analysis window's store
  *  after every detection run so markers appear in the main viewer. */
@@ -298,6 +334,72 @@ export interface IVPoint {
 /** Which column of the I-V point is plotted on the y-axis. */
 export type IVResponseMetric = 'steady' | 'peak'
 
+// ---- Field PSP (fEPSP + fiber-volley) analysis ----
+
+export type FPspMeasurementMethod = 'amplitude' | 'full_slope' | 'range_slope'
+export type FPspPeakDirection = 'auto' | 'negative' | 'positive'
+export type FPspTimeAxis = 'timestamp' | 'index'
+
+export interface FPspPoint {
+  sourceSeries: number       // which series index this bin came from
+  binIndex: number           // index WITHIN its source series (0-based)
+  sweepIndices: number[]
+  meanSweepIndex: number
+  baseline: number
+  volleyPeak: number
+  volleyPeakTs: number
+  volleyAmp: number
+  fepspPeak: number
+  fepspPeakTs: number
+  fepspAmp: number
+  slope: number | null
+  slopeLow: { t: number; v: number } | null
+  slopeHigh: { t: number; v: number } | null
+  ratio: number | null
+  flagged: boolean
+}
+
+export interface FPspData {
+  channel: number
+  responseUnit: string
+  /** Primary ("baseline") series index in the file. */
+  seriesA: number
+  /** Optional second ("LTP" / post-tetanus) series index. */
+  seriesB: number | null
+  stimOnsetS: number
+  /** Inter-sweep intervals (seconds) parsed from .pgf for each series.
+   *  0 means unknown — the graph then falls back to sweep-index-based x. */
+  sweepIntervalA: number
+  sweepIntervalB: number
+  measurementMethod: FPspMeasurementMethod
+  slopeLowPct: number
+  slopeHighPct: number
+  peakDirection: FPspPeakDirection
+  avgN: number
+  /** Pre-detection filter used for the run (echoed back so the mini-
+   *  viewer can fetch the same filtered waveform). */
+  filterEnabled: boolean
+  filterType: 'lowpass' | 'highpass' | 'bandpass'
+  filterLow: number
+  filterHigh: number
+  filterOrder: number
+  /** Cursor positions at the time of the run (seconds). Echoed so the
+   *  mini-viewer and table summary can refer back to them. */
+  baselineStartS: number
+  baselineEndS: number
+  volleyStartS: number
+  volleyEndS: number
+  fepspStartS: number
+  fepspEndS: number
+  /** UI-only settings persisted with the entry. */
+  timeAxis: FPspTimeAxis
+  normalize: boolean
+  normBaselineFrom: number   // 1-based bin index, inclusive (across the
+  normBaselineTo: number     //   concatenated points list)
+  points: FPspPoint[]
+  selectedIdx: number | null
+}
+
 /** Per-series I-V output, keyed in the store by "group:series". */
 export interface IVCurveData {
   channel: number
@@ -396,7 +498,11 @@ interface AppState {
   viewportMaxPoints: number
 
   // Per-series axis ranges (saved when switching away, restored when switching back)
-  seriesAxisRanges: Record<string, { x?: { min: number; max: number }; y?: { min: number; max: number } }>
+  seriesAxisRanges: Record<string, {
+    x?: { min: number; max: number }
+    y?: { min: number; max: number }
+    stim?: { min: number; max: number }
+  }>
 
   // Measurements
   results: MeasurementResult[]
@@ -412,6 +518,9 @@ interface AppState {
   // I-V curves, keyed by `${group}:${series}` — persists across navigation
   // and is saved per-recording in Electron preferences.
   ivCurves: Record<string, IVCurveData>
+
+  // Field PSP analyses, same key shape + same persistence pattern.
+  fpspCurves: Record<string, FPspData>
 
   // UI state
   zoomMode: boolean
@@ -442,8 +551,16 @@ interface AppState {
   setViewportStart: (start: number) => void
   setViewportMaxPoints: (n: number) => void
   refetchViewport: () => Promise<void>
-  saveSeriesAxisRange: (group: number, series: number, ranges: { x?: { min: number; max: number }; y?: { min: number; max: number } }) => void
-  getSeriesAxisRange: (group: number, series: number) => { x?: { min: number; max: number }; y?: { min: number; max: number } } | null
+  saveSeriesAxisRange: (group: number, series: number, ranges: {
+    x?: { min: number; max: number }
+    y?: { min: number; max: number }
+    stim?: { min: number; max: number }
+  }) => void
+  getSeriesAxisRange: (group: number, series: number) => {
+    x?: { min: number; max: number }
+    y?: { min: number; max: number }
+    stim?: { min: number; max: number }
+  } | null
   // Trace visibility controls — per-series.
   getVisibleTraces: (group: number, series: number) => number[]
   setVisibleTraces: (group: number, series: number, indices: number[]) => void
@@ -494,6 +611,40 @@ interface AppState {
   selectFieldBurst: (group: number, series: number, idx: number | null) => void
   /** Dump the union of all detected bursts across all series to CSV. */
   exportFieldBurstsCSV: () => Promise<void>
+
+  // Field PSP actions
+  runFPsp: (
+    group: number, series: number, channel: number,
+    params: {
+      /** Optional second (LTP) series in the same group. */
+      seriesB?: number | null
+      baselineStartS: number
+      baselineEndS: number
+      volleyStartS: number
+      volleyEndS: number
+      fepspStartS: number
+      fepspEndS: number
+      method: FPspMeasurementMethod
+      slopeLowPct: number
+      slopeHighPct: number
+      peakDirection: FPspPeakDirection
+      avgN: number
+      sweepIndices?: number[] | null
+      appendToExisting?: boolean
+      /** Pre-detection filter applied per sweep before averaging. */
+      filterEnabled?: boolean
+      filterType?: 'lowpass' | 'highpass' | 'bandpass'
+      filterLow?: number
+      filterHigh?: number
+      filterOrder?: number
+    },
+  ) => Promise<void>
+  clearFPsp: (group?: number, series?: number) => void
+  selectFPspPoint: (group: number, series: number, idx: number | null) => void
+  setFPspTimeAxis: (group: number, series: number, axis: FPspTimeAxis) => void
+  setFPspNormalize: (group: number, series: number, normalize: boolean) => void
+  setFPspNormBaseline: (group: number, series: number, from: number, to: number) => void
+  exportFPspCSV: () => Promise<void>
 
   // I-V curve actions
   runIVCurve: (
@@ -617,6 +768,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   resistanceMonitor: null,
   fieldBursts: {},
   ivCurves: {},
+  fpspCurves: {},
   zoomMode: false,
   showCursors: true,
   showBurstMarkers: true,
@@ -911,6 +1063,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       visibleTraces: {},
       fieldBursts: {},
       ivCurves: {},
+      fpspCurves: {},
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
@@ -949,6 +1102,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // fPSP curves.
+        const savedFPsp = await _loadPersistedFPsp(recording.filePath)
+        if (savedFPsp) {
+          set({ fpspCurves: savedFPsp })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -1628,6 +1791,246 @@ export const useAppStore = create<AppState>((set, get) => ({
     a.click()
     URL.revokeObjectURL(url)
   },
+
+  // ---- Field PSP analysis ----
+
+  runFPsp: async (group, series, channel, params) => {
+    const { backendUrl } = get()
+    if (!backendUrl) return
+    set({ loading: true, error: null })
+    try {
+      const qs = new URLSearchParams({
+        group: String(group),
+        series: String(series),
+        trace: String(channel),
+        baseline_start_s: String(params.baselineStartS),
+        baseline_end_s: String(params.baselineEndS),
+        volley_start_s: String(params.volleyStartS),
+        volley_end_s: String(params.volleyEndS),
+        fepsp_start_s: String(params.fepspStartS),
+        fepsp_end_s: String(params.fepspEndS),
+        method: params.method,
+        slope_low_pct: String(params.slopeLowPct),
+        slope_high_pct: String(params.slopeHighPct),
+        peak_direction: params.peakDirection,
+        avg_n: String(Math.max(1, Math.round(params.avgN))),
+      })
+      if (params.seriesB != null) {
+        qs.set('series_b', String(params.seriesB))
+      }
+      if (params.sweepIndices && params.sweepIndices.length > 0) {
+        qs.set('sweeps', params.sweepIndices.join(','))
+      }
+      if (params.filterEnabled) {
+        qs.set('filter_enabled', 'true')
+        qs.set('filter_type', params.filterType ?? 'lowpass')
+        qs.set('filter_low', String(params.filterLow ?? 1))
+        qs.set('filter_high', String(params.filterHigh ?? 1000))
+        qs.set('filter_order', String(params.filterOrder ?? 4))
+      }
+      const resp = await apiFetch(backendUrl, `/api/fpsp/run?${qs}`)
+      const key = `${group}:${series}`
+      const existing = get().fpspCurves[key]
+      const newPoints: FPspPoint[] = (resp.points ?? []).map((p: any) => ({
+        sourceSeries: Number(p.source_series ?? series),
+        binIndex: Number(p.bin_index ?? 0),
+        sweepIndices: (p.sweep_indices ?? []).map((x: any) => Number(x)),
+        meanSweepIndex: Number(p.mean_sweep_index ?? 0),
+        baseline: Number(p.baseline ?? 0),
+        volleyPeak: Number(p.volley_peak ?? 0),
+        volleyPeakTs: Number(p.volley_peak_t_s ?? 0),
+        volleyAmp: Number(p.volley_amp ?? 0),
+        fepspPeak: Number(p.fepsp_peak ?? 0),
+        fepspPeakTs: Number(p.fepsp_peak_t_s ?? 0),
+        fepspAmp: Number(p.fepsp_amp ?? 0),
+        slope: p.slope != null ? Number(p.slope) : null,
+        slopeLow: p.slope_low_point
+          ? { t: Number(p.slope_low_point.t), v: Number(p.slope_low_point.v) }
+          : null,
+        slopeHigh: p.slope_high_point
+          ? { t: Number(p.slope_high_point.t), v: Number(p.slope_high_point.v) }
+          : null,
+        ratio: p.ratio != null ? Number(p.ratio) : null,
+        flagged: Boolean(p.flagged),
+      }))
+
+      // For append mode, only rows from the SAME source-series+bin pair
+      // get replaced; everything else stays. Keeps points from seriesB
+      // intact when the user re-runs on a single seriesA sweep, etc.
+      let merged = newPoints
+      if (params.appendToExisting && existing) {
+        const ids = new Set(newPoints.map((p) => `${p.sourceSeries}:${p.binIndex}`))
+        const kept = existing.points.filter(
+          (p) => !ids.has(`${p.sourceSeries}:${p.binIndex}`),
+        )
+        merged = [...kept, ...newPoints].sort((a, b) => {
+          if (a.sourceSeries !== b.sourceSeries) return a.sourceSeries - b.sourceSeries
+          return a.binIndex - b.binIndex
+        })
+      }
+
+      const next: FPspData = {
+        channel,
+        responseUnit: String(resp.response_unit ?? existing?.responseUnit ?? ''),
+        seriesA: series,
+        seriesB: params.seriesB ?? null,
+        stimOnsetS: Number(resp.stim_onset_s ?? existing?.stimOnsetS ?? 0),
+        sweepIntervalA: Number(resp.sweep_interval_s ?? existing?.sweepIntervalA ?? 0),
+        sweepIntervalB: Number(resp.sweep_interval_s_b ?? existing?.sweepIntervalB ?? 0),
+        measurementMethod: params.method,
+        slopeLowPct: params.slopeLowPct,
+        slopeHighPct: params.slopeHighPct,
+        peakDirection: params.peakDirection,
+        avgN: Math.max(1, Math.round(params.avgN)),
+        filterEnabled: Boolean(params.filterEnabled),
+        filterType: params.filterType ?? 'lowpass',
+        filterLow: Number(params.filterLow ?? 1),
+        filterHigh: Number(params.filterHigh ?? 1000),
+        filterOrder: Number(params.filterOrder ?? 4),
+        baselineStartS: params.baselineStartS,
+        baselineEndS: params.baselineEndS,
+        volleyStartS: params.volleyStartS,
+        volleyEndS: params.volleyEndS,
+        fepspStartS: params.fepspStartS,
+        fepspEndS: params.fepspEndS,
+        timeAxis: existing?.timeAxis ?? 'timestamp',
+        normalize: existing?.normalize ?? false,
+        normBaselineFrom: existing?.normBaselineFrom ?? 1,
+        normBaselineTo: existing?.normBaselineTo ?? Math.max(1, Math.min(10, merged.length)),
+        points: merged,
+        selectedIdx: null,
+      }
+      set((s) => ({ fpspCurves: { ...s.fpspCurves, [key]: next }, loading: false }))
+      _broadcastFPsp(get().fpspCurves)
+    } catch (err: any) {
+      set({ error: err.message, loading: false })
+    }
+  },
+
+  clearFPsp: (group, series) => {
+    set((s) => {
+      if (group == null || series == null) return { fpspCurves: {} }
+      const key = `${group}:${series}`
+      const { [key]: _dropped, ...rest } = s.fpspCurves
+      return { fpspCurves: rest }
+    })
+    _broadcastFPsp(get().fpspCurves)
+  },
+
+  selectFPspPoint: (group, series, idx) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fpspCurves[key]
+      if (!entry) return s
+      return { fpspCurves: { ...s.fpspCurves, [key]: { ...entry, selectedIdx: idx } } }
+    })
+  },
+
+  setFPspTimeAxis: (group, series, axis) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fpspCurves[key]
+      if (!entry) return s
+      return { fpspCurves: { ...s.fpspCurves, [key]: { ...entry, timeAxis: axis } } }
+    })
+    _broadcastFPsp(get().fpspCurves)
+  },
+
+  setFPspNormalize: (group, series, normalize) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fpspCurves[key]
+      if (!entry) return s
+      return { fpspCurves: { ...s.fpspCurves, [key]: { ...entry, normalize } } }
+    })
+    _broadcastFPsp(get().fpspCurves)
+  },
+
+  setFPspNormBaseline: (group, series, from, to) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fpspCurves[key]
+      if (!entry) return s
+      const lo = Math.max(1, Math.min(from, to))
+      const hi = Math.max(lo, Math.max(from, to))
+      return {
+        fpspCurves: {
+          ...s.fpspCurves,
+          [key]: { ...entry, normBaselineFrom: lo, normBaselineTo: hi },
+        },
+      }
+    })
+    _broadcastFPsp(get().fpspCurves)
+  },
+
+  exportFPspCSV: async () => {
+    const { fpspCurves, recording, backendUrl } = get()
+    const keys = Object.keys(fpspCurves)
+    if (keys.length === 0) return
+    let fileName: string = recording?.fileName ?? ''
+    if (!fileName && backendUrl) {
+      try {
+        const info = await fetch(`${backendUrl}/api/files/info`).then((r) => r.ok ? r.json() : null)
+        if (info?.fileName) fileName = info.fileName
+      } catch { /* ignore */ }
+    }
+    const header = [
+      'file', 'group', 'source_series', 'bin_index', 'sweep_indices',
+      'baseline', 'volley_peak', 'volley_peak_t_s', 'volley_amp',
+      'fepsp_peak', 'fepsp_peak_t_s', 'fepsp_amp',
+      'ratio', 'flagged',
+      'slope', 'slope_low_t_s', 'slope_low_v', 'slope_high_t_s', 'slope_high_v',
+      'method', 'slope_low_pct', 'slope_high_pct',
+      'peak_direction', 'avg_n', 'response_unit', 'stim_onset_s',
+      'sweep_interval_s',
+    ]
+    const rows: string[] = [header.join(',')]
+    for (const key of keys) {
+      const [g] = key.split(':').map(Number)
+      const entry = fpspCurves[key]
+      entry.points.forEach((p) => {
+        const ival = p.sourceSeries === entry.seriesA
+          ? entry.sweepIntervalA
+          : (entry.sweepIntervalB || 0)
+        rows.push([
+          JSON.stringify(fileName),
+          g, p.sourceSeries, p.binIndex,
+          JSON.stringify(p.sweepIndices.join(' ')),
+          p.baseline.toFixed(4),
+          p.volleyPeak.toFixed(4),
+          p.volleyPeakTs.toFixed(6),
+          p.volleyAmp.toFixed(4),
+          p.fepspPeak.toFixed(4),
+          p.fepspPeakTs.toFixed(6),
+          p.fepspAmp.toFixed(4),
+          p.ratio != null ? p.ratio.toFixed(3) : '',
+          p.flagged ? '1' : '0',
+          p.slope != null ? p.slope.toFixed(4) : '',
+          p.slopeLow ? p.slopeLow.t.toFixed(6) : '',
+          p.slopeLow ? p.slopeLow.v.toFixed(4) : '',
+          p.slopeHigh ? p.slopeHigh.t.toFixed(6) : '',
+          p.slopeHigh ? p.slopeHigh.v.toFixed(4) : '',
+          entry.measurementMethod,
+          entry.slopeLowPct.toFixed(1),
+          entry.slopeHighPct.toFixed(1),
+          entry.peakDirection,
+          entry.avgN,
+          JSON.stringify(entry.responseUnit),
+          entry.stimOnsetS.toFixed(6),
+          ival.toFixed(4),
+        ].join(','))
+      })
+    }
+    const csv = rows.join('\n')
+    const defaultName = (fileName || 'recording').replace(/\.[^.]+$/, '') + '_fpsp.csv'
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = defaultName
+    a.click()
+    URL.revokeObjectURL(url)
+  },
 }))
 
 /** Normalize a single-sweep burst-detector response into BurstRecord[]. */
@@ -1686,6 +2089,16 @@ useAppStore.subscribe((state) => {
   _lastPersistedIVRef = state.ivCurves
   if (state.recording?.filePath) {
     _savePersistedIVCurves(state.recording.filePath, state.ivCurves)
+  }
+})
+
+// fPSP persistence subscribe.
+let _lastPersistedFPspRef: Record<string, FPspData> | null = null
+useAppStore.subscribe((state) => {
+  if (state.fpspCurves === _lastPersistedFPspRef) return
+  _lastPersistedFPspRef = state.fpspCurves
+  if (state.recording?.filePath) {
+    _savePersistedFPsp(state.recording.filePath, state.fpspCurves)
   }
 })
 

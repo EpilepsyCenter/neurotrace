@@ -2,18 +2,20 @@ import React, { useEffect, useState } from 'react'
 
 /** Number input that doesn't lose focus on every keystroke.
  *
- * The raw `<input type="number" value={state} onChange={parseFloat}>` pattern
- * breaks multi-digit / decimal / negative typing because intermediate states
- * like "-" or "." or "" fail to parse, causing the committed value (and
- * input.value) to snap back on every keystroke.
+ * Uses ``type="text"`` + ``inputMode="decimal"`` rather than ``type="number"``
+ * on purpose: native number inputs format their displayed value with the
+ * user's locale, which shows decimal commas (1,5) on European systems and
+ * makes the UI inconsistent with our dot-separated tables/CSV. We render the
+ * value using JavaScript's default ``String(n)`` (always dot) and accept
+ * either dot or comma when parsing so users can type naturally either way.
  *
- * This wrapper keeps a local string buffer while focused and only calls
- * ``onChange(numericValue)`` on blur or Enter. It also re-syncs from the
- * external value whenever it changes, as long as the input is not focused. */
+ * Keeps a local string buffer while focused and only calls
+ * ``onChange(numericValue)`` on blur or Enter. Re-syncs from the external
+ * value whenever it changes, as long as the input is not focused. */
 export function NumInput({
   value,
   onChange,
-  step,
+  step: _step,
   min,
   max,
   placeholder,
@@ -24,6 +26,7 @@ export function NumInput({
 }: {
   value: number
   onChange: (v: number) => void
+  /** Kept for API compat; unused now that we render as text. */
   step?: number
   min?: number
   max?: number
@@ -42,18 +45,29 @@ export function NumInput({
   }, [value, focused])
 
   const commit = () => {
-    const n = parseFloat(local)
-    if (isFinite(n)) onChange(n)
-    else setLocal(String(value))
+    // Accept comma OR dot as decimal separator — we normalize either way.
+    const n = parseFloat(local.replace(',', '.'))
+    if (isFinite(n)) {
+      let clamped = n
+      if (min != null) clamped = Math.max(min, clamped)
+      if (max != null) clamped = Math.min(max, clamped)
+      onChange(clamped)
+      // Snap the displayed value to the canonical dot form.
+      setLocal(String(clamped))
+    } else {
+      setLocal(String(value))
+    }
   }
 
   return (
     <input
-      type="number"
+      type="text"
+      inputMode="decimal"
+      // Matches standard floats incl. optional sign and exponent. The
+      // comma variant for the decimal is accepted so a user on a European
+      // locale can type naturally; commit() normalizes to dot.
+      pattern="^-?\d*([.,]\d*)?([eE][-+]?\d+)?$"
       value={local}
-      step={step}
-      min={min}
-      max={max}
       placeholder={placeholder}
       style={style}
       disabled={disabled}

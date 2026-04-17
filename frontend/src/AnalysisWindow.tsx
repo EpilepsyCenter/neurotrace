@@ -4,6 +4,7 @@ import { CursorPositions, useAppStore } from './stores/appStore'
 import { ResistanceWindow } from './components/AnalysisWindows/ResistanceWindow'
 import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
 import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
+import { FPspWindow } from './components/AnalysisWindows/FPspWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -120,9 +121,15 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.ivCurves) {
             useAppStore.setState({ ivCurves: ev.data.ivCurves })
           }
+          if (ev.data.fpspCurves) {
+            useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
+          }
         }
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })
+        }
+        if (ev.data?.type === 'fpsp-update' && ev.data.fpspCurves) {
+          useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
         }
       }
 
@@ -139,7 +146,7 @@ export function AnalysisWindow({ view }: { view: string }) {
     events: 'Event Detection',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
-    field_potential: 'Field Potential',
+    field_potential: 'Field PSP',
     spectral: 'Spectral Analysis',
   }
 
@@ -208,6 +215,15 @@ export function AnalysisWindow({ view }: { view: string }) {
             backendUrl={backendUrl}
             fileInfo={fileInfo}
             currentSweep={currentSweep}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
+            cursors={cursors}
+          />
+        ) : view === 'field_potential' ? (
+          <FPspWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
             mainGroup={mainGroup}
             mainSeries={mainSeries}
             mainTrace={mainTrace}

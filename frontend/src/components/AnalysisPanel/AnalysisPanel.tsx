@@ -13,7 +13,7 @@ const ANALYSIS_OPTIONS: { value: AnalysisType; label: string }[] = [
   { value: 'iv', label: 'I-V Curve' },
   { value: 'kinetics', label: 'Kinetics (Fit)' },
   { value: 'events', label: 'Event Detection' },
-  { value: 'field_potential', label: 'Field Potential' },
+  { value: 'field_potential', label: 'Field PSP (fEPSP + volley)' },
   { value: 'bursts', label: 'Burst Detection' },
   { value: 'spectral', label: 'Spectral Analysis' },
 ]
@@ -30,6 +30,9 @@ export function AnalysisPanel() {
     }
     if (t === 'iv' && window.electronAPI?.openAnalysisWindow) {
       window.electronAPI.openAnalysisWindow('iv').catch(() => { /* ignore */ })
+    }
+    if (t === 'field_potential' && window.electronAPI?.openAnalysisWindow) {
+      window.electronAPI.openAnalysisWindow('field_potential').catch(() => { /* ignore */ })
     }
   }
 
@@ -71,6 +74,17 @@ export function AnalysisPanel() {
             className="btn"
             style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
             onClick={() => window.electronAPI?.openAnalysisWindow?.('iv')}
+          >
+            Open
+          </button>
+        </p>
+      ) : analysisType === 'field_potential' ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)', fontStyle: 'italic' }}>
+          Field PSP analysis runs in its own window.{' '}
+          <button
+            className="btn"
+            style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
+            onClick={() => window.electronAPI?.openAnalysisWindow?.('field_potential')}
           >
             Open
           </button>

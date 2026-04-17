@@ -190,6 +190,7 @@ export function CursorPanel() {
             trace: state.currentTrace,
             fieldBursts: state.fieldBursts,
             ivCurves: state.ivCurves,
+            fpspCurves: state.fpspCurves,
           })
         }
         // Bursts pushed from an analysis window → adopt them here so the
@@ -201,6 +202,10 @@ export function CursorPanel() {
         // window's store has them for persistence.
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })
+        }
+        // fPSP data from analysis window.
+        if (ev.data?.type === 'fpsp-update' && ev.data.fpspCurves) {
+          useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
         }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same

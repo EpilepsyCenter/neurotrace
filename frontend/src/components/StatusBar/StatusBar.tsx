@@ -17,7 +17,11 @@ export function StatusBar() {
         )}
         {traceData && (
           <span>
-            {traceData.samplingRate.toLocaleString()} Hz | {traceData.values.length.toLocaleString()} samples
+            {/* en-US locale for the thousands separator keeps the output
+                consistent on European systems where toLocaleString() would
+                otherwise render "20.000 Hz" (dot as thousands separator),
+                which reads as a decimal. */}
+            {traceData.samplingRate.toLocaleString('en-US')} Hz | {traceData.values.length.toLocaleString('en-US')} samples
           </span>
         )}
       </div>

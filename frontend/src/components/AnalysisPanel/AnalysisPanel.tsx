@@ -5,11 +5,12 @@ import { GenericJsonPanel } from './panels/GenericJsonPanel'
 
 export type AnalysisType =
   | 'cursors' | 'resistance' | 'kinetics' | 'events'
-  | 'field_potential' | 'bursts' | 'spectral'
+  | 'field_potential' | 'bursts' | 'spectral' | 'iv'
 
 const ANALYSIS_OPTIONS: { value: AnalysisType; label: string }[] = [
   { value: 'cursors', label: 'Cursor Measurements' },
   { value: 'resistance', label: 'Rs / Rin / Cm' },
+  { value: 'iv', label: 'I-V Curve' },
   { value: 'kinetics', label: 'Kinetics (Fit)' },
   { value: 'events', label: 'Event Detection' },
   { value: 'field_potential', label: 'Field Potential' },
@@ -26,6 +27,9 @@ export function AnalysisPanel() {
     // Analyses that have their own dedicated window: open it on selection.
     if (t === 'bursts' && window.electronAPI?.openAnalysisWindow) {
       window.electronAPI.openAnalysisWindow('bursts').catch(() => { /* ignore */ })
+    }
+    if (t === 'iv' && window.electronAPI?.openAnalysisWindow) {
+      window.electronAPI.openAnalysisWindow('iv').catch(() => { /* ignore */ })
     }
   }
 
@@ -56,6 +60,17 @@ export function AnalysisPanel() {
             className="btn"
             style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
             onClick={() => window.electronAPI?.openAnalysisWindow?.('bursts')}
+          >
+            Open
+          </button>
+        </p>
+      ) : analysisType === 'iv' ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)', fontStyle: 'italic' }}>
+          I-V curve analysis runs in its own window.{' '}
+          <button
+            className="btn"
+            style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
+            onClick={() => window.electronAPI?.openAnalysisWindow?.('iv')}
           >
             Open
           </button>

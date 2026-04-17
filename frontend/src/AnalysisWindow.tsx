@@ -3,6 +3,7 @@ import { useThemeStore } from './stores/themeStore'
 import { CursorPositions, useAppStore } from './stores/appStore'
 import { ResistanceWindow } from './components/AnalysisWindows/ResistanceWindow'
 import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
+import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -116,6 +117,12 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.fieldBursts) {
             useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
           }
+          if (ev.data.ivCurves) {
+            useAppStore.setState({ ivCurves: ev.data.ivCurves })
+          }
+        }
+        if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
+          useAppStore.setState({ ivCurves: ev.data.ivCurves })
         }
       }
 
@@ -195,6 +202,16 @@ export function AnalysisWindow({ view }: { view: string }) {
             mainGroup={mainGroup}
             mainSeries={mainSeries}
             mainTrace={mainTrace}
+          />
+        ) : view === 'iv' ? (
+          <IVCurveWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            currentSweep={currentSweep}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
+            cursors={cursors}
           />
         ) : (
           <div style={{

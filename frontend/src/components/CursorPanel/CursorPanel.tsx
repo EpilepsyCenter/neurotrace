@@ -189,12 +189,18 @@ export function CursorPanel() {
             series: state.currentSeries,
             trace: state.currentTrace,
             fieldBursts: state.fieldBursts,
+            ivCurves: state.ivCurves,
           })
         }
         // Bursts pushed from an analysis window → adopt them here so the
         // main TraceViewer's burst-marker overlay has data to draw.
         if (ev.data?.type === 'bursts-update' && ev.data.fieldBursts) {
           useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
+        }
+        // I-V curves pushed from an analysis window → adopt here so the main
+        // window's store has them for persistence.
+        if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
+          useAppStore.setState({ ivCurves: ev.data.ivCurves })
         }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same

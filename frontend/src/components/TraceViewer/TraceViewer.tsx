@@ -65,6 +65,8 @@ export function TraceViewer() {
   const fieldBurstsRef = useRef(useAppStore.getState().fieldBursts)
   const currentSweepRef = useRef(useAppStore.getState().currentSweep)
   const showBurstMarkersRef = useRef(useAppStore.getState().showBurstMarkers)
+  const showCoordinatesRef = useRef(useAppStore.getState().showCoordinates)
+  const coordTooltipRef = useRef<HTMLDivElement>(null)
 
   // Tracks whether the CURRENT plot instance was built in Full (null viewport)
   // mode. Used in cleanup so we only persist x-range as the "Full-mode saved
@@ -88,6 +90,8 @@ export function TraceViewer() {
     currentSweep,
     fieldBursts,
     showBurstMarkers,
+    showCoordinates,
+    toggleCoordinates,
   } = useAppStore()
 
   // Visible-trace set for the current series — includes recorded channel
@@ -123,6 +127,7 @@ export function TraceViewer() {
   fieldBurstsRef.current = fieldBursts
   currentSweepRef.current = currentSweep
   showBurstMarkersRef.current = showBurstMarkers
+  showCoordinatesRef.current = showCoordinates
 
   const [hoverCursor, setHoverCursor] = useState<string>('')
 
@@ -449,14 +454,20 @@ export function TraceViewer() {
   useEffect(() => {
     if (!containerRef.current || !traceData) return
 
-    // Save the current axis ranges before tearing down
+    // Save the current axis ranges before tearing down. X is persisted only
+    // when the plot we're tearing down rendered in Full mode — otherwise
+    // the "saved" x would be a viewport-window slice, which would wrongly
+    // shrink the next Full-mode view when we rebuild. Y persists in both
+    // modes (it's orthogonal to viewport).
     const prevKey = lastSeriesRef.current
     if (plotRef.current && prevKey) {
       const u = plotRef.current
       const xs = u.scales.x
       const ys = u.scales.y
       const ranges: any = {}
-      if (xs && xs.min != null && xs.max != null) ranges.x = { min: xs.min, max: xs.max }
+      if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
+        ranges.x = { min: xs.min, max: xs.max }
+      }
       if (ys && ys.min != null && ys.max != null) ranges.y = { min: ys.min, max: ys.max }
       const [pg, ps] = prevKey.split(':').map(Number)
       saveSeriesAxisRange(pg, ps, ranges)
@@ -651,6 +662,56 @@ export function TraceViewer() {
       series: seriesOpts,
       hooks: {
         draw: [() => drawCursors()],
+        // Coordinate tooltip that follows the cursor. Position + content
+        // come from uPlot's cursor state; visibility is gated by the
+        // "Show/hide coordinates" toolbar toggle (read via ref so this
+        // hook doesn't need to rebuild when the flag flips).
+        setCursor: [
+          (u: uPlot) => {
+            const tip = coordTooltipRef.current
+            if (!tip) return
+            if (!showCoordinatesRef.current) {
+              tip.style.display = 'none'
+              return
+            }
+            const left = u.cursor.left
+            const top = u.cursor.top
+            const idx = u.cursor.idx
+            if (
+              left == null || top == null || idx == null ||
+              left < 0 || top < 0 || !isFinite(idx as number)
+            ) {
+              tip.style.display = 'none'
+              return
+            }
+            const xs = (u.data[0] as unknown as number[])?.[idx as number]
+            const ys = (u.data[1] as unknown as (number | null)[])?.[idx as number]
+            if (xs == null || ys == null || !isFinite(xs) || !isFinite(ys as number)) {
+              tip.style.display = 'none'
+              return
+            }
+            // Position the tooltip offset from the cursor so the OS mouse
+            // arrow (which extends down-right from its tip) doesn't sit on
+            // top of it. Default: above-right of the cursor. Flip below
+            // when near the top edge; flip left when near the right edge.
+            const dpr = devicePixelRatio || 1
+            const plotRight = u.bbox.width / dpr
+            const approxTipW = 110
+            const approxTipH = 22
+            const offsetX = 12
+            const offsetY = 14
+            const nearRight = left + offsetX + approxTipW > plotRight
+            const nearTop = top - offsetY - approxTipH < 0
+            tip.style.display = 'block'
+            tip.style.left = nearRight
+              ? `${left - offsetX - approxTipW}px`
+              : `${left + offsetX}px`
+            tip.style.top = nearTop
+              ? `${top + offsetY + 10}px`          // below cursor
+              : `${top - offsetY - approxTipH}px`  // above cursor (default)
+            tip.textContent = `${(xs as number).toFixed(3)} s  ·  ${(ys as number).toFixed(3)}${traceData?.units ? ' ' + traceData.units : ''}`
+          },
+        ],
         // Drag-zoom rectangle completed: apply it ourselves.
         // Route X through the viewport system so we refetch at the zoomed
         // resolution; apply Y directly via setScale + persist to the store.
@@ -711,12 +772,22 @@ export function TraceViewer() {
               if (Math.abs(xs.min - vp.start) < EPS && Math.abs(xs.max - vp.end) < EPS) return
               const newLen = xs.max - xs.min
               if (newLen <= 0 || !isFinite(newLen)) return
-              // Mid-pan: update state only, no fetch per-frame.
+              // Mid-pan: update state only, no fetch per-frame. Clamp in
+              // the same way setViewport does, otherwise pan past the
+              // edges puts the store in an out-of-bounds state.
               if (dragRef.current?.kind === 'pan') {
-                useAppStore.setState({ viewport: { start: xs.min, end: xs.max } })
+                const dur = st.sweepDuration
+                let start = xs.min
+                let end = xs.max
+                if (dur > 0) {
+                  start = Math.max(0, Math.min(start, dur))
+                  end = Math.max(start, Math.min(end, dur))
+                }
+                useAppStore.setState({ viewport: { start, end } })
               } else {
                 // Drag-zoom, Apply-ranges, or zoom-button: deliberate viewport
-                // change — update + refetch at higher resolution.
+                // change — update + refetch at higher resolution (setViewport
+                // clamps internally).
                 st.setViewport({ start: xs.min, end: xs.max })
               }
               return
@@ -794,6 +865,13 @@ export function TraceViewer() {
     drawCursors()
   }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers])
 
+  // Hide the coordinate tooltip immediately when the toggle flips off.
+  useEffect(() => {
+    if (!showCoordinates && coordTooltipRef.current) {
+      coordTooltipRef.current.style.display = 'none'
+    }
+  }, [showCoordinates])
+
   // ================================================================
   // Listen for axis range commands from the CursorPanel
   // ================================================================
@@ -804,8 +882,29 @@ export function TraceViewer() {
         if (ev.data?.type === 'set-axis-range') {
           const u = plotRef.current
           if (!u) return
-          if (ev.data.x) u.setScale('x', { min: ev.data.x.min, max: ev.data.x.max })
-          if (ev.data.y) u.setScale('y', { min: ev.data.y.min, max: ev.data.y.max })
+          // Read current group/series from the store, not closure — the
+          // listener is installed once and must survive series switches.
+          const st = useAppStore.getState()
+          const g = st.currentGroup
+          const s = st.currentSeries
+          if (ev.data.x) {
+            if (st.viewport) {
+              st.setViewport({ start: ev.data.x.min, end: ev.data.x.max })
+            } else {
+              const cur = st.getSeriesAxisRange(g, s) ?? {}
+              st.saveSeriesAxisRange(g, s, {
+                ...cur, x: { min: ev.data.x.min, max: ev.data.x.max },
+              })
+              u.setScale('x', { min: ev.data.x.min, max: ev.data.x.max })
+            }
+          }
+          if (ev.data.y) {
+            const cur = st.getSeriesAxisRange(g, s) ?? {}
+            st.saveSeriesAxisRange(g, s, {
+              ...cur, y: { min: ev.data.y.min, max: ev.data.y.max },
+            })
+            u.setScale('y', { min: ev.data.y.min, max: ev.data.y.max })
+          }
         }
       }
       return () => ch.close()
@@ -1073,6 +1172,43 @@ export function TraceViewer() {
   // ================================================================
 
   /** Zoom an axis by the given factor. factor < 1 zooms in, > 1 zooms out. */
+  /** Apply a new scale range, routing through the right persistence path so
+   *  the range hook doesn't clobber the update.
+   *
+   *  X in viewport mode  → setViewport (refetch at new bounds).
+   *  X in Full mode      → update savedX in the store, then u.setScale. The
+   *                        range hook reads savedX fresh and returns the new
+   *                        bounds; if we skipped the store write, the hook
+   *                        would return the STALE savedX and the setScale
+   *                        would appear to do nothing.
+   *  Y (always)          → update savedY in store, then u.setScale. Same
+   *                        reasoning as Full-mode X.
+   *  stim                → u.setScale directly (no persistence layer).
+   */
+  const applyScale = (key: 'x' | 'y' | 'stim', min: number, max: number) => {
+    const u = plotRef.current
+    if (!u) return
+    if (!isFinite(min) || !isFinite(max) || max <= min) return
+    const st = useAppStore.getState()
+    if (key === 'x' && st.viewport) {
+      st.setViewport({ start: min, end: max })
+      return
+    }
+    if (key === 'x') {
+      const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, x: { min, max } })
+      u.setScale('x', { min, max })
+      return
+    }
+    if (key === 'y') {
+      const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, y: { min, max } })
+      u.setScale('y', { min, max })
+      return
+    }
+    u.setScale(key, { min, max })
+  }
+
   const zoomScale = (key: 'x' | 'y' | 'stim', factor: number) => {
     const u = plotRef.current
     if (!u) return
@@ -1080,7 +1216,7 @@ export function TraceViewer() {
     if (!s || s.min == null || s.max == null) return
     const mid = (s.min + s.max) / 2
     const half = ((s.max - s.min) / 2) * factor
-    u.setScale(key, { min: mid - half, max: mid + half })
+    applyScale(key, mid - half, mid + half)
   }
 
   /** Zoom an axis centered on a specific value (for wheel zoom). */
@@ -1091,7 +1227,7 @@ export function TraceViewer() {
     if (!s || s.min == null || s.max == null) return
     const lo = anchor - (anchor - s.min) * factor
     const hi = anchor + (s.max - anchor) * factor
-    u.setScale(key, { min: lo, max: hi })
+    applyScale(key, lo, hi)
   }
 
   /** Auto-range an axis to fit its data. */
@@ -1100,7 +1236,24 @@ export function TraceViewer() {
     if (!u) return
 
     if (key === 'x') {
-      // x uses data[0]
+      const st = useAppStore.getState()
+      // Viewport mode: "auto X" = show the whole sweep — switch to Full mode.
+      if (st.viewport) {
+        st.setViewport(null)
+        // Also clear any saved X range so the new Full-mode render auto-fits.
+        const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+        if (cur.x) {
+          const { x: _x, ...rest } = cur
+          st.saveSeriesAxisRange(currentGroup, currentSeries, rest)
+        }
+        return
+      }
+      // Full mode: clear the saved X range so the hook returns [dataMin, dataMax].
+      const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
+      if (cur.x) {
+        const { x: _x, ...rest } = cur
+        st.saveSeriesAxisRange(currentGroup, currentSeries, rest)
+      }
       const arr = u.data[0] as number[] | undefined
       if (!arr || arr.length === 0) return
       const first = arr[0]
@@ -1199,6 +1352,22 @@ export function TraceViewer() {
         <TracesDropdown />
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Coordinate-tooltip toggle — shows x/y readout near the cursor
+              when hovering over the trace. */}
+          <button
+            className="zoom-btn"
+            onClick={toggleCoordinates}
+            disabled={!traceData}
+            title={showCoordinates ? 'Hide hover coordinates' : 'Show hover coordinates (x, y)'}
+            style={showCoordinates ? {
+              background: 'var(--accent)',
+              borderColor: 'var(--accent)',
+              color: '#fff',
+            } : undefined}
+          >
+            x,y
+          </button>
+
           {/* X-axis zoom */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>X:</span>
@@ -1325,6 +1494,23 @@ export function TraceViewer() {
             height: '100%',
             pointerEvents: 'none',
             zIndex: 10,
+          }}
+        />
+        {/* Hover coordinate tooltip — positioned by the setCursor hook. */}
+        <div
+          ref={coordTooltipRef}
+          style={{
+            position: 'absolute',
+            display: 'none',
+            pointerEvents: 'none',
+            zIndex: 15,
+            padding: '2px 6px',
+            background: 'rgba(0, 0, 0, 0.72)',
+            color: '#fff',
+            fontSize: 'var(--font-size-label)',
+            fontFamily: 'var(--font-mono)',
+            borderRadius: 3,
+            whiteSpace: 'nowrap',
           }}
         />
       </div>

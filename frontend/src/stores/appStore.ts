@@ -144,6 +144,43 @@ async function _savePersistedBursts(filePath: string, fieldBursts: Record<string
   } catch { /* ignore */ }
 }
 
+/** Load/save I-V curves — same shape as the burst helpers above. */
+async function _loadPersistedIVCurves(filePath: string): Promise<Record<string, IVCurveData> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedIVCurves as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedIVCurves(filePath: string, ivCurves: Record<string, IVCurveData>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedIVCurves as Record<string, any>) ?? {}
+    if (Object.keys(ivCurves).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = ivCurves
+    }
+    await api.setPreferences({ ...prefs, savedIVCurves: store })
+  } catch { /* ignore */ }
+}
+
+/** Broadcast I-V state to other windows — analogous to _broadcastBursts. */
+function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'iv-update', ivCurves })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 /** Broadcast field-burst state + detection filter to other windows via the
  *  shared `neurotrace-sync` channel. Called from the analysis window's store
  *  after every detection run so markers appear in the main viewer. */
@@ -249,6 +286,33 @@ export interface FieldBurstsDiag {
   durationS: number
 }
 
+/** One row of the I-V analysis table — computed per-sweep. */
+export interface IVPoint {
+  sweepIndex: number
+  stimLevel: number          // mV (VC) or pA (CC)
+  baseline: number           // mean of first baseline_window_ms of the sweep
+  steadyState: number        // mean of last peak_window_ms of the pulse
+  transientPeak: number      // extreme during pulse window
+}
+
+/** Which column of the I-V point is plotted on the y-axis. */
+export type IVResponseMetric = 'steady' | 'peak'
+
+/** Per-series I-V output, keyed in the store by "group:series". */
+export interface IVCurveData {
+  channel: number
+  stimUnit: string           // mV for VC, pA for CC (x-axis label)
+  responseUnit: string       // pA for VC, mV for CC (y-axis label)
+  responseMetric: IVResponseMetric
+  /** Cursor windows used for the run (seconds from sweep start). */
+  baselineStartS: number
+  baselineEndS: number
+  peakStartS: number
+  peakEndS: number
+  points: IVPoint[]
+  selectedIdx: number | null
+}
+
 /** Per-series burst-detection output, keyed in the store by "group:series". */
 export interface FieldBurstsData {
   channel: number
@@ -345,12 +409,19 @@ interface AppState {
   // persist across series switches.
   fieldBursts: Record<string, FieldBurstsData>
 
+  // I-V curves, keyed by `${group}:${series}` — persists across navigation
+  // and is saved per-recording in Electron preferences.
+  ivCurves: Record<string, IVCurveData>
+
   // UI state
   zoomMode: boolean
   showCursors: boolean
   /** Whether burst markers (baseline + threshold lines + per-burst dots)
    *  are drawn on the main TraceViewer overlay. Independent of `showCursors`. */
   showBurstMarkers: boolean
+  /** Whether the hover-tooltip showing x/y coordinates is active in the
+   *  main TraceViewer. */
+  showCoordinates: boolean
   loading: boolean
   error: string | null
 
@@ -358,6 +429,7 @@ interface AppState {
   toggleZoomMode: () => void
   toggleCursors: () => void
   toggleBurstMarkers: () => void
+  toggleCoordinates: () => void
   resetCursorsToDefaults: () => void
   setCursorVisibility: (v: Partial<CursorVisibility>) => void
   setFilter: (f: Partial<FilterState>) => void
@@ -422,6 +494,28 @@ interface AppState {
   selectFieldBurst: (group: number, series: number, idx: number | null) => void
   /** Dump the union of all detected bursts across all series to CSV. */
   exportFieldBurstsCSV: () => Promise<void>
+
+  // I-V curve actions
+  runIVCurve: (
+    group: number, series: number, channel: number,
+    params: {
+      /** Cursor windows in seconds from sweep start. */
+      baselineStartS: number
+      baselineEndS: number
+      peakStartS: number
+      peakEndS: number
+      /** Zero-based sweep indices to run on. null = all sweeps. */
+      sweepIndices?: number[] | null
+      /** When true, merge the returned points into the existing table
+       *  (replacing any rows with matching sweepIndex). Used by "single
+       *  sweep" mode. When false, the table is replaced outright. */
+      appendToExisting?: boolean
+    },
+  ) => Promise<void>
+  clearIVCurve: (group?: number, series?: number) => void
+  selectIVPoint: (group: number, series: number, idx: number | null) => void
+  setIVResponseMetric: (group: number, series: number, metric: IVResponseMetric) => void
+  exportIVCSV: () => Promise<void>
 }
 
 const OVERLAY_COLORS = [
@@ -522,15 +616,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   resistanceResult: null,
   resistanceMonitor: null,
   fieldBursts: {},
+  ivCurves: {},
   zoomMode: false,
   showCursors: true,
   showBurstMarkers: true,
+  showCoordinates: false,
   loading: false,
   error: null,
 
   toggleZoomMode: () => set((s) => ({ zoomMode: !s.zoomMode })),
   toggleCursors: () => set((s) => ({ showCursors: !s.showCursors })),
   toggleBurstMarkers: () => set((s) => ({ showBurstMarkers: !s.showBurstMarkers })),
+  toggleCoordinates: () => set((s) => ({ showCoordinates: !s.showCoordinates })),
 
   resetCursorsToDefaults: () => {
     const { traceData, sweepDuration, viewport } = get()
@@ -585,7 +682,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ---- Viewport actions ----
 
   setViewport: (viewport) => {
-    set({ viewport })
+    // Clamp to the current sweep duration so zoom / Apply / drag-zoom can't
+    // push the store into an out-of-bounds state. null means Full mode, left
+    // untouched.
+    let clamped = viewport
+    if (viewport != null) {
+      const { sweepDuration } = get()
+      if (sweepDuration > 0) {
+        let start = Math.max(0, Math.min(viewport.start, sweepDuration))
+        let end = Math.max(start, Math.min(viewport.end, sweepDuration))
+        // If the window collapsed to a point (zoom-in past data), keep at
+        // least a tiny slice so the plot has something to render.
+        if (end - start < 1e-6) {
+          end = Math.min(sweepDuration, start + Math.max(1e-3, sweepDuration * 1e-4))
+          start = Math.max(0, end - 1e-3)
+        }
+        clamped = { start, end }
+      }
+    }
+    set({ viewport: clamped })
     // Fire-and-forget refetch with the new viewport
     get().refetchViewport().catch(() => { /* ignore */ })
   },
@@ -795,6 +910,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       additionalTraces: {},
       visibleTraces: {},
       fieldBursts: {},
+      ivCurves: {},
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
@@ -823,6 +939,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // Same for I-V curves.
+        const savedIV = await _loadPersistedIVCurves(recording.filePath)
+        if (savedIV) {
+          set({ ivCurves: savedIV })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -1356,6 +1482,152 @@ export const useAppStore = create<AppState>((set, get) => ({
     a.click()
     URL.revokeObjectURL(url)
   },
+
+  // ---- I-V curve analysis ----
+
+  runIVCurve: async (group, series, channel, params) => {
+    const { backendUrl } = get()
+    if (!backendUrl) return
+    set({ loading: true, error: null })
+    try {
+      const qs = new URLSearchParams({
+        group: String(group),
+        series: String(series),
+        trace: String(channel),
+        baseline_start_s: String(params.baselineStartS),
+        baseline_end_s: String(params.baselineEndS),
+        peak_start_s: String(params.peakStartS),
+        peak_end_s: String(params.peakEndS),
+      })
+      if (params.sweepIndices && params.sweepIndices.length > 0) {
+        qs.set('sweeps', params.sweepIndices.join(','))
+      }
+      const resp = await apiFetch(backendUrl, `/api/iv/run?${qs}`)
+      const key = `${group}:${series}`
+      const existing = get().ivCurves[key]
+      const newPoints: IVPoint[] = (resp.points ?? []).map((p: any) => ({
+        sweepIndex: Number(p.sweep_index ?? 0),
+        stimLevel: Number(p.stim_level ?? 0),
+        baseline: Number(p.baseline ?? 0),
+        steadyState: Number(p.steady_state ?? 0),
+        transientPeak: Number(p.transient_peak ?? 0),
+      }))
+      // Merge into existing table vs replace — driven by the run mode.
+      // "append" (single sweep) keeps older rows from other sweeps and
+      // replaces any row for the same sweep. Range + all replace entirely.
+      let mergedPoints: IVPoint[] = newPoints
+      if (params.appendToExisting && existing) {
+        const newSweepSet = new Set(newPoints.map((p) => p.sweepIndex))
+        const kept = existing.points.filter((p) => !newSweepSet.has(p.sweepIndex))
+        mergedPoints = [...kept, ...newPoints].sort((a, b) => a.stimLevel - b.stimLevel)
+      }
+      const next: IVCurveData = {
+        channel,
+        stimUnit: String(resp.stim_unit ?? existing?.stimUnit ?? ''),
+        responseUnit: String(resp.response_unit ?? existing?.responseUnit ?? ''),
+        responseMetric: (existing?.responseMetric ?? 'steady') as IVResponseMetric,
+        baselineStartS: params.baselineStartS,
+        baselineEndS: params.baselineEndS,
+        peakStartS: params.peakStartS,
+        peakEndS: params.peakEndS,
+        points: mergedPoints,
+        selectedIdx: null,
+      }
+      set((s) => ({ ivCurves: { ...s.ivCurves, [key]: next }, loading: false }))
+      _broadcastIVCurves(get().ivCurves)
+    } catch (err: any) {
+      set({ error: err.message, loading: false })
+    }
+  },
+
+  clearIVCurve: (group, series) => {
+    set((s) => {
+      if (group == null || series == null) return { ivCurves: {} }
+      const key = `${group}:${series}`
+      const { [key]: _dropped, ...rest } = s.ivCurves
+      return { ivCurves: rest }
+    })
+    _broadcastIVCurves(get().ivCurves)
+  },
+
+  selectIVPoint: (group, series, idx) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.ivCurves[key]
+      if (!entry) return s
+      return {
+        ivCurves: {
+          ...s.ivCurves,
+          [key]: { ...entry, selectedIdx: idx },
+        },
+      }
+    })
+  },
+
+  setIVResponseMetric: (group, series, metric) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.ivCurves[key]
+      if (!entry) return s
+      return {
+        ivCurves: {
+          ...s.ivCurves,
+          [key]: { ...entry, responseMetric: metric },
+        },
+      }
+    })
+    _broadcastIVCurves(get().ivCurves)
+  },
+
+  exportIVCSV: async () => {
+    const { ivCurves, recording, backendUrl } = get()
+    const keys = Object.keys(ivCurves)
+    if (keys.length === 0) return
+    let fileName: string = recording?.fileName ?? ''
+    if (!fileName && backendUrl) {
+      try {
+        const info = await fetch(`${backendUrl}/api/files/info`).then((r) => r.ok ? r.json() : null)
+        if (info?.fileName) fileName = info.fileName
+      } catch { /* ignore */ }
+    }
+    const header = [
+      'file', 'group', 'series', 'sweep_index',
+      'stim_level', 'stim_unit',
+      'baseline', 'steady_state', 'transient_peak',
+      'response_metric', 'response', 'response_unit',
+    ]
+    const rows: string[] = [header.join(',')]
+    for (const key of keys) {
+      const [g, s] = key.split(':').map(Number)
+      const entry = ivCurves[key]
+      entry.points.forEach((p) => {
+        const resp = entry.responseMetric === 'peak'
+          ? p.transientPeak - p.baseline
+          : p.steadyState - p.baseline
+        rows.push([
+          JSON.stringify(fileName),
+          g, s, p.sweepIndex,
+          p.stimLevel.toFixed(4),
+          JSON.stringify(entry.stimUnit),
+          p.baseline.toFixed(4),
+          p.steadyState.toFixed(4),
+          p.transientPeak.toFixed(4),
+          entry.responseMetric,
+          resp.toFixed(4),
+          JSON.stringify(entry.responseUnit),
+        ].join(','))
+      })
+    }
+    const csv = rows.join('\n')
+    const defaultName = (fileName || 'recording').replace(/\.[^.]+$/, '') + '_iv.csv'
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = defaultName
+    a.click()
+    URL.revokeObjectURL(url)
+  },
 }))
 
 /** Normalize a single-sweep burst-detector response into BurstRecord[]. */
@@ -1404,6 +1676,16 @@ useAppStore.subscribe((state) => {
   _lastPersistedBurstsRef = state.fieldBursts
   if (state.recording?.filePath) {
     _savePersistedBursts(state.recording.filePath, state.fieldBursts)
+  }
+})
+
+// Same pattern for I-V curves.
+let _lastPersistedIVRef: Record<string, IVCurveData> | null = null
+useAppStore.subscribe((state) => {
+  if (state.ivCurves === _lastPersistedIVRef) return
+  _lastPersistedIVRef = state.ivCurves
+  if (state.recording?.filePath) {
+    _savePersistedIVCurves(state.recording.filePath, state.ivCurves)
   }
 })
 

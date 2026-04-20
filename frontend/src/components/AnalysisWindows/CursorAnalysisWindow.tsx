@@ -250,8 +250,13 @@ export function CursorAnalysisWindow({
     if (localData.runMode === 'range') return Math.max(0, Math.min(totalSweeps - 1, localData.sweepFrom - 1))
     return 0
   }, [localData.runMode, localData.sweepFrom, localData.sweepOne, totalSweeps])
+  // Depend on stable primitive identifiers rather than the whole fileInfo
+  // object — the parent shell re-fetches `/api/files/info` every 3 s and
+  // hands down a fresh object each time. Without this, the plot below
+  // would destroy-and-recreate on every poll and visibly flicker.
+  const fileName = fileInfo?.fileName ?? null
   useEffect(() => {
-    if (!backendUrl || !fileInfo || totalSweeps === 0) { setPreviewData(null); return }
+    if (!backendUrl || !fileName || totalSweeps === 0) { setPreviewData(null); return }
     let cancelled = false
     const qs = new URLSearchParams({
       group: String(localData.group),
@@ -265,7 +270,7 @@ export function CursorAnalysisWindow({
       .then((d) => { if (!cancelled) setPreviewData({ time: d.time ?? [], values: d.values ?? [] }) })
       .catch(() => { if (!cancelled) setPreviewData(null) })
     return () => { cancelled = true }
-  }, [backendUrl, fileInfo, localData.group, localData.series, localData.trace, previewSweep, totalSweeps])
+  }, [backendUrl, fileName, localData.group, localData.series, localData.trace, previewSweep, totalSweeps])
 
   // ---- Selection handling --------------------------------------------------
 
@@ -865,29 +870,44 @@ function MiniViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  // Latest state ref so hook callbacks always see current values.
+  // Latest state ref so hook callbacks (drawBands, drawFits, event
+  // handlers) always see current values without needing to tear down
+  // and rebuild uPlot on every cursor change.
   const stateRef = useRef({ baseline, slots, measurements, previewSweep })
   stateRef.current = { baseline, slots, measurements, previewSweep }
+  const callbacksRef = useRef({ onBaselineChange, onSlotChange })
+  callbacksRef.current = { onBaselineChange, onSlotChange }
 
-  // Drag state for cursor edges. Captured on pointerdown near an edge.
+  // Drag state for cursor edges and plot panning. Captured on pointerdown.
   type DragTarget =
     | { kind: 'baseline'; edge: 'start' | 'end' }
     | { kind: 'peak'; slot: number; edge: 'start' | 'end' }
     | { kind: 'fit'; slot: number; edge: 'start' | 'end' }
+    | { kind: 'pan'; startX: number; xMin: number; xMax: number; startY: number; yMin: number; yMax: number }
   const dragRef = useRef<DragTarget | null>(null)
 
   const resetZoom = () => {
     const u = plotRef.current
-    if (!u || !data || data.time.length === 0) return
-    u.setScale('x', { min: data.time[0], max: data.time[data.time.length - 1] })
-    u.setScale('y', { min: Math.min(...data.values), max: Math.max(...data.values) })
+    const d = u?.data as unknown as [number[], number[]] | undefined
+    if (!u || !d || !d[0] || d[0].length === 0) return
+    u.setScale('x', { min: d[0][0], max: d[0][d[0].length - 1] })
+    const ys = d[1] as number[]
+    let yMin = Infinity, yMax = -Infinity
+    for (const v of ys) { if (v < yMin) yMin = v; if (v > yMax) yMax = v }
+    if (isFinite(yMin) && isFinite(yMax) && yMin !== yMax) {
+      const pad = (yMax - yMin) * 0.05
+      u.setScale('y', { min: yMin - pad, max: yMax + pad })
+    }
   }
 
+  // --- 1) Initialize the plot ONCE on mount. ----------------------------
+  // Data updates go through `u.setData()` in a separate effect so the
+  // plot (and its event listeners) is not destroyed when the sweep or
+  // file polls yield a new data object. This was causing the preview to
+  // "flicker" / disappear for a moment on every fileInfo refresh.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!data || data.time.length === 0) return
 
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
@@ -909,10 +929,9 @@ function MiniViewer({
           font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
         },
       ],
-      // Enable drag-to-zoom on BOTH axes. The Reset button returns to auto.
-      // Cursor-edge dragging intercepts pointerdowns near a band edge and
-      // stops propagation so uPlot's zoom doesn't start for those events.
-      cursor: { drag: { x: true, y: true, uni: 10 } },
+      // Disable uPlot's own drag behavior. We implement our own pan on
+      // drag + wheel-zoom below so cursor-edge dragging coexists cleanly.
+      cursor: { drag: { x: false, y: false } },
       series: [
         {},
         {
@@ -927,111 +946,178 @@ function MiniViewer({
         draw: [(u) => drawFits(u, stateRef.current)],
       },
     }
-    plotRef.current = new uPlot(opts, [data.time, data.values], el)
+    plotRef.current = new uPlot(opts, [[], []], el)
 
-    // --- Cursor-edge drag handlers ---
-    // uPlot's `over` is the event target used for zoom; we attach listeners
-    // in the capture phase so we can stop propagation before uPlot's own
-    // handler starts a zoom drag.
     const over = el.querySelector<HTMLDivElement>('.u-over')
-    if (over) {
-      const xToPx = (x: number) => plotRef.current!.valToPos(x, 'x', false)
-      const pxToX = (px: number) => plotRef.current!.posToVal(px, 'x')
-      const EDGE_THRESHOLD_PX = 5
+    const EDGE_THRESHOLD_PX = 6
 
-      const findEdge = (pxX: number): DragTarget | null => {
-        const s = stateRef.current
-        const candidates: { target: DragTarget; x: number }[] = []
-        candidates.push({ target: { kind: 'baseline', edge: 'start' }, x: xToPx(s.baseline.start) })
-        candidates.push({ target: { kind: 'baseline', edge: 'end' }, x: xToPx(s.baseline.end) })
-        s.slots.forEach((slot, i) => {
-          if (!slot.enabled) return
-          candidates.push({ target: { kind: 'peak', slot: i, edge: 'start' }, x: xToPx(slot.peak.start) })
-          candidates.push({ target: { kind: 'peak', slot: i, edge: 'end' }, x: xToPx(slot.peak.end) })
-          if (slot.fit) {
-            candidates.push({ target: { kind: 'fit', slot: i, edge: 'start' }, x: xToPx(slot.fit.start) })
-            candidates.push({ target: { kind: 'fit', slot: i, edge: 'end' }, x: xToPx(slot.fit.end) })
-          }
-        })
-        let best: DragTarget | null = null
-        let bestDist = EDGE_THRESHOLD_PX + 1
-        for (const c of candidates) {
-          const d = Math.abs(c.x - pxX)
-          if (d < bestDist) { bestDist = d; best = c.target }
-        }
-        return best
-      }
+    const xToPx = (x: number) => plotRef.current!.valToPos(x, 'x', false)
+    const pxToX = (px: number) => plotRef.current!.posToVal(px, 'x')
+    const pxToY = (py: number) => plotRef.current!.posToVal(py, 'y')
 
-      const onPointerMove = (ev: PointerEvent) => {
-        const rect = over.getBoundingClientRect()
-        const pxX = ev.clientX - rect.left
-        if (dragRef.current) {
-          const x = pxToX(pxX)
-          const t = dragRef.current
-          const s = stateRef.current
-          if (t.kind === 'baseline') {
-            onBaselineChange({
-              ...s.baseline,
-              [t.edge]: x,
-            })
-          } else if (t.kind === 'peak') {
-            const cur = s.slots[t.slot]
-            onSlotChange(t.slot, { peak: { ...cur.peak, [t.edge]: x } })
-          } else {
-            const cur = s.slots[t.slot]
-            if (cur.fit) onSlotChange(t.slot, { fit: { ...cur.fit, [t.edge]: x } })
-          }
-          ev.preventDefault()
-          ev.stopPropagation()
-        } else {
-          // Hover: show the resize cursor when near an edge.
-          over.style.cursor = findEdge(pxX) ? 'ew-resize' : ''
+    const findEdge = (pxX: number): DragTarget | null => {
+      const s = stateRef.current
+      const candidates: { target: DragTarget; x: number }[] = []
+      candidates.push({ target: { kind: 'baseline', edge: 'start' }, x: xToPx(s.baseline.start) })
+      candidates.push({ target: { kind: 'baseline', edge: 'end' }, x: xToPx(s.baseline.end) })
+      s.slots.forEach((slot, i) => {
+        if (!slot.enabled) return
+        candidates.push({ target: { kind: 'peak', slot: i, edge: 'start' }, x: xToPx(slot.peak.start) })
+        candidates.push({ target: { kind: 'peak', slot: i, edge: 'end' }, x: xToPx(slot.peak.end) })
+        if (slot.fit) {
+          candidates.push({ target: { kind: 'fit', slot: i, edge: 'start' }, x: xToPx(slot.fit.start) })
+          candidates.push({ target: { kind: 'fit', slot: i, edge: 'end' }, x: xToPx(slot.fit.end) })
         }
-      }
-      const onPointerDown = (ev: PointerEvent) => {
-        const rect = over.getBoundingClientRect()
-        const pxX = ev.clientX - rect.left
-        const hit = findEdge(pxX)
-        if (hit) {
-          dragRef.current = hit
-          over.setPointerCapture(ev.pointerId)
-          ev.stopPropagation()
-          ev.preventDefault()
-        }
-      }
-      const onPointerUp = (ev: PointerEvent) => {
-        if (dragRef.current) {
-          dragRef.current = null
-          try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
-          ev.stopPropagation()
-        }
-      }
-      over.addEventListener('pointerdown', onPointerDown, true)
-      over.addEventListener('pointermove', onPointerMove, true)
-      over.addEventListener('pointerup', onPointerUp, true)
-
-      const ro = new ResizeObserver(() => {
-        const u = plotRef.current
-        if (!u || !el) return
-        u.setSize({ width: el.clientWidth, height: el.clientHeight })
       })
-      ro.observe(el)
-      return () => {
-        over.removeEventListener('pointerdown', onPointerDown, true)
-        over.removeEventListener('pointermove', onPointerMove, true)
-        over.removeEventListener('pointerup', onPointerUp, true)
-        ro.disconnect()
-        plotRef.current?.destroy(); plotRef.current = null
+      let best: DragTarget | null = null
+      let bestDist = EDGE_THRESHOLD_PX + 1
+      for (const c of candidates) {
+        const d = Math.abs(c.x - pxX)
+        if (d < bestDist) { bestDist = d; best = c.target }
+      }
+      return best
+    }
+
+    const hasData = () => {
+      const d = plotRef.current?.data as unknown as [number[], number[]] | undefined
+      return !!d && !!d[0] && d[0].length > 0
+    }
+    const onPointerDown = (ev: PointerEvent) => {
+      if (!over || !hasData()) return
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const edge = findEdge(pxX)
+      if (edge) {
+        dragRef.current = edge
+      } else {
+        // Plain drag in empty plot area → pan.
+        const u = plotRef.current!
+        const xMin = u.scales.x.min, xMax = u.scales.x.max
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (xMin == null || xMax == null || yMin == null || yMax == null) return
+        dragRef.current = {
+          kind: 'pan',
+          startX: pxX,
+          xMin, xMax,
+          startY: ev.clientY - rect.top,
+          yMin, yMax,
+        }
+      }
+      over.setPointerCapture(ev.pointerId)
+      ev.preventDefault()
+    }
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!over) return
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const t = dragRef.current
+      if (!t) {
+        over.style.cursor = findEdge(pxX) ? 'ew-resize' : 'grab'
+        return
+      }
+      if (t.kind === 'pan') {
+        const u = plotRef.current!
+        const x = pxToX(pxX)
+        const x0 = u.posToVal(t.startX, 'x')
+        const y = pxToY(pxY)
+        const y0 = u.posToVal(t.startY, 'y')
+        const dx = x - x0
+        const dy = y - y0
+        u.setScale('x', { min: t.xMin - dx, max: t.xMax - dx })
+        u.setScale('y', { min: t.yMin - dy, max: t.yMax - dy })
+        over.style.cursor = 'grabbing'
+        return
+      }
+      const x = pxToX(pxX)
+      const s = stateRef.current
+      const cb = callbacksRef.current
+      if (t.kind === 'baseline') {
+        cb.onBaselineChange({ ...s.baseline, [t.edge]: x })
+      } else if (t.kind === 'peak') {
+        const cur = s.slots[t.slot]
+        cb.onSlotChange(t.slot, { peak: { ...cur.peak, [t.edge]: x } })
+      } else {
+        const cur = s.slots[t.slot]
+        if (cur.fit) cb.onSlotChange(t.slot, { fit: { ...cur.fit, [t.edge]: x } })
       }
     }
+    const onPointerUp = (ev: PointerEvent) => {
+      if (dragRef.current && over) {
+        dragRef.current = null
+        try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
+        over.style.cursor = ''
+      }
+    }
+    // Scroll-wheel zoom — X by default, Y when Shift is held. Zooms
+    // around the cursor position so the user's focus stays in view.
+    const onWheel = (ev: WheelEvent) => {
+      if (!over || !hasData()) return
+      const u = plotRef.current!
+      ev.preventDefault()
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
+      if (ev.shiftKey) {
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (yMin == null || yMax == null) return
+        const yAtCur = u.posToVal(pxY, 'y')
+        u.setScale('y', {
+          min: yAtCur - (yAtCur - yMin) * factor,
+          max: yAtCur + (yMax - yAtCur) * factor,
+        })
+      } else {
+        const xMin = u.scales.x.min, xMax = u.scales.x.max
+        if (xMin == null || xMax == null) return
+        const xAtCur = u.posToVal(pxX, 'x')
+        u.setScale('x', {
+          min: xAtCur - (xAtCur - xMin) * factor,
+          max: xAtCur + (xMax - xAtCur) * factor,
+        })
+      }
+    }
+    if (over) {
+      over.addEventListener('pointerdown', onPointerDown)
+      over.addEventListener('pointermove', onPointerMove)
+      over.addEventListener('pointerup', onPointerUp)
+      over.addEventListener('pointercancel', onPointerUp)
+      over.addEventListener('wheel', onWheel, { passive: false })
+    }
+
     const ro = new ResizeObserver(() => {
       const u = plotRef.current
       if (!u || !el) return
       u.setSize({ width: el.clientWidth, height: el.clientHeight })
     })
     ro.observe(el)
-    return () => { ro.disconnect(); plotRef.current?.destroy(); plotRef.current = null }
+    return () => {
+      if (over) {
+        over.removeEventListener('pointerdown', onPointerDown)
+        over.removeEventListener('pointermove', onPointerMove)
+        over.removeEventListener('pointerup', onPointerUp)
+        over.removeEventListener('pointercancel', onPointerUp)
+        over.removeEventListener('wheel', onWheel)
+      }
+      ro.disconnect()
+      plotRef.current?.destroy(); plotRef.current = null
+    }
+  // Mount once: intentionally no deps. Data goes through setData below.
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // --- 2) Push new data without destroying the plot. --------------------
+  useEffect(() => {
+    const u = plotRef.current
+    if (!u) return
+    if (!data || data.time.length === 0) {
+      u.setData([[], []])
+      return
+    }
+    // resetScales=true matches uPlot's own default: the X/Y scales
+    // autoscale to the new data on set. This keeps sweep-switching
+    // behaviour predictable — the user can always wheel/zoom back.
+    u.setData([data.time, data.values])
   }, [data])
 
   useEffect(() => {
@@ -1040,20 +1126,9 @@ function MiniViewer({
     if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
   }, [heightSignal])
 
-  useEffect(() => { plotRef.current?.redraw() }, [baseline, slots, measurements])
-
-  if (!data || data.time.length === 0) {
-    return (
-      <div style={{
-        height: '100%', border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 'var(--font-size-label)',
-      }}>
-        Load a file to preview the trace here.
-      </div>
-    )
-  }
+  // Redraw on cursor / slot / result changes so bands and fit overlays
+  // track the latest state. stateRef has already been updated above.
+  useEffect(() => { plotRef.current?.redraw() }, [baseline, slots, measurements, previewSweep])
 
   return (
     <div style={{
@@ -1063,7 +1138,7 @@ function MiniViewer({
       <button
         className="btn"
         onClick={resetZoom}
-        title="Reset zoom (auto range)"
+        title="Reset zoom — rescales X and Y to the full sweep"
         style={{
           position: 'absolute', top: 4, right: 4, zIndex: 2,
           padding: '1px 8px', fontSize: 'var(--font-size-label)',
@@ -1071,7 +1146,25 @@ function MiniViewer({
       >
         Reset
       </button>
+      <span style={{
+        position: 'absolute', top: 6, left: 10, zIndex: 2,
+        fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
+        fontStyle: 'italic', pointerEvents: 'none',
+      }}>
+        scroll = zoom X · shift-scroll = zoom Y · drag = pan · drag a band edge to move it
+      </span>
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
+      {(!data || data.time.length === 0) && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: 'var(--text-muted)', fontStyle: 'italic',
+          fontSize: 'var(--font-size-label)',
+          pointerEvents: 'none',
+        }}>
+          Load a file to preview the trace here.
+        </div>
+      )}
     </div>
   )
 }

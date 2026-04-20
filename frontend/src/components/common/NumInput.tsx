@@ -63,10 +63,10 @@ export function NumInput({
     <input
       type="text"
       inputMode="decimal"
-      // Matches standard floats incl. optional sign and exponent. The
-      // comma variant for the decimal is accepted so a user on a European
-      // locale can type naturally; commit() normalizes to dot.
-      pattern="^-?\d*([.,]\d*)?([eE][-+]?\d+)?$"
+      // Accept dot or comma as decimal separator; commit() normalizes to
+      // dot on blur. No ``pattern`` attribute because modern Chromium
+      // validates patterns in ``/v`` mode, which rejects an unescaped
+      // dot inside a character class ([.,]) that used to be fine.
       value={local}
       placeholder={placeholder}
       style={style}

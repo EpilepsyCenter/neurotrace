@@ -208,6 +208,14 @@ export function CursorPanel() {
         if (ev.data?.type === 'fpsp-update' && ev.data.fpspCurves) {
           useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
         }
+        // Cursor analysis data from analysis window → adopt here so
+        // the main store's subscribe can persist to electron prefs.
+        // Without this, the analysis window's broadcasts were ignored
+        // and nothing ever got saved to disk, which is why reopening
+        // the window showed defaults.
+        if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
+          useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+        }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same
         // processing as what the markers were computed against.

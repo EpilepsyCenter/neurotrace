@@ -73,8 +73,10 @@ const MEAS_COLUMNS: ColDef[] = [
   { id: 'max_slope_decay', label: 'Decay slope', value: (m) => fmt(m.max_slope_decay, 2) },
   { id: 'rise_decay_ratio', label: 'R/D', value: (m) => fmt(m.rise_decay_ratio, 3) },
   { id: 'area', label: 'Area', value: (m) => fmt(m.area, 3) },
-  { id: 'ap_threshold', label: 'AP thr', value: (m) => fmt(m.ap_threshold, 3) },
-  { id: 'ap_threshold_time', label: 'AP thr time (ms)', value: (m) => fmtMs(m.ap_threshold_time) },
+  // NB: AP-specific columns (ap_threshold / ap_threshold_time) live in
+  // the backend response but are not surfaced here — action-potential
+  // analysis gets its own dedicated window; this one is the Stimfit-
+  // style single/peak cursor measurement suite.
 ]
 
 const FIT_COLUMNS: ColDef[] = [
@@ -182,53 +184,119 @@ export function CursorAnalysisWindow({
   cursors: CursorPositions
 }) {
   const { error, setError } = useAppStore()
-  const recording = useAppStore((s) => s.recording)
-  const filePath = recording?.filePath ?? ''
+  // Inherit display settings from the main viewer: filter config +
+  // zero-offset. The main viewer's values seed a LOCAL copy here that
+  // the user can edit independently (so tweaking the filter for this
+  // window doesn't disturb the main viewer).
+  const mainFilter = useAppStore((s) => s.filter)
+  const mainZeroOffset = useAppStore((s) => s.zeroOffset)
+  const [localFilter, setLocalFilter] = useState(() => ({ ...mainFilter }))
+  const [applyZero, setApplyZero] = useState<boolean>(() => mainZeroOffset)
+  // Re-seed from the main viewer whenever it changes — keeps the window
+  // behaving as an "inherited preview" by default. If the user has
+  // explicitly pinned different values, they can re-edit.
+  useEffect(() => { setLocalFilter({ ...mainFilter }) }, [
+    mainFilter.enabled, mainFilter.type, mainFilter.lowCutoff, mainFilter.highCutoff, mainFilter.order,
+  ])
+  useEffect(() => setApplyZero(mainZeroOffset), [mainZeroOffset])
 
-  // ---- Resolve the blob for the current file -------------------------------
+  // ---- Resolve the blob for the current (group, series) --------------------
   //
-  // Read the store's entry for this file; if missing, seed from defaults +
-  // the main viewer's cursor positions. Write back into the store whenever
-  // anything changes, which also triggers electron-prefs persistence.
+  // The store is keyed by "group:series" — same pattern as FPsp / IV /
+  // bursts. The analysis window can't see `recording.filePath` (it's
+  // only populated in the main window's store), so file-level
+  // persistence is handled there: the main window loads per-file
+  // blobs from electron prefs on file open, saves on every change,
+  // and broadcasts the whole `cursorAnalyses` map to this window via
+  // the `neurotrace-sync` BroadcastChannel. We just read/write the
+  // store by (group, series) key; main handles disk.
 
-  const dataFromStore = useAppStore((s) => (filePath ? s.cursorAnalyses[filePath] : undefined))
-  const [localData, setLocalData] = useState<CursorAnalysisData>(() =>
-    dataFromStore ?? defaultData(cursors, {
-      group: mainGroup ?? 0,
-      series: mainSeries ?? 0,
-      trace: mainTrace ?? 0,
-    }),
-  )
-  // On file change, re-seed from the persisted blob (or defaults).
-  const loadedForFileRef = useRef<string | null>(null)
+  const [localData, setLocalData] = useState<CursorAnalysisData>(() => {
+    const g = mainGroup ?? 0
+    const s = mainSeries ?? 0
+    const t = mainTrace ?? 0
+    const existing = useAppStore.getState().cursorAnalyses[`${g}:${s}`]
+    return existing ?? defaultData(cursors, { group: g, series: s, trace: t })
+  })
+
+  // Current key. Recomputes on every render so group/series swaps take
+  // effect immediately.
+  const storeKey = `${localData.group}:${localData.series}`
+
+  // When the store's entry for the current key changes under us (e.g.
+  // state-request round-trip after window reopen delivers the saved
+  // blob), adopt it. The `syncedOnceRef` gate makes sure we do this
+  // exactly once on first arrival so user edits aren't clobbered.
+  const dataFromStore = useAppStore((s) => s.cursorAnalyses[storeKey])
+  const syncedOnceRef = useRef(false)
   useEffect(() => {
-    if (!filePath) return
-    if (loadedForFileRef.current === filePath) return
-    loadedForFileRef.current = filePath
-    const existing = useAppStore.getState().cursorAnalyses[filePath]
-    setLocalData(
-      existing ?? defaultData(cursors, {
-        group: mainGroup ?? 0,
-        series: mainSeries ?? 0,
-        trace: mainTrace ?? 0,
-      }),
-    )
-  }, [filePath, cursors, mainGroup, mainSeries, mainTrace])
+    if (syncedOnceRef.current) return
+    if (!dataFromStore) return
+    syncedOnceRef.current = true
+    setLocalData(dataFromStore)
+  }, [dataFromStore])
 
-  // Push every change back into the store (debounced via React's batching).
+  // When the user switches group or series, swap localData to that
+  // (group, series) pair's stored blob if one exists; otherwise keep
+  // the current form so they can build a new analysis on the new
+  // series without starting from scratch.
+  const lastKeyRef = useRef(storeKey)
   useEffect(() => {
-    if (!filePath) return
-    useAppStore.setState((s) => ({
-      cursorAnalyses: { ...s.cursorAnalyses, [filePath]: localData },
-    }))
-  }, [localData, filePath])
+    if (lastKeyRef.current === storeKey) return
+    lastKeyRef.current = storeKey
+    const existing = useAppStore.getState().cursorAnalyses[storeKey]
+    if (existing) setLocalData(existing)
+  }, [storeKey])
 
-  // ---- Global UI prefs (splitter, columns, active tab) ---------------------
+  // Mirror every change into the store under the current key, AND
+  // broadcast the full map to the main window so its store can
+  // persist to electron prefs (only the main window knows the
+  // current recording.filePath).
+  //
+  // CRITICAL: we skip the very first mirror run. On mount the
+  // state-update broadcast from the main window (which carries the
+  // previously-persisted `cursorAnalyses`) hasn't arrived yet, so
+  // `localData` is still at its defaults. Mirroring that back would
+  // broadcast defaults to main, which would persist them over the
+  // real data — making the window appear to "lose" everything after
+  // a close-reopen cycle. By skipping the first run we wait for
+  // either the sync effect to populate `localData` from the incoming
+  // store data (in which case the next mirror run writes the same
+  // data back — a no-op) or an actual user edit.
+  const firstMirrorRef = useRef(true)
+  useEffect(() => {
+    if (firstMirrorRef.current) {
+      firstMirrorRef.current = false
+      return
+    }
+    const next = { ...useAppStore.getState().cursorAnalyses, [storeKey]: localData }
+    useAppStore.setState({ cursorAnalyses: next })
+    try {
+      const ch = new BroadcastChannel('neurotrace-sync')
+      ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: next })
+      ch.close()
+    } catch { /* ignore */ }
+  }, [localData, storeKey])
+
+  // ---- Global UI prefs (splitter + columns persist via the store).
+  //      ActiveTab is a LOCAL useState so it's immune to any store-
+  //      subscription or persistence issue — simpler flow for a value
+  //      that only needs to survive within this window session.
 
   const ui = useAppStore((s) => s.cursorWindowUI)
   const setUI = (patch: Partial<typeof ui>) => {
     useAppStore.setState((s) => ({ cursorWindowUI: { ...s.cursorWindowUI, ...patch } }))
   }
+  const [activeTab, setActiveTab] = useState<'measurements' | 'fit'>(ui.activeTab)
+
+  // Memoize the visible slots slice so the MiniViewer's `slots` prop has
+  // a stable reference across parent re-renders (e.g. the /api/files/info
+  // poll fires every 3 s, which was otherwise triggering a redraw that
+  // snapped any user zoom back to auto-fit).
+  const visibleSlots = useMemo(
+    () => localData.slots.slice(0, localData.slotCount),
+    [localData.slots, localData.slotCount],
+  )
 
   // ---- Fit function catalog (loaded once per window) -----------------------
 
@@ -244,7 +312,7 @@ export function CursorAnalysisWindow({
   // ---- Preview trace for the mini-viewer -----------------------------------
 
   const totalSweeps: number = fileInfo?.groups?.[localData.group]?.series?.[localData.series]?.sweepCount ?? 0
-  const [previewData, setPreviewData] = useState<{ time: number[]; values: number[] } | null>(null)
+  const [previewData, setPreviewData] = useState<{ time: number[]; values: number[]; zeroOffset: number } | null>(null)
   const previewSweep = useMemo(() => {
     if (localData.runMode === 'one') return Math.max(0, Math.min(totalSweeps - 1, localData.sweepOne - 1))
     if (localData.runMode === 'range') return Math.max(0, Math.min(totalSweeps - 1, localData.sweepFrom - 1))
@@ -265,12 +333,31 @@ export function CursorAnalysisWindow({
       sweep: String(previewSweep),
       max_points: '4000',
     })
+    if (localFilter.enabled) {
+      qs.set('filter_type', localFilter.type)
+      qs.set('filter_low', String(localFilter.lowCutoff))
+      qs.set('filter_high', String(localFilter.highCutoff))
+      qs.set('filter_order', String(localFilter.order))
+    }
+    if (applyZero) qs.set('zero_offset', 'true')
     fetch(`${backendUrl}/api/traces/data?${qs}`)
       .then((r) => r.json())
-      .then((d) => { if (!cancelled) setPreviewData({ time: d.time ?? [], values: d.values ?? [] }) })
+      .then((d) => {
+        if (cancelled) return
+        setPreviewData({
+          time: d.time ?? [],
+          values: d.values ?? [],
+          zeroOffset: Number(d.zero_offset ?? 0),
+        })
+      })
       .catch(() => { if (!cancelled) setPreviewData(null) })
     return () => { cancelled = true }
-  }, [backendUrl, fileName, localData.group, localData.series, localData.trace, previewSweep, totalSweeps])
+  }, [
+    backendUrl, fileName,
+    localData.group, localData.series, localData.trace, previewSweep, totalSweeps,
+    applyZero,
+    localFilter.enabled, localFilter.type, localFilter.lowCutoff, localFilter.highCutoff, localFilter.order,
+  ])
 
   // ---- Selection handling --------------------------------------------------
 
@@ -345,8 +432,9 @@ export function CursorAnalysisWindow({
             initial_guess: s.fitOptions.initialGuess ?? null,
           } : null,
         })),
-        compute_ap: localData.computeAP,
-        ap_slope_vs: localData.apSlope,
+        // AP-threshold detection is handled by a dedicated AP analysis
+        // window; always off here.
+        compute_ap: false,
       }
       const resp = await fetch(`${backendUrl}/api/cursors/run`, {
         method: 'POST',
@@ -397,8 +485,6 @@ export function CursorAnalysisWindow({
           case 'max_slope_decay': return fmt(m.max_slope_decay, 6)
           case 'rise_decay_ratio': return fmt(m.rise_decay_ratio, 6)
           case 'area': return fmt(m.area, 6)
-          case 'ap_threshold': return fmt(m.ap_threshold, 6)
-          case 'ap_threshold_time': return fmt(m.ap_threshold_time, 6)
           case 'fit_function': return m.fit?.function ?? ''
           case 'r_squared': return fmt(m.fit?.r_squared, 6)
           case 'rss': return fmt(m.fit?.rss, 6)
@@ -445,8 +531,8 @@ export function CursorAnalysisWindow({
       display: 'flex', flexDirection: 'column', height: '100%',
       padding: 10, gap: 8, minHeight: 0,
     }}>
-      {/* --- Selectors + run bar --------------------------------------- */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* --- Selectors (group / series / channel / sweep navigator) ---- */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <Field label="Group">
           <select value={localData.group} onChange={(e) => patch({ group: Number(e.target.value) })} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
@@ -468,6 +554,90 @@ export function CursorAnalysisWindow({
             ))}
           </select>
         </Field>
+        <Field label="Sweep (preview)">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            <button className="btn" disabled={totalSweeps === 0 || localData.sweepOne <= 1}
+              onClick={() => patch({
+                runMode: 'one',
+                sweepOne: Math.max(1, localData.sweepOne - 1),
+              })}
+              style={{ padding: '2px 8px' }} title="Previous sweep">
+              ←
+            </button>
+            <NumInput value={localData.sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+              onChange={(v) => patch({
+                runMode: 'one',
+                sweepOne: Math.max(1, Math.min(totalSweeps, Math.round(v))),
+              })}
+              style={{ width: 48 }} />
+            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
+              / {totalSweeps || '—'}
+            </span>
+            <button className="btn" disabled={totalSweeps === 0 || localData.sweepOne >= totalSweeps}
+              onClick={() => patch({
+                runMode: 'one',
+                sweepOne: Math.min(totalSweeps, localData.sweepOne + 1),
+              })}
+              style={{ padding: '2px 8px' }} title="Next sweep">
+              →
+            </button>
+          </span>
+        </Field>
+      </div>
+
+      {/* --- Filter (seeded from main viewer, editable locally) + zero offset */}
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+        padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
+      }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+          <input type="checkbox" checked={localFilter.enabled}
+            onChange={(e) => setLocalFilter((f) => ({ ...f, enabled: e.target.checked }))} />
+          Filter
+        </label>
+        <select value={localFilter.type} disabled={!localFilter.enabled}
+          onChange={(e) => setLocalFilter((f) => ({ ...f, type: e.target.value as any }))}>
+          <option value="lowpass">Lowpass</option>
+          <option value="highpass">Highpass</option>
+          <option value="bandpass">Bandpass</option>
+        </select>
+        {(localFilter.type === 'highpass' || localFilter.type === 'bandpass') && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ color: 'var(--text-muted)' }}>Low</span>
+            <NumInput value={localFilter.lowCutoff} step={1} min={0.1}
+              onChange={(v) => setLocalFilter((f) => ({ ...f, lowCutoff: v }))}
+              style={{ width: 60 }} />
+            <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+          </span>
+        )}
+        {(localFilter.type === 'lowpass' || localFilter.type === 'bandpass') && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ color: 'var(--text-muted)' }}>High</span>
+            <NumInput value={localFilter.highCutoff} step={100} min={1}
+              onChange={(v) => setLocalFilter((f) => ({ ...f, highCutoff: v }))}
+              style={{ width: 70 }} />
+            <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+          </span>
+        )}
+        <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Order</span>
+          <NumInput value={localFilter.order} step={1} min={1} max={8}
+            onChange={(v) => setLocalFilter((f) => ({ ...f, order: Math.max(1, Math.min(8, Math.round(v))) }))}
+            style={{ width: 44 }} />
+        </span>
+        <button className="btn" title="Copy filter settings from the main viewer"
+          style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+          onClick={() => setLocalFilter({ ...mainFilter })}>
+          ← main
+        </button>
+        <span style={{ width: 1, height: 18, background: 'var(--border)' }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+          title="Subtract a baseline computed from the first ~3 ms of the sweep">
+          <input type="checkbox" checked={applyZero}
+            onChange={(e) => setApplyZero(e.target.checked)} />
+          Zero offset
+        </label>
       </div>
 
       <div style={{
@@ -519,7 +689,7 @@ export function CursorAnalysisWindow({
         </button>
       </div>
 
-      {/* --- Baseline + slot count + AP mode --------------------------- */}
+      {/* --- Baseline + slot count ------------------------------------ */}
       <div style={{
         display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap',
         padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4,
@@ -540,31 +710,13 @@ export function CursorAnalysisWindow({
             <option value="median">median</option>
           </select>
         </label>
-        <button
-          className="btn"
-          style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-          onClick={() => patch({ baseline: { start: cursors.baselineStart, end: cursors.baselineEnd } })}
-          title="Copy baseline cursor values from the main viewer"
-        >
-          ← main
-        </button>
         <span style={{ width: 1, height: 18, background: 'var(--border)' }} />
         <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-          Slots:
+          Cursor pairs:
           <NumInput value={localData.slotCount} step={1} min={1} max={MAX_SLOTS}
             onChange={(v) => patch({ slotCount: Math.max(1, Math.min(MAX_SLOTS, Math.round(v))) })}
             style={{ width: 44 }} />
         </label>
-        <span style={{ marginLeft: 'auto' }}>
-          <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-            <input type="checkbox" checked={localData.computeAP}
-              onChange={(e) => patch({ computeAP: e.target.checked })} />
-            AP mode (threshold at
-            <NumInput value={localData.apSlope} step={1}
-              onChange={(v) => patch({ apSlope: v })} style={{ width: 44 }} />
-            V/s)
-          </label>
-        </span>
       </div>
 
       {/* --- Slot table (only the first slotCount rows) ---------------- */}
@@ -587,7 +739,6 @@ export function CursorAnalysisWindow({
               <Th>Fit end</Th>
               <Th>Fit function</Th>
               <Th>Fit opts</Th>
-              <Th />
             </tr>
           </thead>
           <tbody>
@@ -627,10 +778,11 @@ export function CursorAnalysisWindow({
             data={previewData}
             heightSignal={ui.plotHeight}
             baseline={localData.baseline}
-            slots={localData.slots.slice(0, localData.slotCount)}
+            slots={visibleSlots}
             traceUnit={localData.traceUnit}
             measurements={localData.measurements}
             previewSweep={previewSweep}
+            displayYOffset={previewData?.zeroOffset ?? 0}
             onBaselineChange={(b) => patch({ baseline: b })}
             onSlotChange={updateSlot}
           />
@@ -647,8 +799,8 @@ export function CursorAnalysisWindow({
 
         <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <ResultsTabs
-            activeTab={ui.activeTab}
-            setActiveTab={(t) => setUI({ activeTab: t })}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
             measurements={localData.measurements}
             traceUnit={localData.traceUnit}
             fitFunctions={fitFunctions}
@@ -757,17 +909,10 @@ function SlotRow({
             </button>
           )}
         </Td>
-        <Td>
-          <button className="btn" title="Copy peak window from main viewer cursor"
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-            onClick={() => onChange({ peak: { start: cursors.peakStart, end: cursors.peakEnd } })}>
-            ← main
-          </button>
-        </Td>
       </tr>
       {optsOpen && fitEnabled && activeFn && (
         <tr>
-          <td colSpan={9} style={{
+          <td colSpan={8} style={{
             background: 'var(--bg-secondary)', padding: 8,
             borderTop: '1px dashed var(--border)',
           }}>
@@ -856,15 +1001,19 @@ function FitOptionsPopover({
 
 function MiniViewer({
   data, heightSignal, baseline, slots, traceUnit, measurements,
-  previewSweep, onBaselineChange, onSlotChange,
+  previewSweep, displayYOffset, onBaselineChange, onSlotChange,
 }: {
-  data: { time: number[]; values: number[] } | null
+  data: { time: number[]; values: number[]; zeroOffset?: number } | null
   heightSignal: number
   baseline: { start: number; end: number }
   slots: CursorSlotConfig[]
   traceUnit: string
   measurements: CursorMeasurement[]
   previewSweep: number
+  /** Offset subtracted from the displayed trace (applied backend-side).
+   *  Fit overlays — which are computed on raw data — are shifted by the
+   *  same amount so they land on the visible trace. */
+  displayYOffset: number
   onBaselineChange: (b: { start: number; end: number }) => void
   onSlotChange: (slotIndex: number, patch: Partial<CursorSlotConfig>) => void
 }) {
@@ -873,38 +1022,84 @@ function MiniViewer({
   // Latest state ref so hook callbacks (drawBands, drawFits, event
   // handlers) always see current values without needing to tear down
   // and rebuild uPlot on every cursor change.
-  const stateRef = useRef({ baseline, slots, measurements, previewSweep })
-  stateRef.current = { baseline, slots, measurements, previewSweep }
+  const stateRef = useRef({ baseline, slots, measurements, previewSweep, displayYOffset })
+  stateRef.current = { baseline, slots, measurements, previewSweep, displayYOffset }
   const callbacksRef = useRef({ onBaselineChange, onSlotChange })
   callbacksRef.current = { onBaselineChange, onSlotChange }
+  // Keep the latest data reachable from the mount-effect's handlers
+  // (they're attached once and see the initial closure forever).
+  const dataRef = useRef(data)
+  dataRef.current = data
+  // --- THE ZOOM-PERSISTENCE MECHANISM --------------------------------
+  //
+  // These refs hold the scale ranges the plot should display. They
+  // are wired into uPlot via `scale.range` functions below: uPlot
+  // calls those functions on every draw to determine the axis
+  // extents, so whatever's in the refs becomes the visible range.
+  // Nothing uPlot does internally (setData, redraw, commit) ever
+  // auto-ranges around them. Updates flow in exactly one direction:
+  //
+  //   user wheel/pan/Reset  →  update ref  →  u.redraw()  →
+  //     range fn returns ref  →  axis displays that range.
+  //
+  // When a ref is `null`, the range function falls back to a
+  // data-derived auto-fit (and stashes it in the ref so subsequent
+  // draws are stable). That's how the very first draw gets a
+  // sensible view, and how Reset restores auto-fit.
+  const xRangeRef = useRef<[number, number] | null>(null)
+  const yRangeRef = useRef<[number, number] | null>(null)
+  // "Have we seen real (non-placeholder) data yet?" — the range
+  // functions below must not stash anything while we're still drawing
+  // against the mount-time placeholder, otherwise the refs would
+  // lock to the placeholder's bogus Y range and the real trace
+  // would render offscreen once it arrives.
+  const hasRealDataRef = useRef(false)
 
-  // Drag state for cursor edges and plot panning. Captured on pointerdown.
+  // Drag state: cursor edges, whole-band moves, and plot panning.
   type DragTarget =
-    | { kind: 'baseline'; edge: 'start' | 'end' }
-    | { kind: 'peak'; slot: number; edge: 'start' | 'end' }
-    | { kind: 'fit'; slot: number; edge: 'start' | 'end' }
+    | { kind: 'baseline-edge'; edge: 'start' | 'end' }
+    | { kind: 'baseline-band'; startPxX: number; startStart: number; startEnd: number }
+    | { kind: 'peak-edge'; slot: number; edge: 'start' | 'end' }
+    | { kind: 'peak-band'; slot: number; startPxX: number; startStart: number; startEnd: number }
+    | { kind: 'fit-edge'; slot: number; edge: 'start' | 'end' }
+    | { kind: 'fit-band'; slot: number; startPxX: number; startStart: number; startEnd: number }
     | { kind: 'pan'; startX: number; xMin: number; xMax: number; startY: number; yMin: number; yMax: number }
   const dragRef = useRef<DragTarget | null>(null)
 
   const resetZoom = () => {
     const u = plotRef.current
-    const d = u?.data as unknown as [number[], number[]] | undefined
-    if (!u || !d || !d[0] || d[0].length === 0) return
-    u.setScale('x', { min: d[0][0], max: d[0][d[0].length - 1] })
-    const ys = d[1] as number[]
-    let yMin = Infinity, yMax = -Infinity
-    for (const v of ys) { if (v < yMin) yMin = v; if (v > yMax) yMax = v }
-    if (isFinite(yMin) && isFinite(yMax) && yMin !== yMax) {
-      const pad = (yMax - yMin) * 0.05
-      u.setScale('y', { min: yMin - pad, max: yMax + pad })
+    if (!u) return
+    // Null the refs so the range functions re-auto-fit on the next
+    // draw. Then setScale the current data's extents to force that
+    // draw to happen now and re-run the range fns (bare redraw()
+    // won't re-invoke them).
+    xRangeRef.current = null
+    yRangeRef.current = null
+    const d = u.data as unknown as [number[], number[]] | undefined
+    if (!d || !d[0] || d[0].length === 0) { u.redraw(); return }
+    const xs = d[0], ys = d[1]
+    const xmin = xs[0], xmax = xs[xs.length - 1]
+    let ymin = Infinity, ymax = -Infinity
+    for (const v of ys) { if (v < ymin) ymin = v; if (v > ymax) ymax = v }
+    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
+      u.setScale('x', { min: xmin, max: xmax })
+    }
+    if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
+      const pad = (ymax - ymin) * 0.05
+      u.setScale('y', { min: ymin - pad, max: ymax + pad })
     }
   }
 
-  // --- 1) Initialize the plot ONCE on mount. ----------------------------
-  // Data updates go through `u.setData()` in a separate effect so the
-  // plot (and its event listeners) is not destroyed when the sweep or
-  // file polls yield a new data object. This was causing the preview to
-  // "flicker" / disappear for a moment on every fileInfo refresh.
+  // --- PLOT LIFECYCLE ------------------------------------------------
+  //
+  // The plot is created ONCE and lives until the axis label (traceUnit)
+  // changes or the component unmounts. Sweep/filter/zero-offset changes
+  // push new samples via `u.setData(payload, true)` — uPlot preserves
+  // any explicit X/Y scales the user set (via wheel/pan/drag) and
+  // re-auto-fits any scale that's still in auto mode. This is the
+  // native zoom-persistence mechanism; the old destroy-and-rebuild
+  // pattern forced us to manually save/restore scales and was
+  // fundamentally fragile.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -912,31 +1107,57 @@ function MiniViewer({
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
       height: Math.max(100, el.clientHeight || 180),
-      scales: { x: { time: false } },
+      scales: {
+        x: {
+          time: false,
+          range: (_u, dataMin, dataMax) => {
+            if (xRangeRef.current) return xRangeRef.current
+            const lo = isFinite(dataMin) ? dataMin : 0
+            const hi = isFinite(dataMax) && dataMax > lo ? dataMax : lo + 1
+            const r: [number, number] = [lo, hi]
+            // Only stash once we're looking at real data, otherwise
+            // the placeholder mount would lock the axis to [0, 1].
+            if (hasRealDataRef.current) xRangeRef.current = r
+            return r
+          },
+        },
+        y: {
+          range: (_u, dataMin, dataMax) => {
+            if (yRangeRef.current) return yRangeRef.current
+            let r: [number, number]
+            if (!isFinite(dataMin) || !isFinite(dataMax) || dataMin === dataMax) {
+              r = [0, 1]
+            } else {
+              const pad = (dataMax - dataMin) * 0.05
+              r = [dataMin - pad, dataMax + pad]
+            }
+            if (hasRealDataRef.current) yRangeRef.current = r
+            return r
+          },
+        },
+      },
       axes: [
         {
-          stroke: cssVar('--chart-axis'),
-          grid: { stroke: cssVar('--chart-grid'), width: 1 },
-          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          stroke: cssVar('--chart-axis') || '#888',
+          grid: { stroke: cssVar('--chart-grid') || '#2a2a2a', width: 1 },
+          ticks: { stroke: cssVar('--chart-tick') || '#444', width: 1 },
           label: 'time (s)', labelSize: 14,
-          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          font: `${cssVar('--font-size-label') || '11px'} ${cssVar('--font-mono') || 'monospace'}`,
         },
         {
-          stroke: cssVar('--chart-axis'),
-          grid: { stroke: cssVar('--chart-grid'), width: 1 },
-          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          stroke: cssVar('--chart-axis') || '#888',
+          grid: { stroke: cssVar('--chart-grid') || '#2a2a2a', width: 1 },
+          ticks: { stroke: cssVar('--chart-tick') || '#444', width: 1 },
           label: traceUnit || '', labelSize: 14,
-          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          font: `${cssVar('--font-size-label') || '11px'} ${cssVar('--font-mono') || 'monospace'}`,
         },
       ],
-      // Disable uPlot's own drag behavior. We implement our own pan on
-      // drag + wheel-zoom below so cursor-edge dragging coexists cleanly.
       cursor: { drag: { x: false, y: false } },
       series: [
         {},
         {
           label: 'trace',
-          stroke: cssVar('--trace-color-1'),
+          stroke: cssVar('--trace-color-1') || '#4a9ede',
           width: 1,
           points: { show: false },
         },
@@ -946,7 +1167,24 @@ function MiniViewer({
         draw: [(u) => drawFits(u, stateRef.current)],
       },
     }
-    plotRef.current = new uPlot(opts, [[], []], el)
+    // Build the plot with whatever data we currently have. If data
+    // isn't ready yet, use a 2-point placeholder so uPlot has a valid
+    // initial geometry — real data will arrive via the setData effect
+    // below as soon as the fetch completes. Scale locking is handled
+    // entirely by the range functions in opts.scales; no explicit
+    // setScale is needed here.
+    const initial = dataRef.current
+    const initialHasData = !!(initial && initial.time.length > 0)
+    // Flip the "real data" flag BEFORE constructing the plot so the
+    // range functions (which uPlot calls during construction) stash
+    // their initial fit into the refs. If data is still null, we
+    // leave the flag false and let the data-update effect below flip
+    // it when real data first arrives.
+    hasRealDataRef.current = initialHasData
+    const payload: uPlot.AlignedData = initialHasData
+      ? [Array.from(initial!.time), Array.from(initial!.values)]
+      : [[0, 1], [0, 0]]
+    plotRef.current = new uPlot(opts, payload, el)
 
     const over = el.querySelector<HTMLDivElement>('.u-over')
     const EDGE_THRESHOLD_PX = 6
@@ -955,42 +1193,94 @@ function MiniViewer({
     const pxToX = (px: number) => plotRef.current!.posToVal(px, 'x')
     const pxToY = (py: number) => plotRef.current!.posToVal(py, 'y')
 
-    const findEdge = (pxX: number): DragTarget | null => {
-      const s = stateRef.current
-      const candidates: { target: DragTarget; x: number }[] = []
-      candidates.push({ target: { kind: 'baseline', edge: 'start' }, x: xToPx(s.baseline.start) })
-      candidates.push({ target: { kind: 'baseline', edge: 'end' }, x: xToPx(s.baseline.end) })
-      s.slots.forEach((slot, i) => {
-        if (!slot.enabled) return
-        candidates.push({ target: { kind: 'peak', slot: i, edge: 'start' }, x: xToPx(slot.peak.start) })
-        candidates.push({ target: { kind: 'peak', slot: i, edge: 'end' }, x: xToPx(slot.peak.end) })
-        if (slot.fit) {
-          candidates.push({ target: { kind: 'fit', slot: i, edge: 'start' }, x: xToPx(slot.fit.start) })
-          candidates.push({ target: { kind: 'fit', slot: i, edge: 'end' }, x: xToPx(slot.fit.end) })
-        }
-      })
-      let best: DragTarget | null = null
-      let bestDist = EDGE_THRESHOLD_PX + 1
-      for (const c of candidates) {
-        const d = Math.abs(c.x - pxX)
-        if (d < bestDist) { bestDist = d; best = c.target }
-      }
-      return best
-    }
-
     const hasData = () => {
       const d = plotRef.current?.data as unknown as [number[], number[]] | undefined
       return !!d && !!d[0] && d[0].length > 0
+    }
+    // Returns the best cursor-hit for the given pixel X. Priority:
+    //  1. edge hit (within EDGE_THRESHOLD_PX of either end of a band)
+    //  2. band hit (between the two edges → whole-band move)
+    //  3. null (empty plot area → pan)
+    //
+    // Bands are enumerated in overlay draw order so slots higher in the
+    // list win ties (matches what the user sees on top).
+    type CursorHit =
+      | { kind: 'edge'; target: DragTarget }
+      | { kind: 'band'; target: DragTarget }
+    const findCursorHit = (pxX: number): CursorHit | null => {
+      const s = stateRef.current
+      const ranges: Array<{
+        start: number; end: number
+        edge: (e: 'start' | 'end') => DragTarget
+        band: (startPxX: number) => DragTarget
+      }> = []
+      ranges.push({
+        start: s.baseline.start, end: s.baseline.end,
+        edge: (e) => ({ kind: 'baseline-edge', edge: e }),
+        band: (startPxX) => ({
+          kind: 'baseline-band', startPxX,
+          startStart: s.baseline.start, startEnd: s.baseline.end,
+        }),
+      })
+      s.slots.forEach((slot, i) => {
+        if (!slot.enabled) return
+        ranges.push({
+          start: slot.peak.start, end: slot.peak.end,
+          edge: (e) => ({ kind: 'peak-edge', slot: i, edge: e }),
+          band: (startPxX) => ({
+            kind: 'peak-band', slot: i, startPxX,
+            startStart: slot.peak.start, startEnd: slot.peak.end,
+          }),
+        })
+        if (slot.fit) {
+          const f = slot.fit
+          ranges.push({
+            start: f.start, end: f.end,
+            edge: (e) => ({ kind: 'fit-edge', slot: i, edge: e }),
+            band: (startPxX) => ({
+              kind: 'fit-band', slot: i, startPxX,
+              startStart: f.start, startEnd: f.end,
+            }),
+          })
+        }
+      })
+      // 1) Edge hit — scan all ranges, pick the nearest edge within threshold.
+      let bestEdge: { dist: number; target: DragTarget } | null = null
+      for (const r of ranges) {
+        const pxStart = xToPx(r.start)
+        const pxEnd = xToPx(r.end)
+        const ds = Math.abs(pxStart - pxX)
+        const de = Math.abs(pxEnd - pxX)
+        if (ds < EDGE_THRESHOLD_PX && (!bestEdge || ds < bestEdge.dist)) {
+          bestEdge = { dist: ds, target: r.edge('start') }
+        }
+        if (de < EDGE_THRESHOLD_PX && (!bestEdge || de < bestEdge.dist)) {
+          bestEdge = { dist: de, target: r.edge('end') }
+        }
+      }
+      if (bestEdge) return { kind: 'edge', target: bestEdge.target }
+      // 2) Inside-a-band hit — last one added wins (topmost in draw order).
+      for (let i = ranges.length - 1; i >= 0; i--) {
+        const r = ranges[i]
+        const pxStart = xToPx(r.start)
+        const pxEnd = xToPx(r.end)
+        const lo = Math.min(pxStart, pxEnd)
+        const hi = Math.max(pxStart, pxEnd)
+        if (pxX > lo && pxX < hi) {
+          return { kind: 'band', target: r.band(pxX) }
+        }
+      }
+      return null
     }
     const onPointerDown = (ev: PointerEvent) => {
       if (!over || !hasData()) return
       const rect = over.getBoundingClientRect()
       const pxX = ev.clientX - rect.left
-      const edge = findEdge(pxX)
-      if (edge) {
-        dragRef.current = edge
+      const hit = findCursorHit(pxX)
+      if (hit) {
+        dragRef.current = hit.target
       } else {
-        // Plain drag in empty plot area → pan.
+        // Empty plot area → pan.
         const u = plotRef.current!
         const xMin = u.scales.x.min, xMax = u.scales.x.max
         const yMin = u.scales.y.min, yMax = u.scales.y.max
@@ -1013,7 +1303,11 @@ function MiniViewer({
       const pxY = ev.clientY - rect.top
       const t = dragRef.current
       if (!t) {
-        over.style.cursor = findEdge(pxX) ? 'ew-resize' : 'grab'
+        // Hover: use the hit kind to pick the right affordance.
+        const hit = findCursorHit(pxX)
+        over.style.cursor = !hit ? 'grab'
+          : hit.kind === 'edge' ? 'ew-resize'
+          : 'move'
         return
       }
       if (t.kind === 'pan') {
@@ -1024,22 +1318,52 @@ function MiniViewer({
         const y0 = u.posToVal(t.startY, 'y')
         const dx = x - x0
         const dy = y - y0
-        u.setScale('x', { min: t.xMin - dx, max: t.xMax - dx })
-        u.setScale('y', { min: t.yMin - dy, max: t.yMax - dy })
+        xRangeRef.current = [t.xMin - dx, t.xMax - dx]
+        yRangeRef.current = [t.yMin - dy, t.yMax - dy]
+        u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
+        u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
         over.style.cursor = 'grabbing'
         return
       }
       const x = pxToX(pxX)
       const s = stateRef.current
       const cb = callbacksRef.current
-      if (t.kind === 'baseline') {
-        cb.onBaselineChange({ ...s.baseline, [t.edge]: x })
-      } else if (t.kind === 'peak') {
-        const cur = s.slots[t.slot]
-        cb.onSlotChange(t.slot, { peak: { ...cur.peak, [t.edge]: x } })
-      } else {
-        const cur = s.slots[t.slot]
-        if (cur.fit) cb.onSlotChange(t.slot, { fit: { ...cur.fit, [t.edge]: x } })
+      // Helper for whole-band moves — shifts both edges by the same x delta.
+      const shift = (bandStart: number, pxStart: number) => {
+        const dx = pxToX(pxX) - pxToX(pxStart)
+        return dx
+      }
+      switch (t.kind) {
+        case 'baseline-edge':
+          cb.onBaselineChange({ ...s.baseline, [t.edge]: x }); break
+        case 'baseline-band': {
+          const dx = shift(t.startStart, t.startPxX)
+          cb.onBaselineChange({ start: t.startStart + dx, end: t.startEnd + dx })
+          over.style.cursor = 'move'
+          break
+        }
+        case 'peak-edge': {
+          const cur = s.slots[t.slot]
+          cb.onSlotChange(t.slot, { peak: { ...cur.peak, [t.edge]: x } })
+          break
+        }
+        case 'peak-band': {
+          const dx = shift(t.startStart, t.startPxX)
+          cb.onSlotChange(t.slot, { peak: { start: t.startStart + dx, end: t.startEnd + dx } })
+          over.style.cursor = 'move'
+          break
+        }
+        case 'fit-edge': {
+          const cur = s.slots[t.slot]
+          if (cur.fit) cb.onSlotChange(t.slot, { fit: { ...cur.fit, [t.edge]: x } })
+          break
+        }
+        case 'fit-band': {
+          const dx = shift(t.startStart, t.startPxX)
+          cb.onSlotChange(t.slot, { fit: { start: t.startStart + dx, end: t.startEnd + dx } })
+          over.style.cursor = 'move'
+          break
+        }
       }
     }
     const onPointerUp = (ev: PointerEvent) => {
@@ -1049,8 +1373,9 @@ function MiniViewer({
         over.style.cursor = ''
       }
     }
-    // Scroll-wheel zoom — X by default, Y when Shift is held. Zooms
-    // around the cursor position so the user's focus stays in view.
+    // Scroll-wheel zoom — X by default, Y when Alt/Option is held
+    // (same modifier as the main TraceViewer). Zooms around the
+    // pointer position so the user's focus stays in view.
     const onWheel = (ev: WheelEvent) => {
       if (!over || !hasData()) return
       const u = plotRef.current!
@@ -1059,23 +1384,30 @@ function MiniViewer({
       const pxX = ev.clientX - rect.left
       const pxY = ev.clientY - rect.top
       const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
-      if (ev.shiftKey) {
-        const yMin = u.scales.y.min, yMax = u.scales.y.max
-        if (yMin == null || yMax == null) return
+      const xMin = u.scales.x.min, xMax = u.scales.x.max
+      const yMin = u.scales.y.min, yMax = u.scales.y.max
+      if (xMin == null || xMax == null || yMin == null || yMax == null) return
+      if (ev.altKey) {
         const yAtCur = u.posToVal(pxY, 'y')
-        u.setScale('y', {
-          min: yAtCur - (yAtCur - yMin) * factor,
-          max: yAtCur + (yMax - yAtCur) * factor,
-        })
+        yRangeRef.current = [
+          yAtCur - (yAtCur - yMin) * factor,
+          yAtCur + (yMax - yAtCur) * factor,
+        ]
+        xRangeRef.current = [xMin, xMax]
       } else {
-        const xMin = u.scales.x.min, xMax = u.scales.x.max
-        if (xMin == null || xMax == null) return
         const xAtCur = u.posToVal(pxX, 'x')
-        u.setScale('x', {
-          min: xAtCur - (xAtCur - xMin) * factor,
-          max: xAtCur + (xMax - xAtCur) * factor,
-        })
+        xRangeRef.current = [
+          xAtCur - (xAtCur - xMin) * factor,
+          xAtCur + (xMax - xAtCur) * factor,
+        ]
+        yRangeRef.current = [yMin, yMax]
       }
+      // setScale forces uPlot to re-evaluate the scale (via the range
+      // function, which now returns the new ref values). A bare
+      // u.redraw() won't re-run range fns — it just repaints using
+      // the previously-computed scale cache.
+      u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
+      u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
     }
     if (over) {
       over.addEventListener('pointerdown', onPointerDown)
@@ -1092,6 +1424,8 @@ function MiniViewer({
     })
     ro.observe(el)
     return () => {
+      // savedX/YRef are kept up to date by the setScale hook above — no
+      // need to re-capture here. We just tear the plot + listeners down.
       if (over) {
         over.removeEventListener('pointerdown', onPointerDown)
         over.removeEventListener('pointermove', onPointerMove)
@@ -1102,22 +1436,50 @@ function MiniViewer({
       ro.disconnect()
       plotRef.current?.destroy(); plotRef.current = null
     }
-  // Mount once: intentionally no deps. Data goes through setData below.
+  // Plot is only rebuilt when the Y-axis label changes (channel /
+  // unit change). Everything else — sweep switch, filter, zero-offset
+  // — flows through setData below.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [traceUnit])
 
-  // --- 2) Push new data without destroying the plot. --------------------
+  // --- DATA UPDATES --------------------------------------------------
+  //
+  // Push new samples into the existing plot. We pass
+  // `resetScales=false` so uPlot never runs its autorange path — and
+  // even if it did, it wouldn't matter, because the range functions
+  // in opts.scales always return xRangeRef.current / yRangeRef.current
+  // when those are set. Scales only change when the user
+  // zooms/pans/clicks Reset, which update the refs explicitly.
   useEffect(() => {
     const u = plotRef.current
-    if (!u) return
-    if (!data || data.time.length === 0) {
-      u.setData([[], []])
-      return
+    if (!u || !data || data.time.length === 0) return
+    const payload: uPlot.AlignedData = [
+      Array.from(data.time),
+      Array.from(data.values),
+    ]
+    const firstRealData = !hasRealDataRef.current
+    u.setData(payload, false)
+    if (firstRealData) {
+      // Simulate a Reset-button click now that real data has arrived —
+      // the initial mount drew against a placeholder so the axes
+      // aren't sized for the real trace yet. This runs exactly once;
+      // from here on sweep/filter changes flow through setData
+      // without touching scales.
+      hasRealDataRef.current = true
+      xRangeRef.current = null
+      yRangeRef.current = null
+      const xmin = data.time[0]
+      const xmax = data.time[data.time.length - 1]
+      let ymin = Infinity, ymax = -Infinity
+      for (const v of data.values) { if (v < ymin) ymin = v; if (v > ymax) ymax = v }
+      if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
+        u.setScale('x', { min: xmin, max: xmax })
+      }
+      if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
+        const pad = (ymax - ymin) * 0.05
+        u.setScale('y', { min: ymin - pad, max: ymax + pad })
+      }
     }
-    // resetScales=true matches uPlot's own default: the X/Y scales
-    // autoscale to the new data on set. This keeps sweep-switching
-    // behaviour predictable — the user can always wheel/zoom back.
-    u.setData([data.time, data.values])
   }, [data])
 
   useEffect(() => {
@@ -1128,7 +1490,7 @@ function MiniViewer({
 
   // Redraw on cursor / slot / result changes so bands and fit overlays
   // track the latest state. stateRef has already been updated above.
-  useEffect(() => { plotRef.current?.redraw() }, [baseline, slots, measurements, previewSweep])
+  useEffect(() => { plotRef.current?.redraw() }, [baseline, slots, measurements, previewSweep, displayYOffset])
 
   return (
     <div style={{
@@ -1151,7 +1513,7 @@ function MiniViewer({
         fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
         fontStyle: 'italic', pointerEvents: 'none',
       }}>
-        scroll = zoom X · shift-scroll = zoom Y · drag = pan · drag a band edge to move it
+        scroll = zoom X · ⌥ scroll = zoom Y · drag empty area = pan · drag inside a band = move · drag an edge = resize
       </span>
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
       {(!data || data.time.length === 0) && (
@@ -1176,6 +1538,7 @@ function drawBands(
     slots: CursorSlotConfig[]
     measurements: CursorMeasurement[]
     previewSweep: number
+    displayYOffset: number
   },
 ) {
   const ctx = u.ctx
@@ -1197,12 +1560,18 @@ function drawBands(
     }
     ctx.restore()
   }
-  drawBand(state.baseline.start, state.baseline.end, '#888', 0.12, 'BL')
+  // Keep baseline green and fit purple so the palette matches the main
+  // viewer; peak bands still cycle per-slot so the 10 slots are
+  // distinguishable. CSS vars resolve at draw time so the theme honors
+  // dark/light mode.
+  const baselineColor = cssVar('--cursor-baseline') || '#4caf50'
+  const fitColor = cssVar('--cursor-fit') || '#9c27b0'
+  drawBand(state.baseline.start, state.baseline.end, baselineColor, 0.16, 'BL')
   state.slots.forEach((s, i) => {
     if (!s.enabled) return
     const color = SLOT_COLORS[i % SLOT_COLORS.length]
     drawBand(s.peak.start, s.peak.end, color, 0.18, `P${i + 1}`)
-    if (s.fit) drawBand(s.fit.start, s.fit.end, color, 0.08, `F${i + 1}`)
+    if (s.fit) drawBand(s.fit.start, s.fit.end, fitColor, 0.14, `F${i + 1}`)
   })
 }
 
@@ -1213,31 +1582,33 @@ function drawFits(
     slots: CursorSlotConfig[]
     measurements: CursorMeasurement[]
     previewSweep: number
+    displayYOffset: number
   },
 ) {
   const ctx = u.ctx
   const dpr = devicePixelRatio || 1
-  // Pick the fit from the currently-previewed sweep first; fall back to the
-  // averaged result (sweep = -1) if that's all we have.
   const byKey = new Map<string, CursorMeasurement>()
   for (const m of state.measurements) {
     if (m.fit) byKey.set(`${m.sweep}:${m.slot}`, m)
   }
+  const fitColor = cssVar('--cursor-fit') || '#9c27b0'
+  const yShift = state.displayYOffset
   state.slots.forEach((s, i) => {
     if (!s.enabled || !s.fit) return
     const key = `${state.previewSweep}:${i}`
     const m = byKey.get(key) ?? byKey.get(`-1:${i}`)
     if (!m?.fit) return
     ctx.save()
-    ctx.strokeStyle = SLOT_COLORS[i % SLOT_COLORS.length]
-    ctx.lineWidth = 1.5 * dpr
-    ctx.setLineDash([4 * dpr, 3 * dpr])
+    ctx.strokeStyle = fitColor
+    ctx.lineWidth = 2 * dpr
     ctx.beginPath()
     const tArr = m.fit.fit_time
     const vArr = m.fit.fit_values
     for (let k = 0; k < tArr.length; k++) {
       const px = u.valToPos(tArr[k], 'x', true)
-      const py = u.valToPos(vArr[k], 'y', true)
+      // Shift fit Y values by the same zero-offset the backend applied
+      // to the displayed trace, so fit and trace align on screen.
+      const py = u.valToPos(vArr[k] - yShift, 'y', true)
       if (k === 0) ctx.moveTo(px, py)
       else ctx.lineTo(px, py)
     }
@@ -1275,36 +1646,70 @@ function ResultsTabs({
     ? measurements.filter((m) => m.fit != null)
     : measurements
 
+  const fitCount = measurements.filter((m) => m.fit != null).length
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 2,
+        display: 'flex', alignItems: 'stretch', gap: 0,
         borderBottom: '1px solid var(--border)',
         background: 'var(--bg-secondary)',
       }}>
-        {(['measurements', 'fit'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setActiveTab(t)}
-            className="btn"
-            style={{
-              background: activeTab === t ? 'var(--bg-primary)' : 'transparent',
-              borderRadius: 0,
-              borderBottom: activeTab === t ? '2px solid var(--accent)' : '2px solid transparent',
-              padding: '4px 12px',
-              fontWeight: activeTab === t ? 600 : 400,
-            }}
-          >
-            {t === 'measurements' ? 'Measurements' : 'Fit'}
-          </button>
-        ))}
+        {([
+          { id: 'measurements' as const, label: 'Measurements', count: measurements.length },
+          { id: 'fit' as const, label: 'Fit', count: fitCount },
+        ]).map((t) => {
+          const active = activeTab === t.id
+          // Handle via onMouseDown too — some browsers' synthetic click
+          // flow can drop the click if the parent tree fires pointer
+          // capture / drag handlers during the down-up window. Down
+          // fires unconditionally.
+          const fire = (e: React.SyntheticEvent) => {
+            e.stopPropagation()
+            setActiveTab(t.id)
+          }
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={fire}
+              onMouseDown={fire}
+              style={{
+                cursor: 'pointer',
+                userSelect: 'none',
+                padding: '8px 16px',
+                border: 'none',
+                borderBottom: active ? '3px solid var(--accent)' : '3px solid transparent',
+                background: active ? 'var(--bg-primary)' : 'transparent',
+                color: active ? 'var(--accent)' : 'var(--text-muted)',
+                fontSize: 'var(--font-size-sm)',
+                fontFamily: 'var(--font-ui)',
+                fontWeight: active ? 700 : 400,
+                outline: 'none',
+                minWidth: 110,
+              }}
+            >
+              {t.label}
+              {t.count > 0 && (
+                <span style={{
+                  marginLeft: 6,
+                  fontSize: 'var(--font-size-label)',
+                  color: 'var(--text-muted)',
+                  fontWeight: 400,
+                }}>({t.count})</span>
+              )}
+            </button>
+          )
+        })}
         <span style={{ flex: 1 }} />
-        <ColumnsButton
-          allColumns={allColumns}
-          visibleIds={columns}
-          lockedIds={lockedIds}
-          onChange={setColumns}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', paddingRight: 4 }}>
+          <ColumnsButton
+            allColumns={allColumns}
+            visibleIds={columns}
+            lockedIds={lockedIds}
+            onChange={setColumns}
+          />
+        </div>
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
         {rows.length === 0 ? (

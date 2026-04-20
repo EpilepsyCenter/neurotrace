@@ -1,0 +1,94 @@
+name: Build installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14       # Apple Silicon runner
+            arch: arm64
+            artifact: NeuroTrace-mac-arm64
+            builder_flags: --mac dmg --arm64
+            freeze: bash scripts/build-backend.sh
+          - os: macos-13       # Intel runner
+            arch: x64
+            artifact: NeuroTrace-mac-x64
+            builder_flags: --mac dmg --x64
+            freeze: bash scripts/build-backend.sh
+          - os: windows-latest
+            arch: x64
+            artifact: NeuroTrace-win-x64
+            builder_flags: --win nsis --x64
+            freeze: pwsh scripts/build-backend.ps1
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Freeze backend
+        run: ${{ matrix.freeze }}
+
+      - name: Build frontend + installer
+        env:
+          # electron-builder picks this up to skip code-signing on CI
+          # (colleagues get an unsigned installer — fine for lab testing)
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          npx tsc
+          npx vite build
+          npx electron-builder ${{ matrix.builder_flags }} --publish never
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.blockmap
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

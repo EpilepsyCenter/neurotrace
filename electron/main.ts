@@ -64,7 +64,9 @@ async function startPythonBackend(port: number): Promise<void> {
       pythonProcess = null
     })
 
-    setTimeout(() => resolve(), 15000)
+    // First-run Gatekeeper / SmartScreen can add 20–30s of startup delay
+    // for unsigned bundled backends; be generous with the safety timeout.
+    setTimeout(() => resolve(), 60000)
   })
 }
 

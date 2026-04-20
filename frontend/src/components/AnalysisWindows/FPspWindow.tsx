@@ -101,8 +101,11 @@ export function FPspWindow({
   const [filterEnabled, setFilterEnabled] = useState(false)
   const [filterType, setFilterType] = useState<'lowpass' | 'highpass' | 'bandpass'>('lowpass')
   const [filterLow, setFilterLow] = useState(1)
-  const [filterHigh, setFilterHigh] = useState(1000)
-  const [filterOrder, setFilterOrder] = useState(4)
+  // Lowpass 2 kHz, order 1: higher orders (or lower cutoffs) ring the
+  // volley flank and artificially inflate its amplitude — the volley is
+  // a fast deflection (~0.5 ms rise), so keep the filter gentle.
+  const [filterHigh, setFilterHigh] = useState(2000)
+  const [filterOrder, setFilterOrder] = useState(1)
 
   // Run-mode controls (mirror the FieldBurstWindow pattern).
   type RunMode = 'all' | 'range' | 'one'
@@ -393,7 +396,7 @@ export function FPspWindow({
         )}
         {!filterEnabled && (
           <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)', fontStyle: 'italic' }}>
-            off (default) — applied per-sweep before averaging; try 1000 Hz lowpass to clean HF noise
+            off (default) — applied per-sweep before averaging; try 2 kHz lowpass order 1 to clean HF noise without inflating the volley
           </span>
         )}
       </div>

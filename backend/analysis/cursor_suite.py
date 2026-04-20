@@ -434,8 +434,17 @@ FIT_FUNCTIONS: dict[str, dict] = {
 
 
 def fit_window(data: np.ndarray, sampling_rate: float,
-               window: tuple[float, float], function: str) -> Optional[FitResult]:
-    """Fit ``function`` to ``data`` over the (start, end) seconds window."""
+               window: tuple[float, float], function: str,
+               options: Optional[dict] = None) -> Optional[FitResult]:
+    """Fit ``function`` to ``data`` over the (start, end) seconds window.
+
+    ``options`` (all optional):
+      - ``maxfev``:         curve_fit iteration cap (default 5000)
+      - ``ftol`` / ``xtol``: curve_fit tolerances (defaults 1e-8)
+      - ``initial_guess``:  dict ``{param_name: float}`` that overrides the
+                            auto-generated guess per parameter. Missing
+                            parameters fall back to auto.
+    """
     entry = FIT_FUNCTIONS.get(function)
     if entry is None:
         return None
@@ -449,9 +458,21 @@ def fit_window(data: np.ndarray, sampling_rate: float,
     # and avoids huge x values that destabilize the nonlinear solver.
     x = np.arange(i1 - i0, dtype=float) * dt
     y = data[i0:i1].astype(float)
+    opts = options or {}
     try:
-        p0 = entry["guess"](x, y)
-        popt, _pcov = curve_fit(entry["fn"], x, y, p0=p0, maxfev=5000)
+        auto_guess = entry["guess"](x, y)
+        guess_overrides = opts.get("initial_guess") or {}
+        p0 = [
+            float(guess_overrides[name]) if name in guess_overrides and guess_overrides[name] is not None
+            else auto_guess[i]
+            for i, name in enumerate(entry["params"])
+        ]
+        popt, _pcov = curve_fit(
+            entry["fn"], x, y, p0=p0,
+            maxfev=int(opts.get("maxfev", 5000)),
+            ftol=float(opts.get("ftol", 1e-8)),
+            xtol=float(opts.get("xtol", 1e-8)),
+        )
     except Exception:
         return None
     y_fit = entry["fn"](x, *popt)

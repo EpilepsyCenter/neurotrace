@@ -217,6 +217,42 @@ function _broadcastFPsp(fpspCurves: Record<string, FPspData>) {
   } catch { /* ignore */ }
 }
 
+/** Cursor-analysis persistence — one state blob per recording. */
+async function _loadPersistedCursors(filePath: string): Promise<Record<string, CursorAnalysisData> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedCursorAnalyses as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedCursors(filePath: string, analyses: Record<string, CursorAnalysisData>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedCursorAnalyses as Record<string, any>) ?? {}
+    if (Object.keys(analyses).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = analyses
+    }
+    await api.setPreferences({ ...prefs, savedCursorAnalyses: store })
+  } catch { /* ignore */ }
+}
+
+function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisData>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 /** Broadcast field-burst state + detection filter to other windows via the
  *  shared `neurotrace-sync` channel. Called from the analysis window's store
  *  after every detection run so markers appear in the main viewer. */
@@ -442,6 +478,76 @@ export interface ResistanceResult {
   source?: string
 }
 
+/** Cursor-analysis types: one state blob per recording, mirroring the
+ *  pattern used by ivCurves / fpspCurves / fieldBursts. */
+export interface CursorSlotConfig {
+  enabled: boolean
+  peak: { start: number; end: number }
+  fit: { start: number; end: number } | null
+  fitFunction: string | null
+  fitOptions: {
+    maxfev?: number
+    ftol?: number
+    xtol?: number
+    /** Per-parameter initial-guess override. null/undefined = auto. */
+    initialGuess?: Record<string, number | null>
+  } | null
+}
+
+export interface CursorMeasurement {
+  slot: number
+  sweep: number                           // -1 for the averaged trace
+  baseline: number
+  baseline_sd: number
+  peak: number
+  peak_time: number
+  amplitude: number
+  time_to_peak?: number
+  rise_time_10_90?: number
+  rise_time_20_80?: number
+  half_width?: number
+  max_slope_rise?: number
+  max_slope_decay?: number
+  rise_decay_ratio?: number
+  area?: number
+  ap_threshold?: number
+  ap_threshold_time?: number
+  fit?: {
+    function: string
+    params: Record<string, number>
+    rss: number
+    r_squared: number
+    fit_time: number[]
+    fit_values: number[]
+  } | null
+}
+
+export interface CursorAnalysisData {
+  group: number
+  series: number
+  trace: number
+  slotCount: number                       // 1..10 — number of visible slots
+  baseline: { start: number; end: number }
+  baselineMethod: 'mean' | 'median'
+  computeAP: boolean
+  apSlope: number
+  slots: CursorSlotConfig[]               // always length 10 (unused ones are disabled)
+  runMode: 'all' | 'range' | 'one'
+  sweepFrom: number
+  sweepTo: number
+  sweepOne: number
+  average: boolean
+  measurements: CursorMeasurement[]
+  traceUnit: string
+}
+
+export interface CursorWindowUI {
+  plotHeight: number
+  measurementColumns: string[]            // visible-column IDs for the Measurements tab
+  fitColumns: string[]                    // visible-column IDs for the Fit tab
+  activeTab: 'measurements' | 'fit'
+}
+
 interface AppState {
   // Backend connection
   backendUrl: string
@@ -521,6 +627,14 @@ interface AppState {
 
   // Field PSP analyses, same key shape + same persistence pattern.
   fpspCurves: Record<string, FPspData>
+
+  // Cursor analyses — at most one blob per recording (keyed by filePath).
+  // Contains the full slot configuration plus the last run's measurements,
+  // so reopening the window on the same file restores the previous state.
+  cursorAnalyses: Record<string, CursorAnalysisData>
+  /** Global (per-user, not per-file) UI prefs for the cursor window:
+   *  splitter position, visible columns per tab, active tab. */
+  cursorWindowUI: CursorWindowUI
 
   // UI state
   zoomMode: boolean
@@ -769,6 +883,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   fieldBursts: {},
   ivCurves: {},
   fpspCurves: {},
+  cursorAnalyses: {},
+  cursorWindowUI: (() => {
+    const defaults: CursorWindowUI = {
+      plotHeight: 220,
+      measurementColumns: [
+        'sweep', 'slot', 'baseline', 'peak', 'amplitude', 'peak_time',
+        'rise_time_20_80', 'half_width', 'area',
+      ],
+      fitColumns: ['sweep', 'slot', 'fit_function', 'r_squared', 'params'],
+      activeTab: 'measurements',
+    }
+    try {
+      const saved = (window as any).electronAPI?.syncPreferences?.cursorWindowUI
+      if (saved && typeof saved === 'object') return { ...defaults, ...saved }
+    } catch { /* ignore */ }
+    return defaults
+  })(),
   zoomMode: false,
   showCursors: true,
   showBurstMarkers: true,
@@ -1064,6 +1195,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       fieldBursts: {},
       ivCurves: {},
       fpspCurves: {},
+      cursorAnalyses: {},
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
@@ -1112,6 +1244,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // Cursor analyses.
+        const savedCursor = await _loadPersistedCursors(recording.filePath)
+        if (savedCursor) {
+          set({ cursorAnalyses: savedCursor })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -2100,6 +2242,30 @@ useAppStore.subscribe((state) => {
   if (state.recording?.filePath) {
     _savePersistedFPsp(state.recording.filePath, state.fpspCurves)
   }
+})
+
+// Cursor-analysis persistence subscribe.
+let _lastPersistedCursorRef: Record<string, CursorAnalysisData> | null = null
+useAppStore.subscribe((state) => {
+  if (state.cursorAnalyses === _lastPersistedCursorRef) return
+  _lastPersistedCursorRef = state.cursorAnalyses
+  if (state.recording?.filePath) {
+    _savePersistedCursors(state.recording.filePath, state.cursorAnalyses)
+  }
+})
+
+// Cursor window UI prefs — global (not per-file). Persist via electronAPI
+// under 'cursorWindowUI' so the splitter position + selected columns survive
+// restarts.
+let _lastPersistedCursorUIRef: CursorWindowUI | null = null
+useAppStore.subscribe((state) => {
+  if (state.cursorWindowUI === _lastPersistedCursorUIRef) return
+  _lastPersistedCursorUIRef = state.cursorWindowUI
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences) return
+  api.getPreferences().then((prefs) => {
+    api.setPreferences!({ ...(prefs ?? {}), cursorWindowUI: state.cursorWindowUI }).catch(() => { /* ignore */ })
+  }).catch(() => { /* ignore */ })
 })
 
 declare global {

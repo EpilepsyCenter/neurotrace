@@ -3,11 +3,11 @@ import { useAppStore } from '../../stores/appStore'
 import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES } from '../../stores/themeStore'
 
 const ANALYSIS_TYPES = [
+  { type: 'cursors', label: 'Cursor Measurements' },
   { type: 'resistance', label: 'Rs / Rin / Cm' },
   { type: 'iv', label: 'I-V Curve' },
   { type: 'events', label: 'Event Detection' },
   { type: 'bursts', label: 'Burst Detection' },
-  { type: 'kinetics', label: 'Kinetics & Fitting' },
   { type: 'field_potential', label: 'Field Potential' },
   { type: 'spectral', label: 'Spectral Analysis' },
 ]

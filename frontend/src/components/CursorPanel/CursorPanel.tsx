@@ -191,6 +191,7 @@ export function CursorPanel() {
             fieldBursts: state.fieldBursts,
             ivCurves: state.ivCurves,
             fpspCurves: state.fpspCurves,
+            cursorAnalyses: state.cursorAnalyses,
           })
         }
         // Bursts pushed from an analysis window → adopt them here so the

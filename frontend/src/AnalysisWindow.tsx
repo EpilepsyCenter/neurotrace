@@ -125,12 +125,18 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.fpspCurves) {
             useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
           }
+          if (ev.data.cursorAnalyses) {
+            useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+          }
         }
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })
         }
         if (ev.data?.type === 'fpsp-update' && ev.data.fpspCurves) {
           useAppStore.setState({ fpspCurves: ev.data.fpspCurves })
+        }
+        if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
+          useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
         }
       }
 

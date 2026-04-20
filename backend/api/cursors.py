@@ -28,11 +28,20 @@ class CursorPair(BaseModel):
     end: float
 
 
+class FitOptions(BaseModel):
+    """Per-slot curve-fit tuning, mirroring Stimfit's fit dialog."""
+    maxfev: Optional[int] = None
+    ftol: Optional[float] = None
+    xtol: Optional[float] = None
+    initial_guess: Optional[dict[str, Optional[float]]] = None
+
+
 class CursorSlot(BaseModel):
     enabled: bool = True
     peak: CursorPair
     fit: Optional[CursorPair] = None
     fit_function: Optional[str] = None
+    fit_options: Optional[FitOptions] = None
 
 
 class CursorAnalysisRequest(BaseModel):
@@ -142,6 +151,7 @@ async def run_cursor_analysis(req: CursorAnalysisRequest):
                     sampling_rate=sampling_rate,
                     window=(slot.fit.start, slot.fit.end),
                     function=slot.fit_function,
+                    options=slot.fit_options.model_dump(exclude_none=True) if slot.fit_options else None,
                 )
 
             measurements.append({

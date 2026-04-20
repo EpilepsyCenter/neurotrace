@@ -5,6 +5,7 @@ import { ResistanceWindow } from './components/AnalysisWindows/ResistanceWindow'
 import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
 import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
 import { FPspWindow } from './components/AnalysisWindows/FPspWindow'
+import { CursorAnalysisWindow } from './components/AnalysisWindows/CursorAnalysisWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -141,6 +142,7 @@ export function AnalysisWindow({ view }: { view: string }) {
   }, [])
 
   const TITLES: Record<string, string> = {
+    cursors: 'Cursor Measurements',
     resistance: 'Rs / Rin / Cm',
     iv: 'I-V Curve',
     events: 'Event Detection',
@@ -222,6 +224,15 @@ export function AnalysisWindow({ view }: { view: string }) {
           />
         ) : view === 'field_potential' ? (
           <FPspWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
+            cursors={cursors}
+          />
+        ) : view === 'cursors' ? (
+          <CursorAnalysisWindow
             backendUrl={backendUrl}
             fileInfo={fileInfo}
             mainGroup={mainGroup}

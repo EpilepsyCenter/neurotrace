@@ -205,6 +205,7 @@ ipcMain.handle('set-preferences', (_event, prefs: Record<string, unknown>) => {
 // Analysis windows — one per analysis type, opened on demand
 // -----------------------------------------------------------------
 const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
+  cursors: 'Cursor Measurements',
   resistance: 'Rs / Rin / Cm',
   iv: 'I-V Curve',
   events: 'Event Detection',

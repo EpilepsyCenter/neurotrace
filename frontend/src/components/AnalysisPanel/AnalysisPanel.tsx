@@ -25,6 +25,9 @@ export function AnalysisPanel() {
   const onChangeType = (t: AnalysisType) => {
     setAnalysisType(t)
     // Analyses that have their own dedicated window: open it on selection.
+    if (t === 'cursors' && window.electronAPI?.openAnalysisWindow) {
+      window.electronAPI.openAnalysisWindow('cursors').catch(() => { /* ignore */ })
+    }
     if (t === 'bursts' && window.electronAPI?.openAnalysisWindow) {
       window.electronAPI.openAnalysisWindow('bursts').catch(() => { /* ignore */ })
     }
@@ -56,6 +59,17 @@ export function AnalysisPanel() {
         </p>
       ) : analysisType === 'resistance' ? (
         <ResistancePanel />
+      ) : analysisType === 'cursors' ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)', fontStyle: 'italic' }}>
+          Cursor measurements run in their own window.{' '}
+          <button
+            className="btn"
+            style={{ padding: '1px 6px', marginLeft: 4, fontSize: 'var(--font-size-label)' }}
+            onClick={() => window.electronAPI?.openAnalysisWindow?.('cursors')}
+          >
+            Open
+          </button>
+        </p>
       ) : analysisType === 'bursts' ? (
         <p style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)', fontStyle: 'italic' }}>
           Burst detection runs in its own window.{' '}

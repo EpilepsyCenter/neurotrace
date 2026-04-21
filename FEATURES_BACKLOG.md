@@ -23,8 +23,13 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 - **M** — multi-channel overlay: show Vm + Im on the same plot with separate Y axes (currently stim is right axis only)
 - **M** — annotations: Alt-click a sample to pin a note at that timestamp; saved per-series; shown as small flags on the trace
 
+## Bugs
+
+- **S** — Main viewer: clicking Average shows the averaged trace but it's time-shifted and on a different X scale from the original sweeps. Affects both "all sweeps" and the new excluded-sweeps path. Likely the backend's average-trace response builds `time = np.arange(n) / sr` from 0 instead of preserving the sweep's real time axis; the frontend then plots it on its own x-range which no longer aligns with the sweep being overlaid. Fix before (or as part of) the planned averaging rework (Feature 2 — multi-select + named averaged sweeps).
+
 ## Existing analysis windows — small tweaks
 
+- **M** — Resistance analysis window rework: this was the first analysis window and is showing its age. Bring it in line with the newer ones — cursors drawn inside the mini-viewer and draggable, ←/→ arrows to skim through sweeps, locked-zoom pattern from the Cursor window, per-series persistence via the `group:series` key pattern. Basically make it look and behave like FPsp / Cursor / I-V.
 - **S** — FPsp: paired-pulse ratio measurement (2nd response amplitude / 1st) when two stims in one sweep
 - **S** — I-V: report reversal potential (linear fit x-intercept) + chord/slope conductance in the summary row
 - **S** — I-V: when the stimulus trace is missing (user forgot to record it), ask for manual Im stimulus parameters — `start_s`, `end_s`, `start_pA` (amplitude of the first sweep's step), `step_pA` (increment between sweeps) — and reconstruct the expected Im protocol from those numbers so the curve can still be plotted. Fall back to this when `.pgf` parsing also fails to find Im segments.

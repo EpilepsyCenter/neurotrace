@@ -192,6 +192,8 @@ export function CursorPanel() {
             ivCurves: state.ivCurves,
             fpspCurves: state.fpspCurves,
             cursorAnalyses: state.cursorAnalyses,
+            excludedSweeps: state.excludedSweeps,
+            averagedSweeps: state.averagedSweeps,
           })
         }
         // Bursts pushed from an analysis window → adopt them here so the
@@ -215,6 +217,16 @@ export function CursorPanel() {
         // the window showed defaults.
         if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
           useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+        }
+        // Excluded-sweep changes from any window — adopt so the main
+        // store persists to electron prefs and other windows see the
+        // same exclusion set.
+        if (ev.data?.type === 'excluded-update' && ev.data.excludedSweeps) {
+          useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
+        }
+        // User-created averaged sweeps (virtual tree entries).
+        if (ev.data?.type === 'averaged-update' && ev.data.averagedSweeps) {
+          useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
         }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same

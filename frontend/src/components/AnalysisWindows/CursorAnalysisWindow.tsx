@@ -400,11 +400,16 @@ export function CursorAnalysisWindow({
     setError(null)
     try {
       let sweepIndices: number[] | null = null
-      if (localData.runMode === 'range') {
+      const store = useAppStore.getState()
+      if (localData.runMode === 'all') {
+        const included = store.includedSweepsFor(localData.group, localData.series, totalSweeps)
+        if (included.length !== totalSweeps) sweepIndices = included
+      } else if (localData.runMode === 'range') {
         const lo = Math.max(1, Math.min(localData.sweepFrom, totalSweeps))
         const hi = Math.max(lo, Math.min(localData.sweepTo, totalSweeps))
-        sweepIndices = []
-        for (let i = lo - 1; i <= hi - 1; i++) sweepIndices.push(i)
+        const range: number[] = []
+        for (let i = lo - 1; i <= hi - 1; i++) range.push(i)
+        sweepIndices = store.filterExcludedSweeps(localData.group, localData.series, range)
       } else if (localData.runMode === 'one') {
         const sw = Math.max(1, Math.min(localData.sweepOne, totalSweeps))
         sweepIndices = [sw - 1]

@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { useAppStore } from '../../stores/appStore'
 import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES } from '../../stores/themeStore'
+import { NumInput } from '../common/NumInput'
 
 const ANALYSIS_TYPES = [
   { type: 'cursors', label: 'Cursor Measurements' },
@@ -20,7 +21,10 @@ export function Toolbar() {
     showOverlay, toggleOverlay, overlayAllSweeps, clearOverlays,
     showAverage, toggleAverage, loadAverageTrace,
     zoomMode, toggleZoomMode,
+    selectedSweeps, includedSweepsFor, filterExcludedSweeps,
+    createAveragedSweep,
   } = useAppStore()
+  void toggleOverlay  // currently unused; reference retained to keep the prop picked
 
   const {
     theme, setTheme,
@@ -31,14 +35,23 @@ export function Toolbar() {
 
   const [showSettings, setShowSettings] = useState(false)
   const [showAnalyses, setShowAnalyses] = useState(false)
+  const [showAverageMenu, setShowAverageMenu] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
   const analysesRef = useRef<HTMLDivElement>(null)
+  const averageRef = useRef<HTMLDivElement>(null)
+
+  // State for the Average popover.
+  const selectedList = selectedSweeps[`${currentGroup}:${currentSeries}`] ?? []
+  const [avgMode, setAvgMode] = useState<'all' | 'selected' | 'range'>('all')
+  const [avgFrom, setAvgFrom] = useState(1)
+  const [avgTo, setAvgTo] = useState(1)
+  const [avgLabel, setAvgLabel] = useState('')
 
   const totalSweeps = recording?.groups[currentGroup]?.series[currentSeries]?.sweepCount ?? 0
 
   // Close popovers on outside click
   useEffect(() => {
-    if (!showSettings && !showAnalyses) return
+    if (!showSettings && !showAnalyses && !showAverageMenu) return
     const onClick = (e: MouseEvent) => {
       if (showSettings && settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
         setShowSettings(false)
@@ -46,10 +59,22 @@ export function Toolbar() {
       if (showAnalyses && analysesRef.current && !analysesRef.current.contains(e.target as Node)) {
         setShowAnalyses(false)
       }
+      if (showAverageMenu && averageRef.current && !averageRef.current.contains(e.target as Node)) {
+        setShowAverageMenu(false)
+      }
     }
     document.addEventListener('mousedown', onClick)
     return () => document.removeEventListener('mousedown', onClick)
-  }, [showSettings, showAnalyses])
+  }, [showSettings, showAnalyses, showAverageMenu])
+
+  // Reset popover defaults every time it opens.
+  useEffect(() => {
+    if (!showAverageMenu) return
+    setAvgFrom(1)
+    setAvgTo(Math.max(1, totalSweeps))
+    setAvgMode(selectedList.length >= 2 ? 'selected' : 'all')
+    setAvgLabel('')
+  }, [showAverageMenu, totalSweeps, selectedList.length])
 
   const handleOpenFile = async () => {
     let filePath: string | null = null
@@ -74,9 +99,43 @@ export function Toolbar() {
     else await overlayAllSweeps()
   }
 
-  const handleAverage = async () => {
-    if (showAverage) toggleAverage()
-    else await loadAverageTrace()
+  // handleAverage was the old show/hide toggle for the overlay-style
+  // average. Superseded by the popover below that creates a permanent
+  // averaged sweep in the tree. Retained for legacy callers; silence
+  // the unused warnings.
+  void showAverage; void toggleAverage; void loadAverageTrace
+
+  // Chosen sweep indices for the Average popover, based on the mode.
+  // Always filters out excluded sweeps.
+  const chosenSweeps = useMemo<number[]>(() => {
+    if (!recording) return []
+    if (avgMode === 'all') {
+      return includedSweepsFor(currentGroup, currentSeries, totalSweeps)
+    }
+    if (avgMode === 'selected') {
+      return filterExcludedSweeps(currentGroup, currentSeries, selectedList)
+    }
+    // range
+    const lo = Math.max(1, Math.min(avgFrom, totalSweeps))
+    const hi = Math.max(lo, Math.min(avgTo, totalSweeps))
+    const raw: number[] = []
+    for (let i = lo - 1; i <= hi - 1; i++) raw.push(i)
+    return filterExcludedSweeps(currentGroup, currentSeries, raw)
+  }, [avgMode, avgFrom, avgTo, currentGroup, currentSeries, totalSweeps, selectedList, recording, includedSweepsFor, filterExcludedSweeps])
+
+  const defaultLabel = useMemo(() => {
+    if (avgMode === 'all') return `Avg all (${chosenSweeps.length})`
+    if (avgMode === 'selected') return `Avg sel (${chosenSweeps.length})`
+    const lo = Math.max(1, Math.min(avgFrom, totalSweeps))
+    const hi = Math.max(lo, Math.min(avgTo, totalSweeps))
+    return `Avg ${lo}–${hi}`
+  }, [avgMode, avgFrom, avgTo, chosenSweeps.length, totalSweeps])
+
+  const handleCreateAverage = async () => {
+    if (!recording || chosenSweeps.length === 0) return
+    const label = avgLabel.trim() || defaultLabel
+    await createAveragedSweep(currentGroup, currentSeries, currentTrace, chosenSweeps, label)
+    setShowAverageMenu(false)
   }
 
   const handleOpenAnalysis = async (type: string) => {
@@ -104,7 +163,7 @@ export function Toolbar() {
         case 'o':
           if (!e.ctrlKey && !e.metaKey) handleOverlayAll(); break
         case 'a':
-          if (!e.ctrlKey && !e.metaKey) handleAverage(); break
+          if (!e.ctrlKey && !e.metaKey) setShowAverageMenu((v) => !v); break
         case 'z':
           if (!e.ctrlKey && !e.metaKey) toggleZoomMode(); break
       }
@@ -134,7 +193,102 @@ export function Toolbar() {
 
       <div className="toolbar-group">
         <button className={`btn ${showOverlay ? 'btn-primary' : ''}`} onClick={handleOverlayAll} disabled={!recording || loading} title="Overlay all sweeps (O)">Overlay</button>
-        <button className={`btn ${showAverage ? 'btn-primary' : ''}`} onClick={handleAverage} disabled={!recording || loading} title="Show average (A)">Average</button>
+
+        {/* Average: click shows a popover to pick the sweeps to average.
+            Result is written into the tree as a virtual sweep and
+            navigated to immediately. */}
+        <div style={{ position: 'relative' }} ref={averageRef}>
+          <button
+            className={`btn ${showAverageMenu ? 'btn-primary' : ''}`}
+            onClick={() => setShowAverageMenu((v) => !v)}
+            disabled={!recording || loading}
+            title="Create an averaged trace from all / selected / range of sweeps (A)"
+          >
+            Average {'\u25BE'}
+          </button>
+
+          {showAverageMenu && (
+            <div className="settings-popover" style={{ left: 0, right: 'auto', width: 280, padding: 10 }}>
+              <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', marginBottom: 6 }}>
+                Create averaged sweep from:
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: 'var(--font-size-sm)' }}>
+                <input
+                  type="radio" name="avg-mode"
+                  checked={avgMode === 'all'} onChange={() => setAvgMode('all')}
+                />
+                All sweeps
+                <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
+                  ({includedSweepsFor(currentGroup, currentSeries, totalSweeps).length})
+                </span>
+              </label>
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0',
+                fontSize: 'var(--font-size-sm)',
+                opacity: selectedList.length < 2 ? 0.55 : 1,
+              }}>
+                <input
+                  type="radio" name="avg-mode"
+                  disabled={selectedList.length < 2}
+                  checked={avgMode === 'selected'} onChange={() => setAvgMode('selected')}
+                />
+                Selected
+                <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
+                  ({filterExcludedSweeps(currentGroup, currentSeries, selectedList).length})
+                </span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: 'var(--font-size-sm)' }}>
+                <input
+                  type="radio" name="avg-mode"
+                  checked={avgMode === 'range'} onChange={() => setAvgMode('range')}
+                />
+                Range
+                <NumInput
+                  value={avgFrom} min={1} max={Math.max(1, totalSweeps)} step={1}
+                  onChange={(v) => { setAvgMode('range'); setAvgFrom(Math.max(1, Math.round(v))) }}
+                  style={{ width: 48 }}
+                />
+                <span style={{ color: 'var(--text-muted)' }}>–</span>
+                <NumInput
+                  value={avgTo} min={1} max={Math.max(1, totalSweeps)} step={1}
+                  onChange={(v) => { setAvgMode('range'); setAvgTo(Math.max(1, Math.round(v))) }}
+                  style={{ width: 48 }}
+                />
+              </label>
+              <div style={{ marginTop: 8, fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>Label:</div>
+              <input
+                type="text"
+                value={avgLabel} placeholder={defaultLabel}
+                onChange={(e) => setAvgLabel(e.target.value)}
+                style={{
+                  width: '100%', padding: '3px 6px', marginTop: 2,
+                  fontSize: 'var(--font-size-sm)',
+                  background: 'var(--bg-primary)', color: 'var(--text-primary)',
+                  border: '1px solid var(--border)', borderRadius: 3,
+                }}
+              />
+              <div style={{
+                marginTop: 8, fontSize: 'var(--font-size-label)',
+                color: chosenSweeps.length === 0 ? 'var(--error)' : 'var(--text-muted)',
+              }}>
+                {chosenSweeps.length === 0
+                  ? 'No sweeps selected (all may be excluded)'
+                  : `Averaging ${chosenSweeps.length} sweep${chosenSweeps.length === 1 ? '' : 's'}`}
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 8, justifyContent: 'flex-end' }}>
+                <button className="btn" onClick={() => setShowAverageMenu(false)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleCreateAverage}
+                  disabled={chosenSweeps.length === 0}
+                >
+                  Create
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         <button className={`btn ${zoomMode ? 'btn-primary' : ''}`} onClick={toggleZoomMode} title="Drag-to-zoom mode (Z)">Zoom</button>
       </div>
 

@@ -70,6 +70,14 @@ class BatchAnalysisRequest(BaseModel):
     trace: int = 0
     sweep_start: int = 0
     sweep_end: int = -1
+    # Optional explicit list — when present, overrides sweep_start/sweep_end.
+    # Used by the frontend to skip excluded sweeps without changing the range.
+    sweep_indices: Optional[list[int]] = None
+    # Optional list of sweep indices to skip. Applied AFTER sweep_indices /
+    # sweep_start+sweep_end resolution. This is a convenience for callers
+    # that want "all sweeps minus these" without having to enumerate the
+    # complement themselves.
+    excluded_sweeps: Optional[list[int]] = None
     cursors: dict = {}
     params: dict = {}
 
@@ -134,15 +142,26 @@ async def run_batch_analysis(req: BatchAnalysisRequest):
     except IndexError:
         raise HTTPException(status_code=400, detail="Invalid group/series index")
 
-    end = req.sweep_end if req.sweep_end >= 0 else ser.sweep_count
+    # Explicit list takes priority; otherwise fall back to the range.
+    if req.sweep_indices is not None:
+        iterable = list(req.sweep_indices)
+    else:
+        end = req.sweep_end if req.sweep_end >= 0 else ser.sweep_count
+        iterable = list(range(req.sweep_start, end))
+
+    # Subtract the excluded-set if provided.
+    if req.excluded_sweeps:
+        excluded = set(req.excluded_sweeps)
+        iterable = [i for i in iterable if i not in excluded]
+
     params = {**req.cursors, **req.params}
 
     analysis = get_analysis(req.analysis_type)
     results = []
 
-    for sweep_idx in range(req.sweep_start, end):
-        if sweep_idx >= ser.sweep_count:
-            break
+    for sweep_idx in iterable:
+        if sweep_idx < 0 or sweep_idx >= ser.sweep_count:
+            continue
         sw = ser.sweeps[sweep_idx]
         if req.trace >= sw.trace_count:
             continue

@@ -201,15 +201,31 @@ async def get_average_trace(
     trace: int = Query(0),
     sweep_start: int = Query(0),
     sweep_end: int = Query(-1),
+    sweeps: str = Query("", description=(
+        "Optional comma-separated list of sweep indices (0-based). "
+        "Takes priority over sweep_start/sweep_end when non-empty. "
+        "Used by the frontend to exclude specific sweeps from the average."
+    )),
     max_points: int = Query(10000),
 ):
-    """Get average trace across sweeps."""
+    """Get average trace across sweeps.
+
+    Selection precedence:
+      1. Explicit `sweeps=1,2,5,8` list if provided (highest priority).
+      2. Otherwise the [sweep_start, sweep_end) range.
+    """
     rec = get_current_recording()
     grp = rec.groups[group]
     ser = grp.series_list[series]
 
-    end = sweep_end if sweep_end >= 0 else ser.sweep_count
-    indices = list(range(sweep_start, end))
+    if sweeps:
+        try:
+            indices = [int(x) for x in sweeps.split(",") if x.strip() != ""]
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid 'sweeps' list: {sweeps!r}")
+    else:
+        end = sweep_end if sweep_end >= 0 else ser.sweep_count
+        indices = list(range(sweep_start, end))
 
     try:
         avg, sr, units = average_sweeps(ser, trace, indices)

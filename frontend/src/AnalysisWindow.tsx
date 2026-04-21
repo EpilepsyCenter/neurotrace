@@ -128,6 +128,12 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.cursorAnalyses) {
             useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
           }
+          if (ev.data.excludedSweeps) {
+            useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
+          }
+          if (ev.data.averagedSweeps) {
+            useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
+          }
         }
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })
@@ -137,6 +143,12 @@ export function AnalysisWindow({ view }: { view: string }) {
         }
         if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
           useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+        }
+        if (ev.data?.type === 'excluded-update' && ev.data.excludedSweeps) {
+          useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
+        }
+        if (ev.data?.type === 'averaged-update' && ev.data.averagedSweeps) {
+          useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
         }
       }
 

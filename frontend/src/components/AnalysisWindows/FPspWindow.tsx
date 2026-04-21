@@ -224,11 +224,18 @@ export function FPspWindow({
   const onRun = () => {
     let sweepIndices: number[] | null = null
     let appendToExisting = false
-    if (runMode === 'range') {
+    const store = useAppStore.getState()
+    if (runMode === 'all') {
+      // Send an explicit list of non-excluded sweeps when any are
+      // excluded; otherwise null lets the backend default to "all".
+      const included = store.includedSweepsFor(group, series, totalSweeps)
+      if (included.length !== totalSweeps) sweepIndices = included
+    } else if (runMode === 'range') {
       const lo = Math.max(1, Math.min(sweepFrom, totalSweeps))
       const hi = Math.max(lo, Math.min(sweepTo, totalSweeps))
-      sweepIndices = []
-      for (let i = lo - 1; i <= hi - 1; i++) sweepIndices.push(i)
+      const range: number[] = []
+      for (let i = lo - 1; i <= hi - 1; i++) range.push(i)
+      sweepIndices = store.filterExcludedSweeps(group, series, range)
     } else if (runMode === 'one') {
       const sw = Math.max(1, Math.min(sweepOne, totalSweeps))
       sweepIndices = [sw - 1]

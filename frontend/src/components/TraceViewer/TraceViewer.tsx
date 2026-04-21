@@ -379,12 +379,41 @@ export function TraceViewer() {
       }
     }
 
-    // Average trace
+    // Average trace. The main trace's `time` array is typically the
+    // backend's LTTB-decimated time (non-uniform) — we can't just
+    // align the average's samples by index because the x axis sample
+    // positions don't correspond. Interpolate the average onto the
+    // main time axis instead.
     if (showAverage && averageTrace) {
-      const vals = new Array(time.length)
-      const src = averageTrace.values
-      for (let i = 0; i < time.length; i++) vals[i] = i < src.length ? src[i] : null
-      columns.push(vals)
+      const avgT = averageTrace.time
+      const avgV = averageTrace.values
+      const vals: (number | null)[] = new Array(time.length).fill(null)
+      if (avgT.length > 0 && avgV.length > 0) {
+        // avgT is uniform (arange(n)/sr from the backend), so a linear
+        // interpolation is fine and cheap. Walk both arrays in parallel.
+        const nA = avgT.length
+        let j = 0
+        for (let i = 0; i < time.length; i++) {
+          const t = time[i]
+          if (t < avgT[0] || t > avgT[nA - 1]) {
+            vals[i] = null
+            continue
+          }
+          while (j < nA - 1 && avgT[j + 1] < t) j++
+          if (j >= nA - 1) {
+            vals[i] = avgV[nA - 1]
+          } else {
+            const span = avgT[j + 1] - avgT[j]
+            if (span <= 0) {
+              vals[i] = avgV[j]
+            } else {
+              const frac = (t - avgT[j]) / span
+              vals[i] = avgV[j] + frac * (avgV[j + 1] - avgV[j])
+            }
+          }
+        }
+      }
+      columns.push(vals as any)
       seriesOpts.push({
         label: 'Average',
         stroke: cssVar('--trace-average'),
@@ -1426,6 +1455,9 @@ export function TraceViewer() {
         {/* Traces dropdown: per-channel + reconstructed-stimulus visibility */}
         <TracesDropdown />
 
+        {/* "This sweep is excluded" badge. Click to restore. */}
+        <ExcludedSweepBadge />
+
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {/* Coordinate-tooltip toggle — shows x/y readout near the cursor
               when hovering over the trace. */}
@@ -1593,5 +1625,39 @@ export function TraceViewer() {
       {/* --- Viewport scroll slider --- */}
       <ViewportSlider />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Excluded-sweep badge — rendered inline in the TraceViewer control bar.
+// Shows only when the currently-displayed sweep is in the exclusion set;
+// click to restore that sweep into the active analysis pool.
+// ---------------------------------------------------------------------------
+
+function ExcludedSweepBadge() {
+  const group = useAppStore((s) => s.currentGroup)
+  const series = useAppStore((s) => s.currentSeries)
+  const sweep = useAppStore((s) => s.currentSweep)
+  const isExcluded = useAppStore((s) => s.isSweepExcluded(group, series, sweep))
+  const toggleSweepExcluded = useAppStore((s) => s.toggleSweepExcluded)
+  if (!isExcluded) return null
+  return (
+    <button
+      onClick={() => toggleSweepExcluded(group, series, sweep)}
+      title="This sweep is excluded from analyses — click to restore it."
+      style={{
+        fontSize: 'var(--font-size-label)',
+        fontWeight: 600,
+        color: '#fff',
+        background: '#e65100',
+        border: 'none',
+        padding: '2px 8px',
+        borderRadius: 3,
+        cursor: 'pointer',
+        lineHeight: 1.4,
+      }}
+    >
+      ⊘ Excluded — click to restore
+    </button>
   )
 }

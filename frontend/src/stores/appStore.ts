@@ -253,6 +253,82 @@ function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisD
   } catch { /* ignore */ }
 }
 
+/** Excluded-sweeps persistence — same per-recording pattern as the
+ *  other analysis slices. Stored as nested dict keyed by file path,
+ *  with each file's value being `Record<"g:s", number[]>`. */
+async function _loadPersistedExcluded(filePath: string): Promise<Record<string, number[]> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedExcludedSweeps as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedExcluded(filePath: string, excluded: Record<string, number[]>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedExcludedSweeps as Record<string, any>) ?? {}
+    if (Object.keys(excluded).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = excluded
+    }
+    await api.setPreferences({ ...prefs, savedExcludedSweeps: store })
+  } catch { /* ignore */ }
+}
+
+function _broadcastExcludedSweeps(excludedSweeps: Record<string, number[]>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'excluded-update', excludedSweeps })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
+/** Averaged-sweep persistence — same per-recording pattern as the
+ *  other analysis slices. Stored under `savedAveragedSweeps[filePath]`
+ *  in Electron prefs. Value shape: `Record<"g:s", AveragedSweep[]>`. */
+async function _loadPersistedAveraged(filePath: string): Promise<Record<string, AveragedSweep[]> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedAveragedSweeps as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedAveraged(filePath: string, averaged: Record<string, AveragedSweep[]>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedAveragedSweeps as Record<string, any>) ?? {}
+    if (Object.keys(averaged).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = averaged
+    }
+    await api.setPreferences({ ...prefs, savedAveragedSweeps: store })
+  } catch { /* ignore */ }
+}
+
+function _broadcastAveragedSweeps(averagedSweeps: Record<string, AveragedSweep[]>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'averaged-update', averagedSweeps })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 /** Broadcast field-burst state + detection filter to other windows via the
  *  shared `neurotrace-sync` channel. Called from the analysis window's store
  *  after every detection run so markers appear in the main viewer. */
@@ -548,6 +624,23 @@ export interface CursorWindowUI {
   activeTab: 'measurements' | 'fit'
 }
 
+/** User-created averaged trace that shows up in the TreeNavigator as
+ *  a virtual sweep. Time/values are stored at full resolution so the
+ *  plot can resample to whatever max_points the viewer needs. */
+export interface AveragedSweep {
+  id: string                   // stable unique key (e.g. "avg-<ms>-<rand>")
+  group: number
+  series: number
+  trace: number
+  sourceSweepIndices: number[] // 0-based indices of the sweeps averaged
+  label: string
+  time: number[]
+  values: number[]
+  samplingRate: number
+  units: string
+  createdAt: number            // epoch ms
+}
+
 interface AppState {
   // Backend connection
   backendUrl: string
@@ -636,6 +729,31 @@ interface AppState {
    *  splitter position, visible columns per tab, active tab. */
   cursorWindowUI: CursorWindowUI
 
+  /** Per-series set of excluded sweep indices. Keyed by "group:series".
+   *  Stored as a sorted array (JSON-serializable) rather than a Set so
+   *  it round-trips through Electron prefs and BroadcastChannel cleanly.
+   *  Excluded sweeps are dropped from EVERY analysis and from the main
+   *  viewer's "Show average" — they're not deleted from disk, just
+   *  filtered out of any batch processing. */
+  excludedSweeps: Record<string, number[]>
+
+  /** Per-series session-only multi-selection in the tree. Drives the
+   *  "Average → Selected" mode and any future multi-sweep actions.
+   *  NOT persisted. Cleared when switching series. */
+  selectedSweeps: Record<string, number[]>
+
+  /** Per-series user-created averaged traces that show up in the tree
+   *  as virtual sweeps. Persisted per-file in Electron prefs. Users
+   *  can navigate to them like real sweeps; they're NOT targets for
+   *  analyses (analysis windows have their own in-built averaging). */
+  averagedSweeps: Record<string, AveragedSweep[]>
+
+  /** Navigation pointer into `averagedSweeps` for the CURRENTLY-VIEWED
+   *  averaged sweep, or null if a real sweep is on screen. When
+   *  non-null, TraceViewer sources its trace data from the stored
+   *  AveragedSweep rather than hitting the backend. */
+  currentAveragedSweep: { group: number; series: number; id: string } | null
+
   // UI state
   zoomMode: boolean
   showCursors: boolean
@@ -699,6 +817,39 @@ interface AppState {
   clearOverlays: () => void
   overlayAllSweeps: () => Promise<void>
   loadAverageTrace: () => Promise<void>
+
+  // Excluded-sweep controls (see `excludedSweeps` slice above).
+  toggleSweepExcluded: (group: number, series: number, sweep: number) => void
+  clearExcludedSweeps: (group: number, series: number) => void
+  isSweepExcluded: (group: number, series: number, sweep: number) => boolean
+  /** Returns the list of sweep indices in [0, totalSweeps) that are NOT
+   *  in the excluded set for (group, series). Use this wherever a
+   *  "run on all sweeps" call would previously pass null / undefined —
+   *  send the explicit complement list instead so excluded sweeps
+   *  never reach the backend. */
+  includedSweepsFor: (group: number, series: number, totalSweeps: number) => number[]
+  /** Same but applied to a caller-supplied list (e.g. a user-selected
+   *  range). Filters out any entries that are in the excluded set. */
+  filterExcludedSweeps: (group: number, series: number, sweeps: number[]) => number[]
+
+  // Multi-selection in the tree (session-only, per series).
+  handleSweepSelection: (
+    group: number, series: number, sweep: number,
+    modifier: 'shift' | 'cmd' | 'none',
+  ) => void
+  clearSweepSelection: (group: number, series: number) => void
+  isSweepSelected: (group: number, series: number, sweep: number) => boolean
+
+  // Averaged virtual-sweep actions.
+  createAveragedSweep: (
+    group: number, series: number, trace: number,
+    sweepIndices: number[], label?: string,
+  ) => Promise<string | null>
+  deleteAveragedSweep: (group: number, series: number, id: string) => void
+  renameAveragedSweep: (group: number, series: number, id: string, label: string) => void
+  /** Navigate to an averaged sweep — puts its values into the
+   *  TraceViewer and flips currentAveragedSweep to track it. */
+  selectAveragedSweep: (group: number, series: number, id: string) => void
 
   // Resistance analysis actions
   runResistanceOnSweep: (vStep: number) => Promise<void>
@@ -884,6 +1035,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   ivCurves: {},
   fpspCurves: {},
   cursorAnalyses: {},
+  excludedSweeps: {},
+  selectedSweeps: {},
+  averagedSweeps: {},
+  currentAveragedSweep: null,
   cursorWindowUI: (() => {
     const defaults: CursorWindowUI = {
       plotHeight: 220,
@@ -1196,6 +1351,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       ivCurves: {},
       fpspCurves: {},
       cursorAnalyses: {},
+      excludedSweeps: {},
+      selectedSweeps: {},
+      averagedSweeps: {},
+      currentAveragedSweep: null,
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
@@ -1257,6 +1416,26 @@ export const useAppStore = create<AppState>((set, get) => ({
             ch.close()
           } catch { /* ignore */ }
         }
+        // Excluded sweeps (drop-from-analysis markers).
+        const savedExcluded = await _loadPersistedExcluded(recording.filePath)
+        if (savedExcluded) {
+          set({ excludedSweeps: savedExcluded })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'excluded-update', excludedSweeps: savedExcluded })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // User-created averaged sweeps.
+        const savedAveraged = await _loadPersistedAveraged(recording.filePath)
+        if (savedAveraged) {
+          set({ averagedSweeps: savedAveraged })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'averaged-update', averagedSweeps: savedAveraged })
+            ch.close()
+          } catch { /* ignore */ }
+        }
       }
       await get().selectSweep(0, 0, 0, 0)
     } catch (err: any) {
@@ -1284,6 +1463,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentSeries: series,
       currentSweep: sweep,
       currentTrace: trace,
+      // Navigating to a real sweep always clears the "we're viewing an
+      // averaged virtual sweep" pointer, so the viewer fetches fresh
+      // trace data below instead of keeping the averaged Float64Array.
+      currentAveragedSweep: null,
     }
 
     if (seriesChanged && stimulus) {
@@ -1463,12 +1646,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadAverageTrace: async () => {
-    const { backendUrl, currentGroup, currentSeries, currentTrace } = get()
+    const { backendUrl, currentGroup, currentSeries, currentTrace, recording } = get()
     try {
-      const data = await apiFetch(
-        backendUrl,
-        `/api/traces/average?group=${currentGroup}&series=${currentSeries}&trace=${currentTrace}&max_points=0`
-      )
+      // Exclude any sweeps the user flagged in the tree — ask the backend
+      // for an explicit-list average when exclusions exist, otherwise let
+      // it default to "all sweeps" via range 0..N.
+      const total = recording?.groups?.[currentGroup]?.series?.[currentSeries]?.sweepCount ?? 0
+      const included = get().includedSweepsFor(currentGroup, currentSeries, total)
+      let url = `/api/traces/average?group=${currentGroup}&series=${currentSeries}&trace=${currentTrace}&max_points=0`
+      if (total > 0 && included.length !== total) {
+        url += `&sweeps=${included.join(',')}`
+      }
+      const data = await apiFetch(backendUrl, url)
       set({
         averageTrace: {
           time: new Float64Array(data.time),
@@ -1482,6 +1671,216 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err: any) {
       set({ error: err.message })
     }
+  },
+
+  // ---- Excluded sweeps ----
+  //
+  // Persistence lives alongside other per-file slices (bursts, IV, fPSP,
+  // cursor analyses): a module-level subscribe below writes
+  // `savedExcludedSweeps[filePath]` on every change, and `openFile`
+  // restores it on file open. Cross-window sync flows through
+  // BroadcastChannel "excluded-update" — the main window's CursorPanel
+  // adopts it on receipt, exactly like the other analysis slices.
+
+  toggleSweepExcluded: (group, series, sweep) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const current = s.excludedSweeps[key] ?? []
+      const has = current.includes(sweep)
+      const next = has
+        ? current.filter((i) => i !== sweep)
+        : [...current, sweep].sort((a, b) => a - b)
+      const nextMap = { ...s.excludedSweeps, [key]: next }
+      // Drop empty entries so the persisted blob stays clean.
+      if (next.length === 0) delete nextMap[key]
+      return { excludedSweeps: nextMap }
+    })
+    _broadcastExcludedSweeps(get().excludedSweeps)
+  },
+
+  clearExcludedSweeps: (group, series) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      if (!s.excludedSweeps[key]) return s
+      const nextMap = { ...s.excludedSweeps }
+      delete nextMap[key]
+      return { excludedSweeps: nextMap }
+    })
+    _broadcastExcludedSweeps(get().excludedSweeps)
+  },
+
+  isSweepExcluded: (group, series, sweep) => {
+    const set = get().excludedSweeps[`${group}:${series}`]
+    return !!set && set.includes(sweep)
+  },
+
+  includedSweepsFor: (group, series, totalSweeps) => {
+    const excluded = get().excludedSweeps[`${group}:${series}`]
+    if (!excluded || excluded.length === 0) {
+      return Array.from({ length: totalSweeps }, (_, i) => i)
+    }
+    const ex = new Set(excluded)
+    const out: number[] = []
+    for (let i = 0; i < totalSweeps; i++) if (!ex.has(i)) out.push(i)
+    return out
+  },
+
+  filterExcludedSweeps: (group, series, sweeps) => {
+    const excluded = get().excludedSweeps[`${group}:${series}`]
+    if (!excluded || excluded.length === 0) return sweeps.slice()
+    const ex = new Set(excluded)
+    return sweeps.filter((i) => !ex.has(i))
+  },
+
+  // ---- Multi-selection ---------------------------------------------
+  //
+  // Behaviour mirrors Finder / VS Code:
+  //   - `none` (plain click) → treat as a navigation click; do NOT
+  //     clear selection (that's handled in selectSweep).
+  //   - `cmd` / Ctrl → toggle the single sweep in/out of selection.
+  //   - `shift` → select the contiguous range between the LAST
+  //     plain-clicked / shift-anchored sweep and this one.
+  // The anchor is tracked as the most recent single-sweep selection
+  // in the selectedSweeps list.
+
+  handleSweepSelection: (group, series, sweep, modifier) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const current = s.selectedSweeps[key] ?? []
+      let next: number[]
+      if (modifier === 'cmd') {
+        next = current.includes(sweep)
+          ? current.filter((i) => i !== sweep)
+          : [...current, sweep].sort((a, b) => a - b)
+      } else if (modifier === 'shift' && current.length > 0) {
+        const anchor = current[current.length - 1]
+        const lo = Math.min(anchor, sweep)
+        const hi = Math.max(anchor, sweep)
+        const range: number[] = []
+        for (let i = lo; i <= hi; i++) range.push(i)
+        next = range
+      } else {
+        // 'none' or shift-without-anchor: seed selection with this sweep.
+        next = [sweep]
+      }
+      const nextMap = { ...s.selectedSweeps, [key]: next }
+      if (next.length === 0) delete nextMap[key]
+      return { selectedSweeps: nextMap }
+    })
+  },
+
+  clearSweepSelection: (group, series) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      if (!s.selectedSweeps[key]) return s
+      const nextMap = { ...s.selectedSweeps }
+      delete nextMap[key]
+      return { selectedSweeps: nextMap }
+    })
+  },
+
+  isSweepSelected: (group, series, sweep) => {
+    const sel = get().selectedSweeps[`${group}:${series}`]
+    return !!sel && sel.includes(sweep)
+  },
+
+  // ---- Averaged virtual sweeps ------------------------------------
+  //
+  // `createAveragedSweep` hits the backend's /api/traces/average with an
+  // explicit sweeps list, stores the returned trace under (group, series)
+  // as a new AveragedSweep, and navigates to it. Persistence + cross-
+  // window sync flow through the standard _broadcast + subscribe
+  // pattern defined below.
+
+  createAveragedSweep: async (group, series, trace, sweepIndices, label) => {
+    const { backendUrl, recording } = get()
+    if (sweepIndices.length === 0) {
+      set({ error: 'No sweeps selected for averaging.' })
+      return null
+    }
+    try {
+      const resp = await apiFetch(
+        backendUrl,
+        `/api/traces/average?group=${group}&series=${series}&trace=${trace}&sweeps=${sweepIndices.join(',')}&max_points=0`,
+      )
+      const id = `avg-${Date.now()}-${Math.floor(Math.random() * 10000)}`
+      const avg: AveragedSweep = {
+        id,
+        group, series, trace,
+        sourceSweepIndices: sweepIndices.slice(),
+        label: label || `Avg ${sweepIndices.length === 1
+          ? `sweep ${sweepIndices[0] + 1}`
+          : `${sweepIndices.length} sweeps`}`,
+        time: resp.time,
+        values: resp.values,
+        samplingRate: resp.sampling_rate,
+        units: resp.units,
+        createdAt: Date.now(),
+      }
+      const key = `${group}:${series}`
+      set((s) => ({
+        averagedSweeps: {
+          ...s.averagedSweeps,
+          [key]: [...(s.averagedSweeps[key] ?? []), avg],
+        },
+      }))
+      _broadcastAveragedSweeps(get().averagedSweeps)
+      // Navigate to the new averaged sweep so the user can see it right away.
+      get().selectAveragedSweep(group, series, id)
+      void recording  // may be null in analysis windows; persistence subscribe runs in main only
+      return id
+    } catch (err: any) {
+      set({ error: err.message || 'Failed to create averaged sweep' })
+      return null
+    }
+  },
+
+  deleteAveragedSweep: (group, series, id) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const list = s.averagedSweeps[key] ?? []
+      const next = list.filter((a) => a.id !== id)
+      const nextMap = { ...s.averagedSweeps }
+      if (next.length === 0) delete nextMap[key]
+      else nextMap[key] = next
+      // If we're currently viewing the deleted one, clear the pointer.
+      const cur = s.currentAveragedSweep
+      const clearCurrent = cur && cur.group === group && cur.series === series && cur.id === id
+      return {
+        averagedSweeps: nextMap,
+        ...(clearCurrent ? { currentAveragedSweep: null } : {}),
+      }
+    })
+    _broadcastAveragedSweeps(get().averagedSweeps)
+  },
+
+  renameAveragedSweep: (group, series, id, label) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const list = s.averagedSweeps[key] ?? []
+      const next = list.map((a) => a.id === id ? { ...a, label } : a)
+      return { averagedSweeps: { ...s.averagedSweeps, [key]: next } }
+    })
+    _broadcastAveragedSweeps(get().averagedSweeps)
+  },
+
+  selectAveragedSweep: (group, series, id) => {
+    const list = get().averagedSweeps[`${group}:${series}`] ?? []
+    const avg = list.find((a) => a.id === id)
+    if (!avg) return
+    set({
+      currentGroup: group,
+      currentSeries: series,
+      currentTrace: avg.trace,
+      currentAveragedSweep: { group, series, id },
+      traceData: {
+        time: new Float64Array(avg.time),
+        values: new Float64Array(avg.values),
+        samplingRate: avg.samplingRate,
+        units: avg.units,
+        label: avg.label,
+      },
+    })
   },
 
   // ---- Resistance analysis ----
@@ -1640,15 +2039,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { backendUrl } = get()
     set({ loading: true, error: null })
     try {
+      const excluded = get().excludedSweeps[`${group}:${series}`] ?? []
       const resp = await apiFetch(backendUrl, '/api/analysis/batch', {
         method: 'POST',
         body: JSON.stringify({
           analysis_type: 'bursts',
           group, series, trace: channel,
-          // sweep_end: -1 tells the backend to use ser.sweep_count, which
-          // avoids reading `recording` from this store (it's only populated
-          // in the main window — the analysis window has its own instance).
+          // sweep_end: -1 tells the backend to use ser.sweep_count.
           sweep_start: 0, sweep_end: -1,
+          // Backend subtracts these after resolving the range.
+          excluded_sweeps: excluded.length > 0 ? excluded : undefined,
           params,
         }),
       })
@@ -2251,6 +2651,26 @@ useAppStore.subscribe((state) => {
   _lastPersistedCursorRef = state.cursorAnalyses
   if (state.recording?.filePath) {
     _savePersistedCursors(state.recording.filePath, state.cursorAnalyses)
+  }
+})
+
+// Excluded-sweeps persistence subscribe.
+let _lastPersistedExcludedRef: Record<string, number[]> | null = null
+useAppStore.subscribe((state) => {
+  if (state.excludedSweeps === _lastPersistedExcludedRef) return
+  _lastPersistedExcludedRef = state.excludedSweeps
+  if (state.recording?.filePath) {
+    _savePersistedExcluded(state.recording.filePath, state.excludedSweeps)
+  }
+})
+
+// Averaged-sweeps persistence subscribe.
+let _lastPersistedAveragedRef: Record<string, AveragedSweep[]> | null = null
+useAppStore.subscribe((state) => {
+  if (state.averagedSweeps === _lastPersistedAveragedRef) return
+  _lastPersistedAveragedRef = state.averagedSweeps
+  if (state.recording?.filePath) {
+    _savePersistedAveraged(state.recording.filePath, state.averagedSweeps)
   }
 })
 

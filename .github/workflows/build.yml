@@ -17,11 +17,9 @@ jobs:
             artifact: NeuroTrace-mac-arm64
             builder_flags: --mac dmg --arm64
             freeze: bash scripts/build-backend.sh
-          - os: macos-13       # Intel runner
-            arch: x64
-            artifact: NeuroTrace-mac-x64
-            builder_flags: --mac dmg --x64
-            freeze: bash scripts/build-backend.sh
+          # Intel Mac build intentionally disabled for the 0.2.0 release —
+          # the lab only uses Apple Silicon. Re-add the macos-13 row here
+          # if an Intel artefact is ever needed again.
           - os: windows-latest
             arch: x64
             artifact: NeuroTrace-win-x64

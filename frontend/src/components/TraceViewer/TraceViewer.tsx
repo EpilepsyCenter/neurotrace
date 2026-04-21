@@ -4,7 +4,6 @@ import 'uplot/dist/uPlot.min.css'
 import { useAppStore, CursorPositions, STIMULUS_TRACE_INDEX } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { ViewportBar, ViewportSlider } from './ViewportBar'
-import { TracesDropdown } from './TracesDropdown'
 
 // Palette for non-primary recorded channels. Must match TracesDropdown.
 const ADDITIONAL_CHANNEL_COLOR_VARS = [
@@ -1452,8 +1451,9 @@ export function TraceViewer() {
           minHeight: 26,
         }}
       >
-        {/* Traces dropdown: per-channel + reconstructed-stimulus visibility */}
-        <TracesDropdown />
+        {/* TracesDropdown now lives in the main Toolbar (before the
+            Overlay / Average group) so it's discoverable at first
+            glance. Kept the import around for the badge below. */}
 
         {/* "This sweep is excluded" badge. Click to restore. */}
         <ExcludedSweepBadge />

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import {
@@ -10,7 +10,14 @@ import {
   FPspPeakDirection,
   FPspTimeAxis,
 } from '../../stores/appStore'
+import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+
+// FPsp cursor→band mapping: baseline cursor pair → Baseline,
+// fit cursor pair → Volley, peak cursor pair → fEPSP.
+const FPSP_BASELINE_COLOR = '#9e9e9e'
+const FPSP_VOLLEY_COLOR = '#64b5f6'
+const FPSP_FEPSP_COLOR = '#e57373'
 
 interface FileInfo {
   fileName: string | null
@@ -121,6 +128,77 @@ export function FPspWindow({
       setSweepOne((s) => Math.min(Math.max(1, s), totalSweeps))
     }
   }, [totalSweeps])
+
+  // ---- Sweep mini-viewer: which series + which sweep to show -------------
+  const [viewerSource, setViewerSource] = useState<'A' | 'B'>('A')
+  const viewerSeries = viewerSource === 'A' ? series : (seriesB ?? series)
+  const viewerSeriesInfo = fileInfo?.groups?.[group]?.series?.[viewerSeries]
+  const viewerSweepCount: number = viewerSeriesInfo?.sweepCount ?? 0
+  const [previewSweep, setPreviewSweep] = useState(0)
+  useEffect(() => {
+    setPreviewSweep((s) => Math.max(0, Math.min(s, viewerSweepCount - 1)))
+  }, [viewerSource, viewerSeries, viewerSweepCount])
+
+  const [sweepTraceTime, setSweepTraceTime] = useState<number[] | null>(null)
+  const [sweepTraceValues, setSweepTraceValues] = useState<number[] | null>(null)
+  const [sweepTraceUnits, setSweepTraceUnits] = useState<string>('')
+  // Per-window zero-offset toggle — applied to the preview fetch only;
+  // the run-time analysis already does its own baseline subtraction.
+  const [zeroOffset, setZeroOffset] = useState(false)
+  useEffect(() => {
+    if (!backendUrl || viewerSweepCount === 0) {
+      setSweepTraceTime(null); setSweepTraceValues(null); return
+    }
+    let cancelled = false
+    const qs = new URLSearchParams({
+      group: String(group), series: String(viewerSeries),
+      sweep: String(previewSweep), trace: String(channel),
+      max_points: '0',
+    })
+    if (zeroOffset) qs.set('zero_offset', 'true')
+    // When the pre-detection filter is on, show the FILTERED trace in
+    // the sweep mini-viewer so the user can see exactly what the
+    // detector operates on. Unchecked = raw trace as usual.
+    if (filterEnabled) {
+      qs.set('filter_type', filterType)
+      qs.set('filter_low', String(filterLow))
+      qs.set('filter_high', String(filterHigh))
+      qs.set('filter_order', String(filterOrder))
+    }
+    fetch(`${backendUrl}/api/traces/data?${qs}`)
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then((d) => {
+        if (cancelled) return
+        setSweepTraceTime(d.time ?? [])
+        setSweepTraceValues(d.values ?? [])
+        setSweepTraceUnits(d.units ?? '')
+      })
+      .catch(() => { if (!cancelled) { setSweepTraceTime(null); setSweepTraceValues(null) } })
+    return () => { cancelled = true }
+  }, [
+    backendUrl, group, viewerSeries, channel, previewSweep,
+    viewerSweepCount, zeroOffset,
+    filterEnabled, filterType, filterLow, filterHigh, filterOrder,
+  ])
+
+  // Exclusion badge for the preview sweep (affects run-on-all, but
+  // single-sweep preview runs are still allowed).
+  const isPreviewExcluded = useAppStore((s) =>
+    s.isSweepExcluded(group, viewerSeries, previewSweep))
+
+  // Push a cursor change (from viewer drag) into the store + broadcast.
+  const updateCursors = useCallback((next: Partial<CursorPositions>) => {
+    useAppStore.getState().setCursors(next)
+    try {
+      const ch = new BroadcastChannel('neurotrace-sync')
+      const merged = { ...useAppStore.getState().cursors, ...next }
+      ch.postMessage({ type: 'cursor-update', cursors: merged })
+      ch.close()
+    } catch { /* ignore */ }
+  }, [])
+
+  const theme = useThemeStore((s) => s.theme)
+  const fontSize = useThemeStore((s) => s.fontSize)
 
   // Splitters.
   const [topHeight, setTopHeight] = useState(300)
@@ -324,6 +402,40 @@ export function FPspWindow({
               <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
             ))}
           </select>
+        </Field>
+
+        {/* Sweep navigator + A/B source toggle. Sits at the top of
+            every analysis window for consistency. */}
+        <Field label="Sweep (preview)">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            {seriesB != null && (
+              <span style={{ display: 'inline-flex', gap: 2, marginRight: 4 }}>
+                <button
+                  className={`btn${viewerSource === 'A' ? ' btn-primary' : ''}`}
+                  style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+                  title="Show a sweep from the baseline series"
+                  onClick={() => setViewerSource('A')}
+                >BL</button>
+                <button
+                  className={`btn${viewerSource === 'B' ? ' btn-primary' : ''}`}
+                  style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+                  title="Show a sweep from the LTP / post-tetanus series"
+                  onClick={() => setViewerSource('B')}
+                >LTP</button>
+              </span>
+            )}
+            <button className="btn" style={{ padding: '2px 8px' }}
+              onClick={() => setPreviewSweep((s) => Math.max(0, s - 1))}
+              disabled={previewSweep <= 0 || viewerSweepCount === 0}
+              title="Previous sweep">←</button>
+            <span style={{ minWidth: 58, textAlign: 'center', fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+              {viewerSweepCount > 0 ? `${previewSweep + 1} / ${viewerSweepCount}` : '— / —'}
+            </span>
+            <button className="btn" style={{ padding: '2px 8px' }}
+              onClick={() => setPreviewSweep((s) => Math.min(viewerSweepCount - 1, s + 1))}
+              disabled={previewSweep >= viewerSweepCount - 1 || viewerSweepCount === 0}
+              title="Next sweep">→</button>
+          </span>
         </Field>
       </div>
 
@@ -568,26 +680,41 @@ export function FPspWindow({
         </div>
       )}
 
-      {/* Top: mini-viewer + over-time graph side-by-side */}
+      {/* Top: sweep mini-viewer (LEFT) + selected-bin waveform (RIGHT) */}
       <div style={{
         flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0,
       }}>
         <div style={{
-          height: topHeight, minHeight: 150,
+          height: topHeight, minHeight: 180,
           display: 'flex', gap: 6, flexShrink: 0,
         }}>
+          {/* LEFT: sweep navigator with draggable Baseline / Volley /
+              fEPSP bands. Drives `cursors` in the main store, so the
+              main viewer's bands track in lockstep. */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <FPspSweepViewer
+              traceTime={sweepTraceTime}
+              traceValues={sweepTraceValues}
+              traceUnits={sweepTraceUnits}
+              cursors={cursors}
+              updateCursors={updateCursors}
+              previewSweep={previewSweep}
+              totalSweeps={viewerSweepCount}
+              source={viewerSource}
+              isExcluded={isPreviewExcluded}
+              theme={theme}
+              fontSize={fontSize}
+              zeroOffset={zeroOffset}
+              onZeroOffsetChange={setZeroOffset}
+            />
+          </div>
+          {/* RIGHT: selected-bin averaged waveform, unchanged — shows
+              whichever bin the user clicks in the results table. */}
           <div style={{ flex: 1, minWidth: 0 }}>
             <FPspMiniViewer
               backendUrl={backendUrl}
               entry={entry}
               group={group} series={series} channel={channel}
-              heightSignal={topHeight}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <FPspOverTimeGraph
-              entry={entry}
-              onSelectIdx={onSelectPoint}
               heightSignal={topHeight}
             />
           </div>
@@ -609,12 +736,11 @@ export function FPspWindow({
           }} />
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-          <FPspTable
-            entry={entry}
-            onSelect={onSelectPoint}
-          />
-        </div>
+        {/* Bottom: tabs (Table | Over-time) */}
+        <FPspResultsTabs
+          entry={entry}
+          onSelectPoint={onSelectPoint}
+        />
       </div>
     </div>
   )
@@ -1126,9 +1252,18 @@ function FPspOverTimeGraph({
   }, [])
 
   useEffect(() => {
-    const u = plotRef.current
-    const el = containerRef.current
-    if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    // Defer via rAF: when this effect fires because the tab just became
+    // visible (display: none → block), the browser hasn't yet laid out
+    // the container, so clientWidth/Height would still read 0. Waiting
+    // a frame lets the layout settle before we resize uPlot.
+    const raf = requestAnimationFrame(() => {
+      const u = plotRef.current
+      const el = containerRef.current
+      if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    return () => cancelAnimationFrame(raf)
   }, [heightSignal])
 
   useEffect(() => { plotRef.current?.redraw() }, [entry?.selectedIdx])
@@ -1301,3 +1436,515 @@ const Th = ({ children }: { children: React.ReactNode }) => (
 const Td = ({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) => (
   <td style={{ padding: '3px 8px', whiteSpace: 'nowrap', ...style }}>{children}</td>
 )
+
+// ---------------------------------------------------------------------------
+// FPspSweepViewer — interactive per-sweep viewer with three draggable
+// cursor bands (Baseline / Volley / fEPSP), prev/next sweep arrows, and
+// an A/B series selector when seriesB is set. Locked-zoom pattern with
+// wheel/pan/Reset, same as the other analysis windows.
+// ---------------------------------------------------------------------------
+
+function FPspSweepViewer({
+  traceTime, traceValues, traceUnits,
+  cursors, updateCursors,
+  previewSweep, totalSweeps,
+  source,
+  isExcluded, theme, fontSize,
+  zeroOffset, onZeroOffsetChange,
+}: {
+  traceTime: number[] | null
+  traceValues: number[] | null
+  traceUnits: string
+  cursors: CursorPositions
+  updateCursors: (next: Partial<CursorPositions>) => void
+  previewSweep: number
+  totalSweeps: number
+  source: 'A' | 'B'
+  isExcluded: boolean
+  theme: string
+  fontSize: number
+  zeroOffset: boolean
+  onZeroOffsetChange: (v: boolean) => void
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+
+  const cursorsRef = useRef(cursors)
+  cursorsRef.current = cursors
+
+  const xRangeRef = useRef<[number, number] | null>(null)
+  const yRangeRef = useRef<[number, number] | null>(null)
+  const hasRealDataRef = useRef(false)
+
+  type DragTarget =
+    | { kind: 'baseline-edge'; edge: 'start' | 'end' }
+    | { kind: 'baseline-band'; startPxX: number; startStart: number; startEnd: number }
+    | { kind: 'volley-edge'; edge: 'start' | 'end' }
+    | { kind: 'volley-band'; startPxX: number; startStart: number; startEnd: number }
+    | { kind: 'fepsp-edge'; edge: 'start' | 'end' }
+    | { kind: 'fepsp-band'; startPxX: number; startStart: number; startEnd: number }
+    | { kind: 'pan'; startX: number; xMin: number; xMax: number; startY: number; yMin: number; yMax: number }
+  const dragRef = useRef<DragTarget | null>(null)
+
+  const resetZoom = () => {
+    const u = plotRef.current
+    if (!u) return
+    xRangeRef.current = null
+    yRangeRef.current = null
+    const d = u.data as unknown as [number[], number[]] | undefined
+    if (!d || !d[0] || d[0].length === 0) { u.redraw(); return }
+    const xs = d[0], ys = d[1]
+    const xmin = xs[0], xmax = xs[xs.length - 1]
+    let ymin = Infinity, ymax = -Infinity
+    for (const v of ys) { if (v < ymin) ymin = v; if (v > ymax) ymax = v }
+    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) u.setScale('x', { min: xmin, max: xmax })
+    if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
+      const pad = (ymax - ymin) * 0.05
+      u.setScale('y', { min: ymin - pad, max: ymax + pad })
+    }
+  }
+
+  const resetCursorsInView = () => {
+    const u = plotRef.current
+    let xMin: number | null = u?.scales.x.min ?? null
+    let xMax: number | null = u?.scales.x.max ?? null
+    if ((xMin == null || xMax == null || xMax <= xMin) && traceTime && traceTime.length > 0) {
+      xMin = traceTime[0]
+      xMax = traceTime[traceTime.length - 1]
+    }
+    if (xMin == null || xMax == null || xMax <= xMin) return
+    const span = xMax - xMin
+    updateCursors({
+      baselineStart: xMin + 0.05 * span,
+      baselineEnd: xMin + 0.15 * span,
+      fitStart: xMin + 0.25 * span,   // Volley
+      fitEnd: xMin + 0.40 * span,
+      peakStart: xMin + 0.45 * span,  // fEPSP
+      peakEnd: xMin + 0.75 * span,
+    })
+  }
+
+  const drawOverlays = (u: uPlot) => {
+    const cur = cursorsRef.current
+    const ctx = u.ctx
+    const yTop = u.bbox.top
+    const yBot = u.bbox.top + u.bbox.height
+    const drawBand = (xs: number, xe: number, color: string, label: string) => {
+      const px0 = u.valToPos(xs, 'x', true)
+      const px1 = u.valToPos(xe, 'x', true)
+      ctx.save()
+      ctx.globalAlpha = 0.18
+      ctx.fillStyle = color
+      ctx.fillRect(Math.min(px0, px1), yTop, Math.abs(px1 - px0), yBot - yTop)
+      ctx.globalAlpha = 1
+      ctx.fillStyle = color
+      const dpr = devicePixelRatio || 1
+      ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
+      ctx.fillText(label, Math.min(px0, px1) + 2 * dpr, yTop + 12 * dpr)
+      ctx.restore()
+    }
+    drawBand(cur.baselineStart, cur.baselineEnd, FPSP_BASELINE_COLOR, 'BL')
+    drawBand(cur.fitStart, cur.fitEnd, FPSP_VOLLEY_COLOR, 'Vol')
+    drawBand(cur.peakStart, cur.peakEnd, FPSP_FEPSP_COLOR, 'fEPSP')
+  }
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || !traceTime || !traceValues) {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+      return
+    }
+    const frameId = requestAnimationFrame(() => {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 100)
+      hasRealDataRef.current = true
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        scales: {
+          x: {
+            time: false,
+            range: (_u, dataMin, dataMax) => {
+              if (xRangeRef.current) return xRangeRef.current
+              const lo = isFinite(dataMin) ? dataMin : 0
+              const hi = isFinite(dataMax) && dataMax > lo ? dataMax : lo + 1
+              const r: [number, number] = [lo, hi]
+              if (hasRealDataRef.current) xRangeRef.current = r
+              return r
+            },
+          },
+          y: {
+            range: (_u, dataMin, dataMax) => {
+              if (yRangeRef.current) return yRangeRef.current
+              let r: [number, number]
+              if (!isFinite(dataMin) || !isFinite(dataMax) || dataMin === dataMax) r = [0, 1]
+              else { const pad = (dataMax - dataMin) * 0.05; r = [dataMin - pad, dataMax + pad] }
+              if (hasRealDataRef.current) yRangeRef.current = r
+              return r
+            },
+          },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'), grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: 'Time (s)', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+            labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}` },
+          { stroke: cssVar('--chart-axis'), grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: traceUnits || '', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+            labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}` },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: [
+          {},
+          { label: 'Trace', stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
+        ],
+        hooks: { draw: [(u) => drawOverlays(u)] },
+      }
+      plotRef.current = new uPlot(opts, [traceTime, traceValues], container)
+
+      const u = plotRef.current
+      const over = container.querySelector<HTMLDivElement>('.u-over')
+      const EDGE_THRESHOLD_PX = 6
+
+      const xToPx = (x: number) => u.valToPos(x, 'x', false)
+      const pxToX = (px: number) => u.posToVal(px, 'x')
+      const pxToY = (py: number) => u.posToVal(py, 'y')
+
+      const findHit = (pxX: number): DragTarget | null => {
+        const cur = cursorsRef.current
+        const pairs: Array<{
+          start: number; end: number
+          edge: (e: 'start' | 'end') => DragTarget
+          band: (startPxX: number) => DragTarget
+        }> = [
+          {
+            start: cur.baselineStart, end: cur.baselineEnd,
+            edge: (e) => ({ kind: 'baseline-edge', edge: e }),
+            band: (startPxX) => ({ kind: 'baseline-band', startPxX,
+              startStart: cur.baselineStart, startEnd: cur.baselineEnd }),
+          },
+          {
+            start: cur.fitStart, end: cur.fitEnd,
+            edge: (e) => ({ kind: 'volley-edge', edge: e }),
+            band: (startPxX) => ({ kind: 'volley-band', startPxX,
+              startStart: cur.fitStart, startEnd: cur.fitEnd }),
+          },
+          {
+            start: cur.peakStart, end: cur.peakEnd,
+            edge: (e) => ({ kind: 'fepsp-edge', edge: e }),
+            band: (startPxX) => ({ kind: 'fepsp-band', startPxX,
+              startStart: cur.peakStart, startEnd: cur.peakEnd }),
+          },
+        ]
+        let best: { dist: number; target: DragTarget } | null = null
+        for (const r of pairs) {
+          const ds = Math.abs(xToPx(r.start) - pxX)
+          const de = Math.abs(xToPx(r.end) - pxX)
+          if (ds < EDGE_THRESHOLD_PX && (!best || ds < best.dist)) best = { dist: ds, target: r.edge('start') }
+          if (de < EDGE_THRESHOLD_PX && (!best || de < best.dist)) best = { dist: de, target: r.edge('end') }
+        }
+        if (best) return best.target
+        for (let i = pairs.length - 1; i >= 0; i--) {
+          const r = pairs[i]
+          const p0 = xToPx(r.start), p1 = xToPx(r.end)
+          const lo = Math.min(p0, p1), hi = Math.max(p0, p1)
+          if (pxX > lo && pxX < hi) return r.band(pxX)
+        }
+        return null
+      }
+
+      const onPointerDown = (ev: PointerEvent) => {
+        if (!over) return
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const hit = findHit(pxX)
+        if (hit) dragRef.current = hit
+        else {
+          const xMin = u.scales.x.min, xMax = u.scales.x.max
+          const yMin = u.scales.y.min, yMax = u.scales.y.max
+          if (xMin == null || xMax == null || yMin == null || yMax == null) return
+          dragRef.current = {
+            kind: 'pan', startX: pxX, xMin, xMax,
+            startY: ev.clientY - rect.top, yMin, yMax,
+          }
+        }
+        over.setPointerCapture(ev.pointerId)
+        ev.preventDefault()
+      }
+
+      const onPointerMove = (ev: PointerEvent) => {
+        if (!over) return
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const pxY = ev.clientY - rect.top
+        const t = dragRef.current
+        if (!t) {
+          const hit = findHit(pxX)
+          over.style.cursor = !hit ? 'grab'
+            : (hit.kind === 'baseline-edge' || hit.kind === 'volley-edge' || hit.kind === 'fepsp-edge') ? 'ew-resize'
+            : 'move'
+          return
+        }
+        if (t.kind === 'pan') {
+          const x = pxToX(pxX)
+          const x0 = u.posToVal(t.startX, 'x')
+          const y = pxToY(pxY)
+          const y0 = u.posToVal(t.startY, 'y')
+          const dx = x - x0, dy = y - y0
+          xRangeRef.current = [t.xMin - dx, t.xMax - dx]
+          yRangeRef.current = [t.yMin - dy, t.yMax - dy]
+          u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
+          u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+          over.style.cursor = 'grabbing'
+          return
+        }
+        const x = pxToX(pxX)
+        const shift = (pxStart: number) => pxToX(pxX) - pxToX(pxStart)
+        switch (t.kind) {
+          case 'baseline-edge':
+            updateCursors({ [t.edge === 'start' ? 'baselineStart' : 'baselineEnd']: x } as Partial<CursorPositions>)
+            break
+          case 'baseline-band': {
+            const dx = shift(t.startPxX)
+            updateCursors({ baselineStart: t.startStart + dx, baselineEnd: t.startEnd + dx })
+            over.style.cursor = 'move'
+            break
+          }
+          case 'volley-edge':
+            updateCursors({ [t.edge === 'start' ? 'fitStart' : 'fitEnd']: x } as Partial<CursorPositions>)
+            break
+          case 'volley-band': {
+            const dx = shift(t.startPxX)
+            updateCursors({ fitStart: t.startStart + dx, fitEnd: t.startEnd + dx })
+            over.style.cursor = 'move'
+            break
+          }
+          case 'fepsp-edge':
+            updateCursors({ [t.edge === 'start' ? 'peakStart' : 'peakEnd']: x } as Partial<CursorPositions>)
+            break
+          case 'fepsp-band': {
+            const dx = shift(t.startPxX)
+            updateCursors({ peakStart: t.startStart + dx, peakEnd: t.startEnd + dx })
+            over.style.cursor = 'move'
+            break
+          }
+        }
+      }
+
+      const onPointerUp = (ev: PointerEvent) => {
+        if (dragRef.current && over) {
+          dragRef.current = null
+          try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
+          over.style.cursor = ''
+        }
+      }
+
+      const onWheel = (ev: WheelEvent) => {
+        if (!over) return
+        ev.preventDefault()
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const pxY = ev.clientY - rect.top
+        const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
+        const xMin = u.scales.x.min, xMax = u.scales.x.max
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (xMin == null || xMax == null || yMin == null || yMax == null) return
+        if (ev.altKey) {
+          const yAtCur = u.posToVal(pxY, 'y')
+          yRangeRef.current = [
+            yAtCur - (yAtCur - yMin) * factor,
+            yAtCur + (yMax - yAtCur) * factor,
+          ]
+          xRangeRef.current = [xMin, xMax]
+        } else {
+          const xAtCur = u.posToVal(pxX, 'x')
+          xRangeRef.current = [
+            xAtCur - (xAtCur - xMin) * factor,
+            xAtCur + (xMax - xAtCur) * factor,
+          ]
+          yRangeRef.current = [yMin, yMax]
+        }
+        u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
+        u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+      }
+
+      if (over) {
+        over.addEventListener('pointerdown', onPointerDown)
+        over.addEventListener('pointermove', onPointerMove)
+        over.addEventListener('pointerup', onPointerUp)
+        over.addEventListener('pointercancel', onPointerUp)
+        over.addEventListener('wheel', onWheel, { passive: false })
+      }
+      ;(plotRef.current as any)._teardownFPspSweep = () => {
+        if (over) {
+          over.removeEventListener('pointerdown', onPointerDown)
+          over.removeEventListener('pointermove', onPointerMove)
+          over.removeEventListener('pointerup', onPointerUp)
+          over.removeEventListener('pointercancel', onPointerUp)
+          over.removeEventListener('wheel', onWheel)
+        }
+      }
+    })
+    return () => {
+      cancelAnimationFrame(frameId)
+      const teardown = (plotRef.current as any)?._teardownFPspSweep
+      if (teardown) teardown()
+      plotRef.current?.destroy()
+      plotRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [traceTime, traceValues])
+
+  useEffect(() => { plotRef.current?.redraw() }, [cursors])
+  useEffect(() => { plotRef.current?.redraw() }, [theme, fontSize])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const obs = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0)
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    })
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      border: '1px solid var(--border)', borderRadius: 4,
+      background: 'var(--bg-primary)',
+    }}>
+      <div style={{
+        padding: '3px 8px', fontSize: 'var(--font-size-xs)',
+        color: 'var(--text-muted)', background: 'var(--bg-secondary)',
+        display: 'flex', alignItems: 'center', gap: 6,
+        borderBottom: '1px solid var(--border)', flexShrink: 0,
+      }}>
+        {/* A/B toggle + sweep arrows moved to the top selector row. */}
+        <span style={{ minWidth: 110 }}>
+          {source === 'B' ? 'LTP ' : 'BL '}
+          Sweep {totalSweeps > 0 ? previewSweep + 1 : '—'}
+        </span>
+        {isExcluded && (
+          <span style={{
+            fontSize: 'var(--font-size-label)', fontWeight: 600,
+            color: '#fff', background: '#e65100',
+            padding: '1px 6px', borderRadius: 3,
+          }}>⊘ Excluded</span>
+        )}
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 3,
+          fontSize: 'var(--font-size-label)', marginLeft: 'auto',
+        }} title="Subtract a baseline computed from the first ~3 ms of each sweep">
+          <input type="checkbox" checked={zeroOffset}
+            onChange={(e) => onZeroOffsetChange(e.target.checked)} />
+          Zero offset
+        </label>
+        <button className="btn"
+          onClick={resetCursorsInView}
+          style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+          title="Bring Baseline / Volley / fEPSP bands into the current view">
+          Reset cursors
+        </button>
+        <button className="btn"
+          onClick={resetZoom}
+          style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+          title="Reset zoom to full sweep">Reset zoom</button>
+      </div>
+      <div ref={containerRef} style={{ flex: 1, minHeight: 120 }} />
+      <div style={{
+        padding: '2px 8px', fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        background: 'var(--bg-secondary)',
+        borderTop: '1px solid var(--border)',
+        flexShrink: 0,
+      }}>
+        scroll = zoom X · ⌥ scroll = zoom Y · drag empty = pan · drag band = move · drag edge = resize
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// FPspResultsTabs — bottom-section tabs. Two tabs: Table (the existing
+// FPspTable) and Over-time (the existing FPspOverTimeGraph). Both stay
+// mounted so switching doesn't rebuild the over-time plot and lose any
+// user zoom / selection state.
+// ---------------------------------------------------------------------------
+
+function FPspResultsTabs({
+  entry, onSelectPoint,
+}: {
+  entry: FPspData | undefined
+  onSelectPoint: (idx: number) => void
+}) {
+  const [activeTab, setActiveTab] = useState<'table' | 'overtime'>('table')
+  const pointCount = entry?.points.length ?? 0
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      minHeight: 0, overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'stretch',
+        borderBottom: '1px solid var(--border)',
+        background: 'var(--bg-secondary)', flexShrink: 0,
+      }}>
+        {([
+          { id: 'table' as const, label: 'Table' },
+          { id: 'overtime' as const, label: 'Over time' },
+        ]).map((t) => {
+          const active = activeTab === t.id
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setActiveTab(t.id)}
+              style={{
+                cursor: 'pointer',
+                userSelect: 'none',
+                padding: '6px 14px',
+                border: 'none',
+                borderBottom: active ? '3px solid var(--accent)' : '3px solid transparent',
+                background: active ? 'var(--bg-primary)' : 'transparent',
+                color: active ? 'var(--accent)' : 'var(--text-muted)',
+                fontSize: 'var(--font-size-sm)',
+                fontFamily: 'var(--font-ui)',
+                fontWeight: active ? 700 : 400,
+              }}
+            >
+              {t.label}
+              {pointCount > 0 && t.id === 'table' && (
+                <span style={{ marginLeft: 6, color: 'var(--text-muted)', fontSize: 'var(--font-size-label)', fontWeight: 400 }}>
+                  ({pointCount})
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        <div style={{ display: activeTab === 'table' ? 'block' : 'none', height: '100%', overflow: 'auto' }}>
+          <FPspTable entry={entry} onSelect={onSelectPoint} />
+        </div>
+        <div style={{ display: activeTab === 'overtime' ? 'block' : 'none', height: '100%' }}>
+          {/* Incrementing heightSignal whenever THIS tab becomes active
+              forces FPspOverTimeGraph to run its "setSize on heightSignal
+              change" effect — which in turn picks up the container's now-
+              real clientWidth/Height (0 while display:none). Without this
+              the plot stayed stuck at the 400×180 fallback from mount. */}
+          <FPspOverTimeGraph
+            entry={entry}
+            onSelectIdx={onSelectPoint}
+            heightSignal={activeTab === 'overtime' ? 1 : 0}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -141,13 +141,22 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
     } catch { /* ignore */ }
   }
 
+  // Per-window "zero offset" toggle. When on, the backend subtracts a
+  // baseline computed from the first ~3 ms of each sweep before
+  // returning the trace — useful for aligning sweeps that drift
+  // between recordings.
+  const [zeroOffset, setZeroOffset] = useState(false)
+
   // ---- Load trace for embedded viewer ----
   const loadTrace = useCallback(async (sweepIdx: number) => {
     if (!backendUrl) return
     try {
-      const resp = await fetch(
-        `${backendUrl}/api/traces/data?group=${currentGroup}&series=${currentSeries}&sweep=${sweepIdx}&trace=0&max_points=0`
-      )
+      const qs = new URLSearchParams({
+        group: String(currentGroup), series: String(currentSeries),
+        sweep: String(sweepIdx), trace: '0', max_points: '0',
+      })
+      if (zeroOffset) qs.set('zero_offset', 'true')
+      const resp = await fetch(`${backendUrl}/api/traces/data?${qs}`)
       if (resp.ok) {
         const data = await resp.json()
         setTraceTime(data.time)
@@ -155,7 +164,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         setTraceLabel(`Sweep ${sweepIdx + 1}`)
       }
     } catch { /* ignore */ }
-  }, [backendUrl, currentGroup, currentSeries])
+  }, [backendUrl, currentGroup, currentSeries, zeroOffset])
 
   // Drive the viewer off previewSweep (not currentSweep) so the local
   // arrows actually do something.
@@ -734,6 +743,32 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   const goPrev = () => setPreviewSweep((s) => Math.max(0, s - 1))
   const goNext = () => setPreviewSweep((s) => Math.min(totalSweeps - 1, s + 1))
 
+  // "Reset cursors" — places Baseline + Peak cursor pairs inside the
+  // currently-visible X range of the mini-viewer. Same idea as the main
+  // window's reset-to-defaults button, but uses whatever X zoom the user
+  // has here so the cursors always land on screen (even if they'd been
+  // scrolled off by wheel/pan).
+  const resetCursorsInView = () => {
+    const u = tracePlotRef.current
+    let xMin: number | null = null, xMax: number | null = null
+    if (u) {
+      xMin = u.scales.x.min ?? null
+      xMax = u.scales.x.max ?? null
+    }
+    if (xMin == null || xMax == null || xMax <= xMin) {
+      if (!traceTime || traceTime.length === 0) return
+      xMin = traceTime[0]
+      xMax = traceTime[traceTime.length - 1]
+    }
+    const span = xMax - xMin
+    updateCursors({
+      baselineStart: xMin + 0.05 * span,
+      baselineEnd: xMin + 0.20 * span,
+      peakStart: xMin + 0.35 * span,
+      peakEnd: xMin + 0.65 * span,
+    })
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* ---- Settings ---- */}
@@ -752,6 +787,26 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
               </option>
             )))}
           </select>
+
+          {/* Sweep navigator — matches the top-row placement the other
+              analysis windows use. */}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            <button
+              className="btn" onClick={goPrev}
+              disabled={previewSweep <= 0 || totalSweeps === 0}
+              title="Previous sweep"
+              style={{ padding: '2px 8px' }}
+            >←</button>
+            <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 58, textAlign: 'center' }}>
+              {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
+            </span>
+            <button
+              className="btn" onClick={goNext}
+              disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
+              title="Next sweep"
+              style={{ padding: '2px 8px' }}
+            >→</button>
+          </span>
         </div>
 
         {/* Params row */}
@@ -786,23 +841,10 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
           </div>
         </div>
 
-        {/* Run row — prev/next arrows + single-sweep + averaged + all */}
+        {/* Run row — single-sweep + averaged + all. Sweep arrows now
+            live at the top next to the Series selector (consistent
+            with Cursor / I-V / FPsp). */}
         <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button
-            className="btn" onClick={goPrev}
-            disabled={previewSweep <= 0 || totalSweeps === 0}
-            title="Previous sweep"
-            style={{ padding: '2px 8px' }}
-          >←</button>
-          <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 58, textAlign: 'center' }}>
-            {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
-          </span>
-          <button
-            className="btn" onClick={goNext}
-            disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
-            title="Next sweep"
-            style={{ padding: '2px 8px' }}
-          >→</button>
           <button className="btn btn-primary" onClick={() => runSingle(previewSweep)} disabled={loading || totalSweeps === 0}>
             {loading ? 'Running…' : `Run sweep ${previewSweep + 1}`}
           </button>
@@ -841,18 +883,34 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
                 ⊘ Excluded
               </span>
             )}
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 3,
+              fontSize: 'var(--font-size-label)', marginLeft: 'auto',
+            }} title="Subtract a baseline computed from the first ~3 ms of each sweep">
+              <input type="checkbox" checked={zeroOffset}
+                onChange={(e) => setZeroOffset(e.target.checked)} />
+              Zero offset
+            </label>
             {fitTime && (
-              <span style={{ color: cssVar(FIT_COLOR_VAR) || '#9c27b0', marginLeft: 'auto' }}>
+              <span style={{ color: cssVar(FIT_COLOR_VAR) || '#9c27b0' }}>
                 ● Fit ({nExp === 1 ? 'mono' : 'bi'}-exp, {fitDurationMs}ms)
               </span>
             )}
             <button
               className="btn"
+              onClick={resetCursorsInView}
+              style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+              title="Bring baseline + peak cursors into the current view"
+            >
+              Reset cursors
+            </button>
+            <button
+              className="btn"
               onClick={resetZoom}
-              style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)', marginLeft: fitTime ? 0 : 'auto' }}
+              style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
               title="Reset zoom to full sweep"
             >
-              Reset
+              Reset zoom
             </button>
           </div>
           <div ref={traceChartRef} style={{ flex: 1, minHeight: 120 }} />

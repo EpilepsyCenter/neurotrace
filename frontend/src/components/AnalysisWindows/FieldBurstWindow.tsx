@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { useAppStore, BurstRecord, FieldBurstsData, FieldBurstsParams } from '../../stores/appStore'
+import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 
 const MARKER_COLORS = {
@@ -52,6 +53,7 @@ function defaultParamsFor(method: Method, baseline_mode: BaselineMode): FieldBur
       baseline_window_s: 5,
       baseline_end_s: 1,
       pre_burst_window_ms: 100,
+      peak_direction: 'auto',
     }
   }
   if (method === 'oscillation') {
@@ -70,6 +72,7 @@ function defaultParamsFor(method: Method, baseline_mode: BaselineMode): FieldBur
       baseline_window_s: 5,
       baseline_end_s: 1,
       pre_burst_window_ms: 100,
+      peak_direction: 'auto',
     }
   }
   // isi
@@ -81,6 +84,7 @@ function defaultParamsFor(method: Method, baseline_mode: BaselineMode): FieldBur
     max_isi_ms: 100,
     min_spikes_per_burst: 3,
     pre_burst_window_ms: 100,
+    peak_direction: 'auto',
   }
 }
 
@@ -106,10 +110,14 @@ export function FieldBurstWindow({
 }) {
   const {
     fieldBursts,
+    burstFormParams, setBurstFormParams,
     runFieldBurstsOnSweep, runFieldBurstsOnSeries,
     clearFieldBursts, selectFieldBurst, exportFieldBurstsCSV,
+    addManualBurst, removeBurstAt,
     loading, error, setError,
   } = useAppStore()
+  const theme = useThemeStore((s) => s.theme)
+  const fontSize = useThemeStore((s) => s.fontSize)
 
   // Selections. Start from the main window's current selection on first
   // mount; afterwards the user can change them here without being
@@ -126,9 +134,41 @@ export function FieldBurstWindow({
     if (mainSeries != null) setSeries(mainSeries)
     if (mainTrace != null) setChannel(mainTrace)
   }, [mainGroup, mainSeries, mainTrace])
-  const [method, setMethod] = useState<Method>('threshold')
-  const [baselineMode, setBaselineMode] = useState<BaselineMode>('percentile')
-  const [params, setParams] = useState<FieldBurstsParams>(defaultParamsFor('threshold', 'percentile'))
+  // Local form state. Initially seeded from the store's persisted
+  // per-series `burstFormParams` if already present (e.g. the main
+  // window hydrated prefs before this window mounted); otherwise
+  // defaults with filter fields inherited from the main viewer. A
+  // useEffect below rehydrates again whenever the user switches
+  // (group, series) or the persisted blob arrives asynchronously via
+  // a BroadcastChannel state-update.
+  const initialKey = `${mainGroup ?? 0}:${mainSeries ?? 0}`
+  const initialStored = useAppStore.getState().burstFormParams[initialKey]
+  const [method, setMethod] = useState<Method>(
+    (initialStored?.method as Method | undefined) ?? 'threshold',
+  )
+  const [baselineMode, setBaselineMode] = useState<BaselineMode>(
+    (initialStored?.baseline_mode as BaselineMode | undefined) ?? 'percentile',
+  )
+  const [params, setParams] = useState<FieldBurstsParams>(() => {
+    if (initialStored) return initialStored
+    // Seed filter fields from the main viewer if main has a filter
+    // currently enabled — matches the behaviour of the other analysis
+    // windows. If main's filter is off, keep the burst-default bandpass
+    // so new users get sensible detection out of the box.
+    const defaults = defaultParamsFor('threshold', 'percentile')
+    const mf = useAppStore.getState().filter
+    if (mf.enabled) {
+      return {
+        ...defaults,
+        filter_enabled: true,
+        filter_type: mf.type,
+        filter_low: mf.lowCutoff,
+        filter_high: mf.highCutoff,
+        filter_order: mf.order,
+      }
+    }
+    return defaults
+  })
 
   // Draggable splitter between mini-viewer and table.
   const [miniHeight, setMiniHeight] = useState(340)
@@ -148,10 +188,56 @@ export function FieldBurstWindow({
     document.addEventListener('mouseup', onUp)
   }
 
-  // Reset params when method or baseline-mode changes.
+  // Rehydrate the form from the store's per-series blob whenever we
+  // "land on" a (group, series) pair that has saved params. Matches the
+  // FPspWindow pattern — keyed by `${group}:${series}` with a ref that
+  // tracks which key we've already rehydrated so we don't clobber
+  // subsequent user edits. Fires when the stored blob becomes available
+  // asynchronously too (e.g. the first `state-update` broadcast arrives
+  // after this window has already rendered once).
+  const formKey = `${group}:${series}`
+  const storedForm = burstFormParams[formKey]
+  const rehydratedKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    setParams(defaultParamsFor(method, baselineMode))
-  }, [method, baselineMode])
+    if (!storedForm) return
+    if (rehydratedKeyRef.current === formKey) return
+    rehydratedKeyRef.current = formKey
+    const m = (storedForm.method as Method | undefined) ?? 'threshold'
+    const bm = (storedForm.baseline_mode as BaselineMode | undefined) ?? 'percentile'
+    setMethod(m)
+    setBaselineMode(bm)
+    setParams(storedForm)
+  }, [storedForm, formKey])
+
+  // Wrapped setters: persist every form edit to the store (which the
+  // main-window subscribe then writes to disk, and every other open
+  // window picks up via broadcast). Changing method / baseline-mode
+  // also resets params to the defaults for that combination, matching
+  // the old useEffect-based behaviour but without the race against
+  // rehydration.
+  const commitForm = useCallback((
+    m: Method, bm: BaselineMode, p: FieldBurstsParams,
+  ) => {
+    // Rehydration has happened (or will happen and supersede) for this
+    // key. Mark it so the rehydration effect won't overwrite the user's
+    // fresh edits on the next render.
+    rehydratedKeyRef.current = formKey
+    setBurstFormParams(group, series, p)
+  }, [formKey, group, series, setBurstFormParams])
+
+  const onMethodChange = useCallback((m: Method) => {
+    const next = defaultParamsFor(m, baselineMode)
+    setMethod(m)
+    setParams(next)
+    commitForm(m, baselineMode, next)
+  }, [baselineMode, commitForm])
+
+  const onBaselineModeChange = useCallback((bm: BaselineMode) => {
+    const next = defaultParamsFor(method, bm)
+    setBaselineMode(bm)
+    setParams(next)
+    commitForm(method, bm, next)
+  }, [method, commitForm])
 
   // Reset group/series if the file changes and the previous indices are gone.
   useEffect(() => {
@@ -171,15 +257,64 @@ export function FieldBurstWindow({
   const key = `${group}:${series}`
   const entry = fieldBursts[key]
 
+  // ---- Sweep preview + viewport state for the new central viewer ----
+  const totalSweeps: number = fileInfo?.groups?.[group]?.series?.[series]?.sweepCount ?? 0
+  const [previewSweep, setPreviewSweep] = useState(currentSweep)
+  // On first mount, sync from the main-window sweep; after that let the
+  // user scroll independently here.
+  const mainSyncedRef = useRef(false)
+  useEffect(() => {
+    if (mainSyncedRef.current) return
+    mainSyncedRef.current = true
+    setPreviewSweep(currentSweep)
+  }, [currentSweep])
+  // Clamp when the series changes.
+  const lastSeriesKeyRef = useRef(`${group}:${series}`)
+  useEffect(() => {
+    const k = `${group}:${series}`
+    if (lastSeriesKeyRef.current === k) return
+    lastSeriesKeyRef.current = k
+    setPreviewSweep((s) => Math.max(0, Math.min(s, totalSweeps - 1)))
+  }, [group, series, totalSweeps])
+
+  /** Viewport state for the central viewer. Default window is 10 s so
+   *  the first fetch stays cheap on long sweeps. `null` is reserved
+   *  for the Reset-zoom action (which defers to the viewer's own
+   *  default-10s-or-full-sweep logic based on the known duration).
+   *  Clicking a table row zooms the viewer to that burst ±200 ms. */
+  const [viewport, setViewport] = useState<{ tStart: number; tEnd: number } | null>(
+    { tStart: 0, tEnd: 10 },
+  )
+  // Reset to default 10 s on sweep change so the user isn't
+  // surprised by a random window on a new sweep.
+  useEffect(() => {
+    setViewport({ tStart: 0, tEnd: 10 })
+  }, [previewSweep])
+
+  // Zero-offset toggle for the mini-viewer — subtracts a per-sweep
+  // baseline (first ~3 ms) so drifting DC doesn't push the trace off
+  // screen between sweeps. Matches the toggle in every other analysis
+  // window. Does not affect detection; detection always runs on the
+  // raw signal server-side.
+  const [zeroOffset, setZeroOffset] = useState(false)
+
   const onParamChange = (name: string, value: number) => {
-    setParams((p) => ({ ...p, [name]: value }))
+    setParams((p) => {
+      const next = { ...p, [name]: value }
+      commitForm(method, baselineMode, next)
+      return next
+    })
   }
   const onParamChangeRaw = (name: string, value: string | boolean) => {
-    setParams((p) => ({ ...p, [name]: value }))
+    setParams((p) => {
+      const next = { ...p, [name]: value }
+      commitForm(method, baselineMode, next)
+      return next
+    })
   }
 
   const onRunSweep = () => {
-    runFieldBurstsOnSweep(group, series, currentSweep, channel, params)
+    runFieldBurstsOnSweep(group, series, previewSweep, channel, params)
   }
   const onRunSeries = () => {
     runFieldBurstsOnSeries(group, series, channel, params)
@@ -187,7 +322,63 @@ export function FieldBurstWindow({
 
   const onSelectRow = (idx: number) => {
     selectFieldBurst(group, series, idx)
+    const b = entry?.bursts[idx]
+    if (b) {
+      // Pan the viewer to the clicked burst with 1 s of context on
+      // each side. Also snap the preview sweep to the burst's sweep so
+      // the trace fetch targets the right data.
+      setPreviewSweep(b.sweepIndex)
+      setViewport({
+        tStart: Math.max(0, b.startS - 1.0),
+        tEnd: b.endS + 1.0,
+      })
+    }
   }
+
+  /** Left-click on the sweep viewer → add a manual burst at that time. */
+  const onAddManualBurst = useCallback(async (timeS: number) => {
+    try {
+      const resp = await fetch(`${backendUrl}/api/bursts/measure_at`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group, series, sweep: previewSweep, trace: channel,
+          time_s: timeS, params,
+        }),
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: 'measure_at failed' }))
+        setError(err.detail || 'measure_at failed')
+        return
+      }
+      const b = await resp.json()
+      // Translate backend-snake-case to frontend shape.
+      const burst: BurstRecord = {
+        sweepIndex: Number(b.sweep_index ?? 0),
+        startS: Number(b.start_s ?? 0),
+        endS: Number(b.end_s ?? 0),
+        durationMs: Number(b.duration_ms ?? 0),
+        peakAmplitude: Number(b.peak_amplitude ?? 0),
+        peakSigned: Number(b.peak_signed ?? 0),
+        peakTimeS: Number(b.peak_time_s ?? 0),
+        meanAmplitude: Number(b.mean_amplitude ?? 0),
+        integral: Number(b.integral ?? 0),
+        riseTime10_90Ms: b.rise_time_10_90_ms != null ? Number(b.rise_time_10_90_ms) : null,
+        decayHalfTimeMs: b.decay_half_time_ms != null ? Number(b.decay_half_time_ms) : null,
+        preBurstBaseline: Number(b.pre_burst_baseline ?? 0),
+        meanFrequencyHz: b.mean_frequency_hz != null ? Number(b.mean_frequency_hz) : null,
+        manual: true,
+      }
+      addManualBurst(group, series, burst)
+    } catch (err: any) {
+      setError(err.message ?? String(err))
+    }
+  }, [backendUrl, group, series, previewSweep, channel, params, addManualBurst, setError])
+
+  /** Right-click / double-click on a burst → remove it. */
+  const onRemoveBurstAt = useCallback((timeS: number) => {
+    removeBurstAt(group, series, previewSweep, timeS)
+  }, [group, series, previewSweep, removeBurstAt])
 
   return (
     <div style={{
@@ -204,8 +395,10 @@ export function FieldBurstWindow({
         group={group} setGroup={setGroup}
         series={series} setSeries={setSeries}
         channels={channels} channel={channel} setChannel={setChannel}
-        method={method} setMethod={setMethod}
-        baselineMode={baselineMode} setBaselineMode={setBaselineMode}
+        method={method} setMethod={onMethodChange}
+        baselineMode={baselineMode} setBaselineMode={onBaselineModeChange}
+        previewSweep={previewSweep} setPreviewSweep={setPreviewSweep}
+        totalSweeps={totalSweeps}
       />
 
       {/* Params form */}
@@ -220,7 +413,7 @@ export function FieldBurstWindow({
       {/* Run buttons */}
       <div style={{ display: 'flex', gap: 6 }}>
         <button className="btn btn-primary" onClick={onRunSweep} disabled={loading || !fileInfo}>
-          {loading ? 'Running…' : `Run on sweep ${currentSweep + 1}`}
+          {loading ? 'Running…' : `Run on sweep ${previewSweep + 1}`}
         </button>
         <button className="btn" onClick={onRunSeries} disabled={loading || !fileInfo}>
           Run on series
@@ -309,16 +502,23 @@ export function FieldBurstWindow({
         minHeight: 0,
       }}>
         <div style={{ height: miniHeight, minHeight: 150, flexShrink: 0 }}>
-          <BurstMiniViewer
+          <BurstSweepViewer
             backendUrl={backendUrl}
             entry={entry}
+            liveParams={params}
             group={group}
             series={series}
             channel={channel}
-            // When the parent's height changes (splitter drag, window resize
-            // relayouting), re-flow uPlot in the child. Needed because
-            // ResizeObserver fires asynchronously and can miss fast drag.
+            sweep={previewSweep}
+            viewport={viewport}
+            setViewport={setViewport}
             heightSignal={miniHeight}
+            onAddBurst={onAddManualBurst}
+            onRemoveBurst={onRemoveBurstAt}
+            zeroOffset={zeroOffset}
+            onZeroOffsetChange={setZeroOffset}
+            theme={theme}
+            fontSize={fontSize}
           />
         </div>
 
@@ -368,6 +568,7 @@ function TopBar({
   channels, channel, setChannel,
   method, setMethod,
   baselineMode, setBaselineMode,
+  previewSweep, setPreviewSweep, totalSweeps,
 }: {
   fileInfo: FileInfo | null
   group: number; setGroup: (n: number) => void
@@ -375,6 +576,9 @@ function TopBar({
   channels: any[]; channel: number; setChannel: (n: number) => void
   method: Method; setMethod: (m: Method) => void
   baselineMode: BaselineMode; setBaselineMode: (m: BaselineMode) => void
+  previewSweep: number
+  setPreviewSweep: React.Dispatch<React.SetStateAction<number>>
+  totalSweeps: number
 }) {
   const groups = fileInfo?.groups ?? []
   const seriesList = fileInfo?.groups?.[group]?.series ?? []
@@ -401,6 +605,21 @@ function TopBar({
             <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
           ))}
         </select>
+      </Field>
+      <Field label="Sweep (preview)">
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+          <button className="btn" style={{ padding: '2px 8px' }}
+            onClick={() => setPreviewSweep((s) => Math.max(0, s - 1))}
+            disabled={previewSweep <= 0 || totalSweeps === 0}
+            title="Previous sweep">←</button>
+          <span style={{ minWidth: 58, textAlign: 'center', fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+            {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
+          </span>
+          <button className="btn" style={{ padding: '2px 8px' }}
+            onClick={() => setPreviewSweep((s) => Math.min(totalSweeps - 1, s + 1))}
+            disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
+            title="Next sweep">→</button>
+        </span>
       </Field>
       <Field label="Method">
         <select value={method} onChange={(e) => setMethod(e.target.value as Method)}>
@@ -445,6 +664,7 @@ function ParamsForm({
   const filterEnabled = Boolean(params.filter_enabled)
   const noiseMethod = String(params.noise_method ?? 'sd')
   const filterType = String(params.filter_type ?? 'bandpass')
+  const peakDirection = String(params.peak_direction ?? 'auto')
 
   return (
     <div style={{
@@ -582,6 +802,23 @@ function ParamsForm({
         step={10} min={1}
         onChange={(v) => onChange('pre_burst_window_ms', v)}
       />
+
+      {/* Peak direction — "auto" picks the sample with the largest |Δ|,
+          keeping the sign. "positive" / "negative" force that direction,
+          which matters for spike-and-wave epileptiform events where a
+          short initial downward spike is followed by a larger upward
+          wave — pick "positive" to place the peak on the wave. */}
+      <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
+        <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>peak direction</span>
+        <select
+          value={peakDirection}
+          onChange={(e) => onChangeRaw('peak_direction', e.target.value)}
+        >
+          <option value="auto">Auto (|max dev|)</option>
+          <option value="positive">Positive</option>
+          <option value="negative">Negative</option>
+        </select>
+      </label>
       </div>{/* /method knobs grid */}
     </div>
   )
@@ -601,88 +838,126 @@ function ParamRow({
   )
 }
 
-/** Zoomed plot of the currently-selected burst, with per-burst markers
- *  (baseline / peak / decay½ / end) and dashed horizontal lines for the
- *  detection baseline and upper/lower thresholds. */
-function BurstMiniViewer({
-  backendUrl, entry, group, series, channel, heightSignal,
+/** Central "continuous-style" sweep viewer for the Burst Detection
+ *  window. Replaces the old selected-burst mini-viewer with a viewport
+ *  over the whole sweep, peak/baseline/decay/end dots for EVERY burst,
+ *  and left-click-to-add / right-click (or double-click) -to-remove
+ *  manual-edit hooks. Clicking a row in the burst table below pans the
+ *  viewport to centre that burst via the controlled `viewport` prop. */
+function BurstSweepViewer({
+  backendUrl, entry, liveParams, group, series, channel, sweep,
+  viewport, setViewport, heightSignal,
+  onAddBurst, onRemoveBurst,
+  zeroOffset, onZeroOffsetChange,
+  theme, fontSize,
 }: {
   backendUrl: string
   entry: FieldBurstsData | undefined
+  /** Live params from the form (as opposed to `entry.params`, which
+   *  are frozen at the time of the last detection run). Drives the
+   *  filter applied to the DISPLAYED trace so toggling the checkbox
+   *  shows the effect immediately. */
+  liveParams: FieldBurstsParams
   group: number
   series: number
   channel: number
+  sweep: number
+  viewport: { tStart: number; tEnd: number } | null
+  setViewport: React.Dispatch<React.SetStateAction<{ tStart: number; tEnd: number } | null>>
   heightSignal?: number
+  onAddBurst: (timeS: number) => void
+  onRemoveBurst: (timeS: number) => void
+  /** Subtract per-sweep baseline server-side before sending samples. */
+  zeroOffset: boolean
+  onZeroOffsetChange: (v: boolean) => void
+  theme: string
+  fontSize: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const justDoubleClickedRef = useRef(false)
 
-  const selected: BurstRecord | null =
-    entry && entry.selectedIdx != null && entry.selectedIdx < entry.bursts.length
-      ? entry.bursts[entry.selectedIdx]
-      : null
+  // Bursts on THIS sweep. Everything else (other sweeps' bursts) is
+  // invisible here — they belong to a different trace.
+  const sweepBursts = useMemo(
+    () => (entry?.bursts ?? []).filter((b) => b.sweepIndex === sweep),
+    [entry?.bursts, sweep],
+  )
 
-  const [data, setData] = useState<{ time: Float64Array; values: Float64Array } | null>(null)
+  const [data, setData] = useState<{
+    time: Float64Array; values: Float64Array; sweepDurationS: number
+    /** Baseline subtracted server-side when `zero_offset=true`. Needed
+     *  to shift burst markers (which carry RAW signal y values) so they
+     *  stay aligned with the visibly DC-shifted trace. 0 when off. */
+    zeroOffsetApplied: number
+  } | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  // Fetch trace data around the selected burst — using the SAME filter
-  // config that was used for detection, so the displayed trace lines up
-  // with the burst markers (which carry filtered-signal y values).
+  // Sweep trace fetch. Uses LIVE form params for the filter so the
+  // user sees the effect of toggling the filter immediately (and
+  // before running detection for the first time). Range comes from
+  // the viewport prop; null means "let the backend default to the
+  // full sweep" — we avoid that on initial mount by seeding viewport
+  // to [0, 10] s in the parent.
   useEffect(() => {
-    if (!selected || !backendUrl) {
-      setData(null)
-      return
-    }
-    const durS = Math.max(selected.endS - selected.startS, 0.05)
-    const tStart = Math.max(0, selected.startS - durS * 2)
-    const tEnd = selected.endS + durS * 2
-    const p = (entry?.params ?? {}) as Record<string, any>
-    const parts = [
-      `group=${group}`,
-      `series=${series}`,
-      `sweep=${selected.sweepIndex}`,
-      `trace=${channel}`,
-      `t_start=${tStart}`,
-      `t_end=${tEnd}`,
-      `max_points=4000`,
+    if (!backendUrl) { setData(null); return }
+    const p = liveParams as Record<string, any>
+    const parts: string[] = [
+      `group=${group}`, `series=${series}`, `sweep=${sweep}`,
+      `trace=${channel}`, `max_points=4000`,
     ]
+    if (viewport) {
+      parts.push(`t_start=${viewport.tStart}`)
+      parts.push(`t_end=${viewport.tEnd}`)
+    }
     if (p.filter_enabled) {
       parts.push(`filter_type=${p.filter_type ?? 'bandpass'}`)
       if (p.filter_low != null) parts.push(`filter_low=${p.filter_low}`)
       if (p.filter_high != null) parts.push(`filter_high=${p.filter_high}`)
       if (p.filter_order != null) parts.push(`filter_order=${p.filter_order}`)
     }
+    if (zeroOffset) parts.push('zero_offset=true')
     const url = `${backendUrl}/api/traces/data?${parts.join('&')}`
     let cancelled = false
     fetch(url)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d) => {
         if (cancelled) return
+        const n = Number(d.n_samples ?? 0)
+        const sr = Number(d.sampling_rate ?? 1)
+        const sweepDurationS = sr > 0 ? n / sr : Number(d.duration ?? 0)
         setData({
           time: new Float64Array(d.time ?? []),
           values: new Float64Array(d.values ?? []),
+          sweepDurationS,
+          zeroOffsetApplied: Number(d.zero_offset ?? 0),
         })
         setErr(null)
       })
       .catch((e) => { if (!cancelled) setErr(String(e)) })
     return () => { cancelled = true }
-  }, [selected, backendUrl, group, series, channel, entry?.params])
+  }, [backendUrl, group, series, channel, sweep, viewport, liveParams, zeroOffset])
 
-  // Build / rebuild the uPlot instance when data arrives or size changes.
+  // (Re)build the plot whenever the data changes. Mirrors the pattern
+  // we now use in every other analysis window (Cursor/Resistance/IV/
+  // FPsp) — rebuild-on-data, not setData-on-data, which avoided a
+  // subtle stale-frame bug in one of those earlier.
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    if (plotRef.current) {
-      plotRef.current.destroy()
-      plotRef.current = null
-    }
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     if (!data || data.time.length === 0) return
 
     const opts: uPlot.Options = {
       width: container.clientWidth || 400,
       height: Math.max(120, container.clientHeight || 180),
       scales: { x: { time: false }, y: {} },
+      // Hide uPlot's top legend — the header row already shows sweep
+      // number, burst count, etc., and the "Time / Value / Trace"
+      // pills uPlot draws by default just add noise.
+      legend: { show: false },
       axes: [
         {
           stroke: cssVar('--chart-axis'),
@@ -700,161 +975,402 @@ function BurstMiniViewer({
       cursor: { drag: { x: false, y: false } },
       series: [
         {},
-        {
-          label: 'trace',
-          stroke: cssVar('--trace-color-1'),
-          width: 1.25,
-        },
+        { stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
       ],
       hooks: {
-        draw: [() => drawMiniOverlay(plotRef.current, overlayRef.current, entry, selected)],
+        draw: [() => drawBurstOverlay(
+          plotRef.current, overlayRef.current, entry, sweepBursts,
+          data.zeroOffsetApplied,
+        )],
       },
     }
-    const payload: uPlot.AlignedData = [
-      Array.from(data.time),
-      Array.from(data.values),
-    ]
+    const payload: uPlot.AlignedData = [Array.from(data.time), Array.from(data.values)]
     plotRef.current = new uPlot(opts, payload, container)
-    drawMiniOverlay(plotRef.current, overlayRef.current, entry, selected)
-  }, [data, entry, selected])
+    drawBurstOverlay(
+      plotRef.current, overlayRef.current, entry, sweepBursts,
+      data.zeroOffsetApplied,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
 
-  // Re-draw overlay when entry's thresholds change without a data fetch.
+  // Redraw overlays when the burst list or entry thresholds change
+  // without a fresh fetch (e.g. manual add/remove on the same view).
   useEffect(() => {
-    drawMiniOverlay(plotRef.current, overlayRef.current, entry, selected)
-  }, [entry, selected])
+    drawBurstOverlay(
+      plotRef.current, overlayRef.current, entry, sweepBursts,
+      data?.zeroOffsetApplied ?? 0,
+    )
+  }, [entry, sweepBursts, theme, fontSize, data])
 
-  // Keep uPlot sized to its container. `selected` is a dep because the
-  // containerRef div is only rendered once a burst is selected — the
-  // observer needs to (re)attach after that mount.
+  // Keep uPlot sized to its container — ResizeObserver + parent
+  // heightSignal (splitter drag) + window resize.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const ro = new ResizeObserver(() => {
       const u = plotRef.current
       if (!u || !el) return
-      const w = el.clientWidth
-      const h = el.clientHeight
+      const w = el.clientWidth, h = el.clientHeight
       if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     })
     ro.observe(el)
-    // Also observe the window so Electron resize fires even when the
-    // ResizeObserver doesn't tick synchronously.
-    const onWindowResize = () => {
+    const onWin = () => {
       const u = plotRef.current
-      if (!u || !el) return
-      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
     }
-    window.addEventListener('resize', onWindowResize)
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', onWindowResize)
-    }
-  }, [selected != null])
+    window.addEventListener('resize', onWin)
+    return () => { ro.disconnect(); window.removeEventListener('resize', onWin) }
+  }, [])
 
-  // Explicit resize drive when the parent pushes a new `heightSignal` (e.g.
-  // the user is dragging the splitter between the mini-viewer and the
-  // table). ResizeObserver is async; this ticks synchronously each render.
   useEffect(() => {
     const u = plotRef.current
     const el = containerRef.current
-    if (!u || !el) return
-    u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
   }, [heightSignal])
 
+  // ---- Interactions: wheel = zoom X viewport, ⌥-wheel = zoom Y,
+  // drag empty = pan. Left-click = add burst. Right-click / dblclick
+  // near a burst = remove. Keyboard: PgUp/PgDn = ±viewport-width
+  // jumps, Home/End, ←/→ = small nudges.
+  const pxToTimeRef = useRef<(px: number) => number>(() => 0)
+  useEffect(() => {
+    const container = containerRef.current
+    const u = plotRef.current
+    if (!container || !u || !data) return
+    const over = container.querySelector<HTMLDivElement>('.u-over')
+    if (!over) return
+
+    const xToPx = (x: number) => u.valToPos(x, 'x', false)
+    const pxToX = (px: number) => u.posToVal(px, 'x')
+    pxToTimeRef.current = pxToX
+
+    const effectiveViewport = (): { tStart: number; tEnd: number } => {
+      if (viewport) return viewport
+      return { tStart: 0, tEnd: data.sweepDurationS || data.time[data.time.length - 1] }
+    }
+
+    let dragState: null | { kind: 'pan'; startPxX: number; startPxY: number;
+      vpStart: number; vpEnd: number; yMin: number; yMax: number } = null
+
+    const onPointerDown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return // only left-button here; right handled via contextmenu
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const v = effectiveViewport()
+      const yMin = u.scales.y.min, yMax = u.scales.y.max
+      if (yMin == null || yMax == null) return
+      // Remember start for drag-pan; decide pan vs. click on pointer-up.
+      dragState = {
+        kind: 'pan',
+        startPxX: pxX, startPxY: pxY,
+        vpStart: v.tStart, vpEnd: v.tEnd,
+        yMin, yMax,
+      }
+      over.setPointerCapture(ev.pointerId)
+    }
+
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!dragState) return
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const dxPx = pxX - dragState.startPxX
+      const dyPx = pxY - dragState.startPxY
+      // Only start panning after a small drag threshold — otherwise
+      // a clean click would be misread as a tiny pan.
+      if (Math.abs(dxPx) < 3 && Math.abs(dyPx) < 3) return
+      const vpW = dragState.vpEnd - dragState.vpStart
+      const bboxW = u.bbox.width / (devicePixelRatio || 1)
+      const dt = -(dxPx / bboxW) * vpW
+      const yRange = dragState.yMax - dragState.yMin
+      const bboxH = u.bbox.height / (devicePixelRatio || 1)
+      const dy = (dyPx / bboxH) * yRange
+      setViewport({
+        tStart: dragState.vpStart + dt,
+        tEnd: dragState.vpEnd + dt,
+      })
+      u.setScale('y', {
+        min: dragState.yMin + dy,
+        max: dragState.yMax + dy,
+      })
+      over.style.cursor = 'grabbing'
+    }
+
+    const onPointerUp = (ev: PointerEvent) => {
+      if (!dragState) return
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const dxPx = pxX - dragState.startPxX
+      const dyPx = pxY - dragState.startPxY
+      const isClick = Math.abs(dxPx) < 3 && Math.abs(dyPx) < 3
+      dragState = null
+      try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
+      over.style.cursor = ''
+      if (isClick && !justDoubleClickedRef.current) {
+        // Left-click ADDS a manual burst at the click time.
+        const timeS = pxToX(pxX)
+        if (isFinite(timeS)) onAddBurst(timeS)
+      }
+      justDoubleClickedRef.current = false
+    }
+
+    const onContextMenu = (ev: MouseEvent) => {
+      // Right-click REMOVES the nearest burst on this sweep.
+      ev.preventDefault()
+      const rect = over.getBoundingClientRect()
+      const timeS = pxToX(ev.clientX - rect.left)
+      if (isFinite(timeS)) onRemoveBurst(timeS)
+    }
+
+    const onDblClick = (ev: MouseEvent) => {
+      // Double-click ALSO removes; guards against the pointerup click
+      // handler also firing and re-adding a burst right after.
+      justDoubleClickedRef.current = true
+      const rect = over.getBoundingClientRect()
+      const timeS = pxToX(ev.clientX - rect.left)
+      if (isFinite(timeS)) onRemoveBurst(timeS)
+    }
+
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault()
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
+      const v = effectiveViewport()
+      if (ev.altKey) {
+        // Y zoom
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (yMin == null || yMax == null) return
+        const yAtCur = u.posToVal(pxY, 'y')
+        u.setScale('y', {
+          min: yAtCur - (yAtCur - yMin) * factor,
+          max: yAtCur + (yMax - yAtCur) * factor,
+        })
+      } else {
+        const xAtCur = pxToX(pxX)
+        const newStart = xAtCur - (xAtCur - v.tStart) * factor
+        const newEnd = xAtCur + (v.tEnd - xAtCur) * factor
+        setViewport({ tStart: newStart, tEnd: newEnd })
+      }
+    }
+
+    over.addEventListener('pointerdown', onPointerDown)
+    over.addEventListener('pointermove', onPointerMove)
+    over.addEventListener('pointerup', onPointerUp)
+    over.addEventListener('contextmenu', onContextMenu)
+    over.addEventListener('dblclick', onDblClick)
+    over.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      over.removeEventListener('pointerdown', onPointerDown)
+      over.removeEventListener('pointermove', onPointerMove)
+      over.removeEventListener('pointerup', onPointerUp)
+      over.removeEventListener('contextmenu', onContextMenu)
+      over.removeEventListener('dblclick', onDblClick)
+      over.removeEventListener('wheel', onWheel)
+    }
+  }, [data, viewport, setViewport, onAddBurst, onRemoveBurst])
+
+  // Keyboard navigation — active only when the viewer has focus.
+  //   ←/→      = back/forward by one viewport width
+  //   PgUp/Dn  = 3× viewport jumps (for skimming fast through long sweeps)
+  //   Home/End = sweep start / sweep end
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!data) return
+      const duration = data.sweepDurationS || (data.time[data.time.length - 1] ?? 0)
+      const v = viewport ?? { tStart: 0, tEnd: duration }
+      const w = v.tEnd - v.tStart
+      const shift = (dt: number) => {
+        const ns = Math.max(0, v.tStart + dt)
+        const ne = Math.min(duration, ns + w)
+        const clampedStart = Math.max(0, ne - w)
+        setViewport({ tStart: clampedStart, tEnd: ne })
+      }
+      if (e.key === 'ArrowRight') { e.preventDefault(); shift(w) }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); shift(-w) }
+      else if (e.key === 'PageDown') { e.preventDefault(); shift(w * 3) }
+      else if (e.key === 'PageUp') { e.preventDefault(); shift(-w * 3) }
+      else if (e.key === 'Home') { e.preventDefault(); setViewport({ tStart: 0, tEnd: Math.min(duration, w) }) }
+      else if (e.key === 'End') { e.preventDefault(); setViewport({ tStart: Math.max(0, duration - w), tEnd: duration }) }
+    }
+    root.addEventListener('keydown', onKey)
+    return () => root.removeEventListener('keydown', onKey)
+  }, [data, viewport, setViewport])
+
+  /** Shift the viewport by `deltaWidthsFactor × current width`. Clamps
+   *  to [0, sweepDuration] without changing the viewport width. */
+  const shiftViewport = (deltaWidthsFactor: number) => {
+    if (!data) return
+    const duration = data.sweepDurationS || (data.time[data.time.length - 1] ?? 0)
+    const v = viewport ?? { tStart: 0, tEnd: Math.min(10, duration) }
+    const w = v.tEnd - v.tStart
+    let ns = v.tStart + w * deltaWidthsFactor
+    ns = Math.max(0, Math.min(duration - w, ns))
+    setViewport({ tStart: ns, tEnd: ns + w })
+  }
+
+  const goHome = () => {
+    if (!data) return
+    const duration = data.sweepDurationS || (data.time[data.time.length - 1] ?? 0)
+    const v = viewport ?? { tStart: 0, tEnd: 10 }
+    const w = v.tEnd - v.tStart
+    setViewport({ tStart: 0, tEnd: Math.min(duration, w) })
+  }
+  const goEnd = () => {
+    if (!data) return
+    const duration = data.sweepDurationS || (data.time[data.time.length - 1] ?? 0)
+    const v = viewport ?? { tStart: 0, tEnd: 10 }
+    const w = v.tEnd - v.tStart
+    setViewport({ tStart: Math.max(0, duration - w), tEnd: duration })
+  }
+
+  const manualCount = sweepBursts.filter((b) => b.manual).length
+
+  /** Reset zoom = re-autoscale Y to the currently-visible data.
+   *  X is driven by the viewport preset buttons, so leave it alone
+   *  (the user just picked a width — resetting it would override
+   *  that). Finds the min/max of the samples inside the current
+   *  viewport and applies a small pad so the trace doesn't clip. */
+  const resetZoom = () => {
+    const u = plotRef.current
+    if (!u || !data || data.time.length === 0) return
+    const v = viewport ?? { tStart: 0, tEnd: data.sweepDurationS }
+    let ymin = Infinity, ymax = -Infinity
+    for (let i = 0; i < data.time.length; i++) {
+      const t = data.time[i]
+      if (t < v.tStart) continue
+      if (t > v.tEnd) break
+      const y = data.values[i]
+      if (y < ymin) ymin = y
+      if (y > ymax) ymax = y
+    }
+    if (!isFinite(ymin) || !isFinite(ymax) || ymin === ymax) {
+      // Fallback: autoscale from the whole buffer.
+      for (const y of data.values) { if (y < ymin) ymin = y; if (y > ymax) ymax = y }
+    }
+    if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
+      const pad = (ymax - ymin) * 0.05
+      u.setScale('y', { min: ymin - pad, max: ymax + pad })
+    }
+  }
+
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      border: '1px solid var(--border)',
-      borderRadius: 4,
-      background: 'var(--bg-primary)',
-      position: 'relative',
-    }}>
-      {!selected ? (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100%',
-          color: 'var(--text-muted)',
-          fontStyle: 'italic',
-          fontSize: 'var(--font-size-label)',
-        }}>
-          Select a burst in the table below to preview it here.
-        </div>
-      ) : (
-        <>
-          <div style={{
-            padding: '3px 8px',
-            fontSize: 'var(--font-size-label)',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-mono)',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            gap: 10,
-            flexWrap: 'wrap',
-          }}>
-            <span>burst #{(entry?.selectedIdx ?? 0) + 1}</span>
-            <span>sweep {selected.sweepIndex + 1}</span>
-            <span>t {selected.startS.toFixed(3)} → {selected.endS.toFixed(3)} s</span>
-            <span>peak {selected.peakAmplitude.toFixed(3)}</span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-              <LegendDot color={MARKER_COLORS.baseline} label="baseline" />
-              <LegendDot color={MARKER_COLORS.peak} label="peak" />
-              <LegendDot color={MARKER_COLORS.decay} label="½ decay" />
-              <LegendDot color={MARKER_COLORS.end} label="return" />
-            </span>
-          </div>
-          <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-            {/* Overlay canvas nested INSIDE the uPlot container so its
-                pixel coordinates line up with the uPlot bbox (dots would
-                otherwise be shifted down by the height of the header row). */}
-            <canvas
-              ref={overlayRef}
-              style={{
-                position: 'absolute',
-                inset: 0,
-                pointerEvents: 'none',
-                zIndex: 5,
-                width: '100%',
-                height: '100%',
-              }}
+    <div
+      ref={rootRef}
+      tabIndex={0}
+      style={{
+        display: 'flex', flexDirection: 'column', height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+        outline: 'none',
+      }}
+    >
+      {/* Sweep + burst info + legend — narrow strip, no controls. */}
+      <div style={{
+        padding: '3px 8px', fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center',
+      }}>
+        <span>sweep {sweep + 1}</span>
+        <span>{sweepBursts.length} bursts{manualCount > 0 ? ` (${manualCount} manual)` : ''}</span>
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: 3 }}
+            title="Subtract a per-sweep baseline (first ~3 ms) from the displayed trace. Detection always runs on the raw signal."
+          >
+            <input
+              type="checkbox"
+              checked={zeroOffset}
+              onChange={(e) => onZeroOffsetChange(e.target.checked)}
             />
-          </div>
-          {err && (
-            <div style={{
-              position: 'absolute', top: 30, left: 10,
-              color: '#f44336', fontSize: 'var(--font-size-label)',
-            }}>fetch: {err}</div>
-          )}
-        </>
+            Zero offset
+          </label>
+          <button
+            className="btn"
+            onClick={resetZoom}
+            style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+            title="Autoscale Y to the currently-visible data (use the preset buttons above to reset X)"
+          >
+            Reset zoom
+          </button>
+          <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+          <LegendDot color={MARKER_COLORS.baseline} label="baseline" />
+          <LegendDot color={MARKER_COLORS.peak} label="peak" />
+          <LegendDot color={MARKER_COLORS.decay} label="½ decay" />
+          <LegendDot color={MARKER_COLORS.end} label="return" />
+        </span>
+      </div>
+
+      {/* Viewport controls — mirrors the main viewer's ViewportBar
+          (presets + custom seconds + ⟨⟨ ⟪ ◀ ▶ ⟫ ⟩⟩ arrows + time
+          readout) so the burst window feels identical to the main
+          continuous-mode UI the user already knows. */}
+      <BurstViewportBar
+        viewport={viewport}
+        sweepDuration={data?.sweepDurationS ?? 0}
+        setViewport={setViewport}
+        shiftViewport={shiftViewport}
+        goHome={goHome}
+        goEnd={goEnd}
+      />
+
+      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+        <canvas
+          ref={overlayRef}
+          style={{
+            position: 'absolute', inset: 0, pointerEvents: 'none',
+            zIndex: 5, width: '100%', height: '100%',
+          }}
+        />
+      </div>
+
+      {/* Scroll indicator: shows where the visible viewport sits
+          inside the full sweep. Drag or click to pan. */}
+      <BurstViewportSlider
+        viewport={viewport}
+        sweepDuration={data?.sweepDurationS ?? 0}
+        setViewport={setViewport}
+      />
+
+      <div style={{
+        padding: '2px 8px', fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        background: 'var(--bg-secondary)',
+        borderTop: '1px solid var(--border)',
+      }}>
+        scroll = zoom X · ⌥ scroll = zoom Y · drag = pan · left-click = add burst · right-click / double-click = remove
+      </div>
+      {err && (
+        <div style={{
+          position: 'absolute', top: 30, left: 10,
+          color: '#f44336', fontSize: 'var(--font-size-label)',
+        }}>fetch: {err}</div>
       )}
     </div>
   )
 }
 
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-      <span style={{
-        width: 8, height: 8, borderRadius: '50%',
-        background: color, border: '1px solid rgba(255,255,255,0.6)',
-      }} />
-      {label}
-    </span>
-  )
-}
-
-/** Paints dots and dashed threshold/baseline lines on the overlay canvas,
- *  sized to the uPlot instance's current bbox. */
-function drawMiniOverlay(
+/** Same as BurstMiniViewer's old `drawMiniOverlay`, but loops over
+ *  EVERY burst in the current sweep (not just the selected one) and
+ *  draws a ring around the peak dot for manually-added bursts. */
+function drawBurstOverlay(
   u: uPlot | null,
   canvas: HTMLCanvasElement | null,
   entry: FieldBurstsData | undefined,
-  selected: BurstRecord | null,
+  bursts: BurstRecord[],
+  /** DC baseline the backend subtracted when zero-offset was on.
+   *  Burst records and detection thresholds are in RAW signal space,
+   *  so we subtract the same offset here to keep markers glued to the
+   *  visibly shifted trace (mirrors the main viewer's overlay). */
+  yOffset: number = 0,
 ) {
-  if (!u || !canvas || !selected) return
+  if (!u || !canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   const dpr = devicePixelRatio || 1
@@ -872,12 +1388,14 @@ function drawMiniOverlay(
 
   const toPx = (x: number, y: number): [number, number] => [
     u.valToPos(x, 'x', true) / dpr,
-    u.valToPos(y, 'y', true) / dpr,
+    u.valToPos(y - yOffset, 'y', true) / dpr,
   ]
 
-  // Dashed horizontal lines: pre-burst baseline, detection thresholds.
+  // Dashed horizontal lines: detection thresholds (once per view, not
+  // per burst). Pre-burst-baseline varies per burst so we draw short
+  // local marks at each burst's baseline dot instead.
   const hLine = (y: number, color: string, label: string) => {
-    const py = u.valToPos(y, 'y', true) / dpr
+    const py = u.valToPos(y - yOffset, 'y', true) / dpr
     if (!isFinite(py)) return
     ctx.strokeStyle = color
     ctx.lineWidth = 1
@@ -891,29 +1409,19 @@ function drawMiniOverlay(
     ctx.font = `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`
     ctx.fillText(label, left + 4, py - 3)
   }
-
-  hLine(selected.preBurstBaseline, 'rgba(158,158,158,0.8)', 'pre-baseline')
-  if (entry?.thresholdHigh != null) {
-    hLine(entry.thresholdHigh, 'rgba(229,115,115,0.7)', 'thr ↑')
+  // Global detection baseline (grey) + thresholds (red), same style as
+  // the main viewer's burst overlay. `baselineValue` is 0 for entries
+  // predating the field that was added later; skip the line then so
+  // we don't draw a misleading y=0 guide.
+  if (entry && entry.baselineValue !== 0) {
+    hLine(entry.baselineValue, 'rgba(158,158,158,0.8)', 'baseline')
   }
+  if (entry?.thresholdHigh != null) hLine(entry.thresholdHigh, 'rgba(229,115,115,0.7)', 'thr ↑')
   if (entry?.thresholdLow != null && entry.thresholdLow !== entry.thresholdHigh) {
     hLine(entry.thresholdLow, 'rgba(229,115,115,0.7)', 'thr ↓')
   }
 
-  // Per-burst dots.
-  const peakY = selected.preBurstBaseline + selected.peakSigned
-  const [px0, py0] = toPx(selected.startS, selected.preBurstBaseline)
-  const [px1, py1] = toPx(selected.peakTimeS, peakY)
-  const [px3, py3] = toPx(selected.endS, selected.preBurstBaseline)
-  const decay =
-    selected.decayHalfTimeMs != null
-      ? toPx(
-          selected.peakTimeS + selected.decayHalfTimeMs / 1000,
-          selected.preBurstBaseline + selected.peakSigned * 0.5,
-        )
-      : null
-
-  const drawDot = (px: number, py: number, color: string) => {
+  const drawDot = (px: number, py: number, color: string, ring: boolean = false) => {
     if (!isFinite(px) || !isFinite(py)) return
     ctx.beginPath()
     ctx.arc(px, py, 6, 0, 2 * Math.PI)
@@ -922,12 +1430,44 @@ function drawMiniOverlay(
     ctx.strokeStyle = '#fff'
     ctx.lineWidth = 1.5
     ctx.stroke()
+    if (ring) {
+      // Bold outer ring for manually-added bursts.
+      ctx.beginPath()
+      ctx.arc(px, py, 9.5, 0, 2 * Math.PI)
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+    }
   }
 
-  drawDot(px0, py0, MARKER_COLORS.baseline)
-  drawDot(px1, py1, MARKER_COLORS.peak)
-  if (decay) drawDot(decay[0], decay[1], MARKER_COLORS.decay)
-  drawDot(px3, py3, MARKER_COLORS.end)
+  for (const b of bursts) {
+    const peakY = b.preBurstBaseline + b.peakSigned
+    const [px0, py0] = toPx(b.startS, b.preBurstBaseline)
+    const [px1, py1] = toPx(b.peakTimeS, peakY)
+    const [px3, py3] = toPx(b.endS, b.preBurstBaseline)
+    const decay = b.decayHalfTimeMs != null
+      ? toPx(
+          b.peakTimeS + b.decayHalfTimeMs / 1000,
+          b.preBurstBaseline + b.peakSigned * 0.5,
+        )
+      : null
+    drawDot(px0, py0, MARKER_COLORS.baseline)
+    drawDot(px1, py1, MARKER_COLORS.peak, !!b.manual)
+    if (decay) drawDot(decay[0], decay[1], MARKER_COLORS.decay)
+    drawDot(px3, py3, MARKER_COLORS.end)
+  }
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%',
+        background: color, border: '1px solid rgba(255,255,255,0.6)',
+      }} />
+      {label}
+    </span>
+  )
 }
 
 function BurstTable({
@@ -990,9 +1530,15 @@ function BurstTable({
                 background: i === selectedIdx ? 'var(--bg-selected, rgba(100,181,246,0.2))' : 'transparent',
                 cursor: 'pointer',
                 borderTop: '1px solid var(--border)',
+                // Italicize manually-added bursts so the user can tell
+                // at a glance which rows came from clicks vs auto
+                // detection. Matches the ring the overlay draws
+                // around their peak dot.
+                fontStyle: b.manual ? 'italic' : 'normal',
               }}
+              title={b.manual ? 'Manually added' : undefined}
             >
-              <Td>{i + 1}</Td>
+              <Td>{b.manual ? `${i + 1}★` : `${i + 1}`}</Td>
               <Td>{b.sweepIndex + 1}</Td>
               <Td>{b.startS.toFixed(3)}</Td>
               <Td>{b.durationMs.toFixed(1)}</Td>
@@ -1017,3 +1563,229 @@ const Th = ({ children }: { children: React.ReactNode }) => (
 const Td = ({ children }: { children: React.ReactNode }) => (
   <td style={{ padding: '3px 8px', whiteSpace: 'nowrap' }}>{children}</td>
 )
+
+// ---------------------------------------------------------------------------
+// Viewport toolbar + scroll indicator for the BurstSweepViewer.
+//
+// Structurally the same as the main viewer's ViewportBar /
+// ViewportSlider, but driven by LOCAL viewport state (the analysis
+// window has its own uPlot + fetch loop and doesn't share the main
+// viewer's zustand slice). Behaviour mirrors main:
+//   Presets (Full, 5 min, 1 min, 30 s, 10 s, 1 s), custom seconds
+//   input, ⟨⟨ ⟪ ◀ ▶ ⟫ ⟩⟩ scroll arrows, M:SS.s time readout.
+// ---------------------------------------------------------------------------
+
+const VIEWPORT_PRESETS: { label: string; seconds: number | null }[] = [
+  { label: 'Full',  seconds: null },
+  { label: '5 min', seconds: 300 },
+  { label: '1 min', seconds: 60 },
+  { label: '30 s',  seconds: 30 },
+  { label: '10 s',  seconds: 10 },
+  { label: '1 s',   seconds: 1 },
+]
+
+function fmtViewportTime(s: number): string {
+  if (!isFinite(s) || s < 0) return '—'
+  const m = Math.floor(s / 60)
+  const rem = s - m * 60
+  return `${m}:${rem.toFixed(1).padStart(4, '0')}`
+}
+
+function BurstViewportBar({
+  viewport, sweepDuration, setViewport, shiftViewport, goHome, goEnd,
+}: {
+  viewport: { tStart: number; tEnd: number } | null
+  sweepDuration: number
+  setViewport: React.Dispatch<React.SetStateAction<{ tStart: number; tEnd: number } | null>>
+  shiftViewport: (widthsFactor: number) => void
+  goHome: () => void
+  goEnd: () => void
+}) {
+  const len = viewport ? viewport.tEnd - viewport.tStart : sweepDuration
+  const start = viewport ? viewport.tStart : 0
+  const end = viewport ? viewport.tEnd : sweepDuration
+  const atStart = start <= 1e-6
+  const atEnd = sweepDuration > 0 && end >= sweepDuration - 1e-6
+
+  // Label for the currently-active preset (or Custom).
+  const presetLabel = (() => {
+    if (!viewport || (sweepDuration > 0 && len >= sweepDuration - 1e-3)) return 'Full'
+    for (const p of VIEWPORT_PRESETS) {
+      if (p.seconds !== null && Math.abs(p.seconds - len) < 0.01) return p.label
+    }
+    return 'Custom'
+  })()
+
+  /** Jump to a window of `seconds` length starting at viewport.tStart
+   *  (or 0 when switching from Full). `null` means Full-sweep view. */
+  const setWindow = (seconds: number | null) => {
+    if (seconds == null) {
+      // "Full" — size the viewport to the whole sweep.
+      if (sweepDuration <= 0) { setViewport({ tStart: 0, tEnd: 10 }); return }
+      setViewport({ tStart: 0, tEnd: sweepDuration })
+      return
+    }
+    const curStart = viewport?.tStart ?? 0
+    const ns = Math.max(0, Math.min(curStart, Math.max(0, sweepDuration - seconds)))
+    const ne = sweepDuration > 0 ? Math.min(sweepDuration, ns + seconds) : ns + seconds
+    setViewport({ tStart: ns, tEnd: ne })
+  }
+
+  const customValue = len || 10
+  const commitCustom = (v: number) => {
+    if (!isFinite(v) || v <= 0) return
+    setWindow(v)
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '2px 8px',
+      background: 'var(--bg-secondary)',
+      borderBottom: '1px solid var(--border)',
+      fontSize: 'var(--font-size-xs)',
+      color: 'var(--text-secondary)',
+      flexShrink: 0, minHeight: 22,
+    }}>
+      <span style={{ color: 'var(--text-muted)' }}>View:</span>
+
+      <div style={{ display: 'flex', gap: 2 }}>
+        {VIEWPORT_PRESETS.map((p) => {
+          const active = p.label === presetLabel
+          return (
+            <button
+              key={p.label}
+              className="zoom-btn"
+              onClick={() => setWindow(p.seconds)}
+              style={active ? {
+                background: 'var(--accent)',
+                borderColor: 'var(--accent)',
+                color: '#fff',
+              } : undefined}
+              title={p.seconds ? `Show a ${p.label} window` : 'Show the entire sweep'}
+            >
+              {p.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>Custom:</span>
+        <NumInput
+          value={customValue}
+          min={0.001}
+          step={0.1}
+          onChange={commitCustom}
+          style={{ width: 56, padding: '0 4px' }}
+          title="Custom window length in seconds"
+        />
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>s</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 2, marginLeft: 4 }}>
+        <button className="zoom-btn" onClick={goHome} disabled={atStart}
+          title="Jump to start (Home)">⟨⟨</button>
+        <button className="zoom-btn" onClick={() => shiftViewport(-2)} disabled={atStart}
+          title="Scroll back 2 windows (Page Up)">⟪</button>
+        <button className="zoom-btn" onClick={() => shiftViewport(-1)} disabled={atStart}
+          title="Previous window (←)">◀</button>
+        <button className="zoom-btn" onClick={() => shiftViewport(1)} disabled={atEnd}
+          title="Next window (→)">▶</button>
+        <button className="zoom-btn" onClick={() => shiftViewport(2)} disabled={atEnd}
+          title="Scroll forward 2 windows (Page Down)">⟫</button>
+        <button className="zoom-btn" onClick={goEnd} disabled={atEnd}
+          title="Jump to end (End)">⟩⟩</button>
+      </div>
+
+      <span style={{
+        marginLeft: 'auto',
+        fontFamily: 'var(--font-mono)',
+        color: 'var(--text-muted)',
+      }}>
+        {fmtViewportTime(start)} – {fmtViewportTime(end)}
+        {sweepDuration > 0 ? ` / ${fmtViewportTime(sweepDuration)}` : ''}
+      </span>
+    </div>
+  )
+}
+
+/** Thin horizontal slider under the plot showing where the visible
+ *  viewport sits inside the whole sweep. Drag or click to scroll. */
+function BurstViewportSlider({
+  viewport, sweepDuration, setViewport,
+}: {
+  viewport: { tStart: number; tEnd: number } | null
+  sweepDuration: number
+  setViewport: React.Dispatch<React.SetStateAction<{ tStart: number; tEnd: number } | null>>
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  const draggingRef = useRef(false)
+  // Track the most recent viewport inside the drag loop so move handlers
+  // read the latest width even if state updates are batched.
+  const vpRef = useRef(viewport)
+  vpRef.current = viewport
+
+  const len = viewport ? viewport.tEnd - viewport.tStart : 0
+  const visible = viewport != null && sweepDuration > 0 && len < sweepDuration - 1e-6
+
+  const viewportFromX = (clientX: number) => {
+    const el = trackRef.current
+    if (!el || !vpRef.current || sweepDuration <= 0) return null
+    const winLen = vpRef.current.tEnd - vpRef.current.tStart
+    const rect = el.getBoundingClientRect()
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    let newStart = frac * sweepDuration - winLen / 2
+    newStart = Math.max(0, Math.min(sweepDuration - winLen, newStart))
+    return { tStart: newStart, tEnd: newStart + winLen }
+  }
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (!visible) return
+    draggingRef.current = true
+    const vp = viewportFromX(e.clientX)
+    if (vp) setViewport(vp)
+    const onMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return
+      const v = viewportFromX(ev.clientX)
+      if (v) setViewport(v)
+    }
+    const onUp = () => {
+      draggingRef.current = false
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  if (!visible || !viewport) return null
+
+  const startFrac = viewport.tStart / sweepDuration
+  const lenFrac = len / sweepDuration
+
+  return (
+    <div
+      ref={trackRef}
+      onMouseDown={onMouseDown}
+      style={{
+        position: 'relative',
+        height: 12,
+        background: 'var(--bg-primary)',
+        borderTop: '1px solid var(--border)',
+        cursor: 'pointer',
+        flexShrink: 0, userSelect: 'none',
+      }}
+      title="Drag or click to scroll the viewport"
+    >
+      <div style={{
+        position: 'absolute', top: 2, bottom: 2,
+        left: `${startFrac * 100}%`,
+        width: `${Math.max(2, lenFrac * 100)}%`,
+        background: 'var(--accent)',
+        opacity: 0.55,
+        borderRadius: 2,
+      }} />
+    </div>
+  )
+}

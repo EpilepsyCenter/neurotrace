@@ -119,6 +119,9 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.fieldBursts) {
             useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
           }
+          if (ev.data.burstFormParams) {
+            useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
+          }
           if (ev.data.ivCurves) {
             useAppStore.setState({ ivCurves: ev.data.ivCurves })
           }
@@ -149,6 +152,11 @@ export function AnalysisWindow({ view }: { view: string }) {
         }
         if (ev.data?.type === 'averaged-update' && ev.data.averagedSweeps) {
           useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
+        }
+        // Burst-detection form-state broadcast from another window (e.g.
+        // the main window pushing freshly-loaded prefs on file open).
+        if (ev.data?.type === 'burst-form-params-update' && ev.data.burstFormParams) {
+          useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
         }
       }
 

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { useAppStore } from '../../stores/appStore'
 import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { TracesDropdown } from '../TraceViewer/TracesDropdown'
 
 const ANALYSIS_TYPES = [
   { type: 'cursors', label: 'Cursor Measurements' },
@@ -192,6 +193,11 @@ export function Toolbar() {
       <div className="toolbar-separator" />
 
       <div className="toolbar-group">
+        {/* Traces dropdown — front-and-centre so users discover the
+            stimulus-overlay and multi-channel visibility controls
+            without hunting. */}
+        <TracesDropdown />
+
         <button className={`btn ${showOverlay ? 'btn-primary' : ''}`} onClick={handleOverlayAll} disabled={!recording || loading} title="Overlay all sweeps (O)">Overlay</button>
 
         {/* Average: click shows a popover to pick the sweeps to average.

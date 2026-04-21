@@ -313,11 +313,26 @@ export function CursorAnalysisWindow({
 
   const totalSweeps: number = fileInfo?.groups?.[localData.group]?.series?.[localData.series]?.sweepCount ?? 0
   const [previewData, setPreviewData] = useState<{ time: number[]; values: number[]; zeroOffset: number } | null>(null)
-  const previewSweep = useMemo(() => {
-    if (localData.runMode === 'one') return Math.max(0, Math.min(totalSweeps - 1, localData.sweepOne - 1))
-    if (localData.runMode === 'range') return Math.max(0, Math.min(totalSweeps - 1, localData.sweepFrom - 1))
-    return 0
-  }, [localData.runMode, localData.sweepFrom, localData.sweepOne, totalSweeps])
+  // Preview-sweep is now a PLAIN local useState, same pattern as
+  // Resistance / FPsp / I-V. Keeping it independent of
+  // localData.sweepOne (which is part of the persisted cursorAnalyses
+  // blob) avoids the store-mirror / broadcast round-trip that made
+  // arrow scrolling flaky. localData.sweepOne still drives the
+  // "single sweep" run mode; the preview just follows whatever the
+  // user is looking at right now.
+  const [previewSweep, setPreviewSweepState] = useState(0)
+  // Reset the preview to sweep 0 ONLY when the user switches group or
+  // series. Using totalSweeps as a dep caused the preview to snap back
+  // to 0 every time fileInfo polled a transiently-different value
+  // (e.g. during rehydration on window reopen), which is what the
+  // user saw as "the second time it bugged out again".
+  const lastSeriesKeyRef = useRef(`${localData.group}:${localData.series}`)
+  useEffect(() => {
+    const key = `${localData.group}:${localData.series}`
+    if (lastSeriesKeyRef.current === key) return
+    lastSeriesKeyRef.current = key
+    setPreviewSweepState(0)
+  }, [localData.group, localData.series])
   // Depend on stable primitive identifiers rather than the whole fileInfo
   // object — the parent shell re-fetches `/api/files/info` every 3 s and
   // hands down a fresh object each time. Without this, the plot below
@@ -356,7 +371,13 @@ export function CursorAnalysisWindow({
     backendUrl, fileName,
     localData.group, localData.series, localData.trace, previewSweep, totalSweeps,
     applyZero,
-    localFilter.enabled, localFilter.type, localFilter.lowCutoff, localFilter.highCutoff, localFilter.order,
+    // Use the whole localFilter object reference — setLocalFilter always
+    // spreads a new object, so this dep changes on every toggle/edit and
+    // the fetch re-fires immediately. Depending on individual fields was
+    // flaky: the React 18 scheduler sometimes coalesced the primitive
+    // comparison and the effect only fired on the NEXT unrelated state
+    // change (which is what the user saw — "click something else").
+    localFilter,
   ])
 
   // ---- Selection handling --------------------------------------------------
@@ -560,29 +581,23 @@ export function CursorAnalysisWindow({
           </select>
         </Field>
         <Field label="Sweep (preview)">
+          {/* The arrows scrub the LOCAL preview state — not the
+              persisted sweepOne that drives "Run on single sweep".
+              Same setup as Resistance / FPsp / I-V. */}
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-            <button className="btn" disabled={totalSweeps === 0 || localData.sweepOne <= 1}
-              onClick={() => patch({
-                runMode: 'one',
-                sweepOne: Math.max(1, localData.sweepOne - 1),
-              })}
+            <button className="btn" disabled={totalSweeps === 0 || previewSweep <= 0}
+              onClick={() => setPreviewSweepState((s) => Math.max(0, s - 1))}
               style={{ padding: '2px 8px' }} title="Previous sweep">
               ←
             </button>
-            <NumInput value={localData.sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => patch({
-                runMode: 'one',
-                sweepOne: Math.max(1, Math.min(totalSweeps, Math.round(v))),
-              })}
+            <NumInput value={previewSweep + 1} step={1} min={1} max={Math.max(1, totalSweeps)}
+              onChange={(v) => setPreviewSweepState(Math.max(0, Math.min(totalSweeps - 1, Math.round(v) - 1)))}
               style={{ width: 48 }} />
             <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
               / {totalSweeps || '—'}
             </span>
-            <button className="btn" disabled={totalSweeps === 0 || localData.sweepOne >= totalSweeps}
-              onClick={() => patch({
-                runMode: 'one',
-                sweepOne: Math.min(totalSweeps, localData.sweepOne + 1),
-              })}
+            <button className="btn" disabled={totalSweeps === 0 || previewSweep >= totalSweeps - 1}
+              onClick={() => setPreviewSweepState((s) => Math.min(totalSweeps - 1, s + 1))}
               style={{ padding: '2px 8px' }} title="Next sweep">
               →
             </button>
@@ -788,8 +803,56 @@ export function CursorAnalysisWindow({
             measurements={localData.measurements}
             previewSweep={previewSweep}
             displayYOffset={previewData?.zeroOffset ?? 0}
+            zeroOffset={applyZero}
+            onZeroOffsetChange={setApplyZero}
             onBaselineChange={(b) => patch({ baseline: b })}
             onSlotChange={updateSlot}
+            onResetCursorsInView={(xMin, xMax) => {
+              // Distribute Baseline (first 10 %) and each ENABLED slot's
+              // peak cursor across the remaining 20 %-95 % of the view.
+              // Fit cursors on slots that have them follow along with
+              // their peak (centred in the same slot bucket).
+              const span = xMax - xMin
+              const newBaseline = {
+                start: xMin + 0.02 * span,
+                end: xMin + 0.12 * span,
+              }
+              const enabledIdx: number[] = []
+              localData.slots.slice(0, localData.slotCount).forEach((s, i) => {
+                if (s.enabled) enabledIdx.push(i)
+              })
+              const n = enabledIdx.length
+              setLocalData((d) => {
+                const nextSlots = d.slots.slice()
+                if (n === 0) return { ...d, baseline: newBaseline }
+                const zoneStart = 0.20
+                const zoneEnd = 0.95
+                const zoneSpan = zoneEnd - zoneStart
+                const perSlot = zoneSpan / n
+                enabledIdx.forEach((slotIdx, k) => {
+                  const frac0 = zoneStart + k * perSlot + perSlot * 0.1
+                  const frac1 = zoneStart + (k + 1) * perSlot - perSlot * 0.1
+                  const pkStart = xMin + frac0 * span
+                  const pkEnd = xMin + frac1 * span
+                  const cur = nextSlots[slotIdx]
+                  const next: CursorSlotConfig = {
+                    ...cur,
+                    peak: { start: pkStart, end: pkEnd },
+                  }
+                  // If this slot had a fit cursor, keep it inside the
+                  // same bucket as the peak, one-third of the way in.
+                  if (cur.fit != null) {
+                    const mid = (pkStart + pkEnd) / 2
+                    next.fit = {
+                      start: pkStart + (mid - pkStart) * 0.3,
+                      end: pkEnd - (pkEnd - mid) * 0.3,
+                    }
+                  }
+                  nextSlots[slotIdx] = next
+                })
+                return { ...d, baseline: newBaseline, slots: nextSlots }
+              })
+            }}
           />
         </div>
 
@@ -1006,7 +1069,9 @@ function FitOptionsPopover({
 
 function MiniViewer({
   data, heightSignal, baseline, slots, traceUnit, measurements,
-  previewSweep, displayYOffset, onBaselineChange, onSlotChange,
+  previewSweep, displayYOffset, zeroOffset, onZeroOffsetChange,
+  onBaselineChange, onSlotChange,
+  onResetCursorsInView,
 }: {
   data: { time: number[]; values: number[]; zeroOffset?: number } | null
   heightSignal: number
@@ -1019,8 +1084,14 @@ function MiniViewer({
    *  Fit overlays — which are computed on raw data — are shifted by the
    *  same amount so they land on the visible trace. */
   displayYOffset: number
+  zeroOffset: boolean
+  onZeroOffsetChange: (v: boolean) => void
   onBaselineChange: (b: { start: number; end: number }) => void
   onSlotChange: (slotIndex: number, patch: Partial<CursorSlotConfig>) => void
+  /** Parent-supplied "distribute the cursor bands across the current
+   *  visible X range" action. Called with the live xMin/xMax so the
+   *  parent can place baseline + enabled slot peaks back in view. */
+  onResetCursorsInView: (xMin: number, xMax: number) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -1097,14 +1168,22 @@ function MiniViewer({
 
   // --- PLOT LIFECYCLE ------------------------------------------------
   //
-  // The plot is created ONCE and lives until the axis label (traceUnit)
-  // changes or the component unmounts. Sweep/filter/zero-offset changes
-  // push new samples via `u.setData(payload, true)` — uPlot preserves
-  // any explicit X/Y scales the user set (via wheel/pan/drag) and
-  // re-auto-fits any scale that's still in auto mode. This is the
-  // native zoom-persistence mechanism; the old destroy-and-rebuild
-  // pattern forced us to manually save/restore scales and was
-  // fundamentally fragile.
+  // The plot is rebuilt from scratch on every data change. This is
+  // the exact pattern Resistance / FPsp / I-V use (and those all
+  // work). An earlier attempt to keep the plot alive and push
+  // updates via `setData` produced an elusive one-sweep-lag bug:
+  // the redraw effect (fired synchronously on previewSweep change)
+  // drew the CURRENT u.data (stale sweep) before the new fetch
+  // completed and called setData. Rebuilding on [data] sidesteps
+  // the whole race — when data arrives, the new plot is built with
+  // that data directly and there's no stale internal state to
+  // conflict with.
+  //
+  // Locked zoom still works because the range functions read
+  // xRangeRef / yRangeRef, which are useRefs in the component and
+  // survive plot teardowns. The user's wheel / pan / reset updates
+  // those refs; on rebuild, the new plot's range functions return
+  // the same values and the visual zoom is preserved.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -1441,35 +1520,19 @@ function MiniViewer({
       ro.disconnect()
       plotRef.current?.destroy(); plotRef.current = null
     }
-  // Plot is only rebuilt when the Y-axis label changes (channel /
-  // unit change). Everything else — sweep switch, filter, zero-offset
-  // — flows through setData below.
+  // Rebuilt on every data change (matching Resistance/FPsp/I-V).
+  // Also on traceUnit change so the Y-axis label stays accurate.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [traceUnit])
+  }, [data, traceUnit])
 
-  // --- DATA UPDATES --------------------------------------------------
-  //
-  // Push new samples into the existing plot. We pass
-  // `resetScales=false` so uPlot never runs its autorange path — and
-  // even if it did, it wouldn't matter, because the range functions
-  // in opts.scales always return xRangeRef.current / yRangeRef.current
-  // when those are set. Scales only change when the user
-  // zooms/pans/clicks Reset, which update the refs explicitly.
+  // Keep the FIRST-DATA auto-fit behaviour (initial placeholder mount
+  // doesn't count — wait for real data before stashing the initial
+  // scale into the refs).
   useEffect(() => {
     const u = plotRef.current
     if (!u || !data || data.time.length === 0) return
-    const payload: uPlot.AlignedData = [
-      Array.from(data.time),
-      Array.from(data.values),
-    ]
     const firstRealData = !hasRealDataRef.current
-    u.setData(payload, false)
     if (firstRealData) {
-      // Simulate a Reset-button click now that real data has arrived —
-      // the initial mount drew against a placeholder so the axes
-      // aren't sized for the real trace yet. This runs exactly once;
-      // from here on sweep/filter changes flow through setData
-      // without touching scales.
       hasRealDataRef.current = true
       xRangeRef.current = null
       yRangeRef.current = null
@@ -1502,17 +1565,46 @@ function MiniViewer({
       height: '100%', border: '1px solid var(--border)', borderRadius: 4,
       background: 'var(--bg-primary)', position: 'relative',
     }}>
-      <button
-        className="btn"
-        onClick={resetZoom}
-        title="Reset zoom — rescales X and Y to the full sweep"
-        style={{
-          position: 'absolute', top: 4, right: 4, zIndex: 2,
-          padding: '1px 8px', fontSize: 'var(--font-size-label)',
-        }}
-      >
-        Reset
-      </button>
+      <div style={{
+        position: 'absolute', top: 4, right: 4, zIndex: 2,
+        display: 'flex', gap: 6, alignItems: 'center',
+        background: 'var(--bg-secondary, rgba(0,0,0,0.55))',
+        padding: '2px 6px', borderRadius: 4,
+      }}>
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 3,
+          fontSize: 'var(--font-size-label)',
+        }} title="Subtract a baseline computed from the first ~3 ms of each sweep">
+          <input type="checkbox" checked={zeroOffset}
+            onChange={(e) => onZeroOffsetChange(e.target.checked)} />
+          Zero offset
+        </label>
+        <button
+          className="btn"
+          onClick={() => {
+            const u = plotRef.current
+            let xMin: number | null = u?.scales.x.min ?? null
+            let xMax: number | null = u?.scales.x.max ?? null
+            if ((xMin == null || xMax == null || xMax <= xMin) && data && data.time.length > 0) {
+              xMin = data.time[0]
+              xMax = data.time[data.time.length - 1]
+            }
+            if (xMin != null && xMax != null && xMax > xMin) onResetCursorsInView(xMin, xMax)
+          }}
+          title="Distribute baseline + visible slot cursors across the current view"
+          style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+        >
+          Reset cursors
+        </button>
+        <button
+          className="btn"
+          onClick={resetZoom}
+          title="Reset zoom — rescales X and Y to the full sweep"
+          style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+        >
+          Reset zoom
+        </button>
+      </div>
       <span style={{
         position: 'absolute', top: 6, left: 10, zIndex: 2,
         fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',

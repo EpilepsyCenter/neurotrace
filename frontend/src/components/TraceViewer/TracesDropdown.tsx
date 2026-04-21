@@ -81,15 +81,16 @@ export function TracesDropdown() {
         className="btn"
         onClick={() => setOpen((v) => !v)}
         style={{
-          padding: '1px 8px',
-          fontSize: 'var(--font-size-xs)',
+          padding: '4px 12px',
+          fontSize: 'var(--font-size-sm)',
+          fontWeight: 600,
           display: 'flex',
           alignItems: 'center',
-          gap: 4,
+          gap: 6,
         }}
-        title="Show or hide individual traces"
+        title="Show or hide individual traces (voltage, current, stimulus, auxiliary channels)"
       >
-        Traces ({visibleCount}) <span style={{ fontSize: 10 }}>▾</span>
+        Traces ({visibleCount}) <span style={{ fontSize: 11 }}>▾</span>
       </button>
 
       {open && (

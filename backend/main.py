@@ -17,6 +17,7 @@ from api.results import router as results_router
 from api.iv import router as iv_router
 from api.fpsp import router as fpsp_router
 from api.cursors import router as cursors_router
+from api.bursts import router as bursts_router
 
 
 @asynccontextmanager
@@ -46,6 +47,7 @@ app.include_router(results_router, prefix="/api/results", tags=["results"])
 app.include_router(iv_router, prefix="/api/iv", tags=["iv"])
 app.include_router(fpsp_router, prefix="/api/fpsp", tags=["fpsp"])
 app.include_router(cursors_router, prefix="/api/cursors", tags=["cursors"])
+app.include_router(bursts_router, prefix="/api/bursts", tags=["bursts"])
 
 
 @app.get("/health")

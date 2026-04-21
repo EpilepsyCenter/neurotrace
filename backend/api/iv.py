@@ -88,6 +88,20 @@ async def run_iv(
     peak_start_s: float = Query(..., description="Peak/SS cursor start (s from sweep start)"),
     peak_end_s: float = Query(..., description="Peak/SS cursor end (s from sweep start)"),
     sweeps: Optional[str] = Query(None, description="Comma-separated 0-based sweep indices. None = all sweeps."),
+    manual_im_enabled: bool = Query(False, description=(
+        "Bypass the .pgf stimulus lookup and reconstruct Im from the four "
+        "parameters below. Use this when the stimulus trace isn't recorded "
+        "or the protocol doesn't expose Im."
+    )),
+    manual_im_start_s: float = Query(0.0),
+    manual_im_end_s: float = Query(0.0),
+    manual_im_start_pa: float = Query(0.0, description=(
+        "Im amplitude of the FIRST sweep's step (pA). Subsequent sweeps get "
+        "`start_pa + sweep_index * step_pa`."
+    )),
+    manual_im_step_pa: float = Query(0.0, description=(
+        "Im increment between consecutive sweeps (pA)."
+    )),
 ):
     """Run I-V analysis over every sweep in a series.
 
@@ -97,6 +111,11 @@ async def run_iv(
     Peak/steady-state window: the last ``peak_window_ms`` of the pulse (pulse
     window is taken from the series's stimulus info — ``pulse_start`` to
     ``pulse_end`` attributes of the parsed stim).
+
+    When ``manual_im_enabled`` is set, the stimulus lookup is skipped entirely
+    and Im for each sweep is reconstructed from the four ``manual_im_*``
+    params. This is the fallback path for recordings where the stimulus
+    channel wasn't saved.
     """
     from api.files import _pgf_data
 
@@ -108,21 +127,32 @@ async def run_iv(
     except IndexError:
         raise HTTPException(status_code=400, detail="Invalid group/series index")
 
-    if _pgf_data is None:
-        raise HTTPException(status_code=400, detail="No stimulus info for this recording")
-
-    # Linearly map (group, series) → stim index (same logic as traces.py::stimulus).
-    stim_idx = 0
     target: Optional[PgfStimulation] = None
-    for g in rec.groups:
-        for s in g.series_list:
-            if g.index == group and s.index == series:
-                if stim_idx < len(_pgf_data.stimulations):
-                    target = _pgf_data.stimulations[stim_idx]
-            stim_idx += 1
-
-    if target is None:
-        raise HTTPException(status_code=400, detail="No stimulus found for this series")
+    if not manual_im_enabled:
+        if _pgf_data is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No stimulus info for this recording. Enable 'Manual Im' "
+                    "to provide start/end times and amplitudes by hand."
+                ),
+            )
+        # Linearly map (group, series) → stim index (same logic as traces.py::stimulus).
+        stim_idx = 0
+        for g in rec.groups:
+            for s in g.series_list:
+                if g.index == group and s.index == series:
+                    if stim_idx < len(_pgf_data.stimulations):
+                        target = _pgf_data.stimulations[stim_idx]
+                stim_idx += 1
+        if target is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No stimulus found for this series. Enable 'Manual Im' "
+                    "to provide start/end times and amplitudes by hand."
+                ),
+            )
 
     # Sanity-check the cursor windows.
     if baseline_end_s <= baseline_start_s:
@@ -175,7 +205,14 @@ async def run_iv(
             max_dev_idx = int(np.argmax(np.abs(seg - baseline)))
             transient_peak = float(seg[max_dev_idx])
 
-        stim_level, stim_unit = _stim_level_for_sweep(target, sw_idx)
+        if manual_im_enabled:
+            stim_level = manual_im_start_pa + sw_idx * manual_im_step_pa
+            stim_unit = "pA"
+        elif target is not None:
+            stim_level, stim_unit = _stim_level_for_sweep(target, sw_idx)
+        else:
+            # Shouldn't reach here — the manual/stim check above raises 400.
+            stim_level, stim_unit = 0.0, ""
 
         points.append({
             "sweep_index": sw_idx,

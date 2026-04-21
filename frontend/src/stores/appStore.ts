@@ -144,6 +144,43 @@ async function _savePersistedBursts(filePath: string, fieldBursts: Record<string
   } catch { /* ignore */ }
 }
 
+/** Persist/restore the burst-detection *form* state (method, baseline
+ *  mode, and parameter dict) per-series within a recording. Separate
+ *  from the run results in `savedFieldBursts` so the user's param
+ *  tweaks survive even if they close the window without running
+ *  detection. Keyed filePath → "g:s" → FieldBurstsParams. */
+async function _loadPersistedBurstFormParams(
+  filePath: string,
+): Promise<Record<string, FieldBurstsParams> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedBurstFormParams as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function _savePersistedBurstFormParams(
+  filePath: string,
+  formParams: Record<string, FieldBurstsParams>,
+) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedBurstFormParams as Record<string, any>) ?? {}
+    if (Object.keys(formParams).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = formParams
+    }
+    await api.setPreferences({ ...prefs, savedBurstFormParams: store })
+  } catch { /* ignore */ }
+}
+
 /** Load/save I-V curves — same shape as the burst helpers above. */
 async function _loadPersistedIVCurves(filePath: string): Promise<Record<string, IVCurveData> | null> {
   const api = window.electronAPI
@@ -354,6 +391,22 @@ function _broadcastBursts(fieldBursts: Record<string, FieldBurstsData>, params: 
   } catch { /* ignore — BroadcastChannel unavailable */ }
 }
 
+/** Broadcast the per-series burst-detection form state so every open
+ *  window (including the main window, which owns persistence) stays in
+ *  sync. The main window's CursorPanel listener adopts the payload into
+ *  its store; the disk-persistence subscribe then writes to Electron
+ *  prefs. Without this round-trip, the analysis window's updates would
+ *  never reach disk. */
+function _broadcastBurstFormParams(
+  burstFormParams: Record<string, FieldBurstsParams>,
+) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'burst-form-params-update', burstFormParams })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 export interface MeasurementResult {
   sweepIndex: number
   seriesIndex: number
@@ -411,6 +464,10 @@ export interface BurstRecord {
   preBurstBaseline: number    // raw signal level just before the burst
   meanFrequencyHz: number | null  // (# prominent local maxima) / duration
   nSpikes?: number            // ISI method only
+  /** True when the user added this burst manually via the sweep viewer
+   *  (left-click) rather than auto-detection. Drives italic row styling
+   *  + a ring around the peak dot. */
+  manual?: boolean
 }
 
 /** Params the user configured for the last detection run. Stored alongside
@@ -714,6 +771,12 @@ interface AppState {
   // persist across series switches.
   fieldBursts: Record<string, FieldBurstsData>
 
+  /** Per-series burst-detection *form* state (method, baseline mode,
+   *  all numeric params, filter fields). Survives window close even if
+   *  the user never clicked Run. Keyed by `${group}:${series}`;
+   *  persisted per-recording in Electron prefs as `savedBurstFormParams`. */
+  burstFormParams: Record<string, FieldBurstsParams>
+
   // I-V curves, keyed by `${group}:${series}` — persists across navigation
   // and is saved per-recording in Electron preferences.
   ivCurves: Record<string, IVCurveData>
@@ -876,6 +939,17 @@ interface AppState {
   selectFieldBurst: (group: number, series: number, idx: number | null) => void
   /** Dump the union of all detected bursts across all series to CSV. */
   exportFieldBurstsCSV: () => Promise<void>
+  /** Append a manually-measured burst (from a left-click in the sweep
+   *  viewer). The burst is pre-populated by the backend; we just
+   *  splice it into the current list, sort, and broadcast. */
+  addManualBurst: (group: number, series: number, burst: BurstRecord) => void
+  /** Remove the burst whose span contains `timeS` on the given sweep.
+   *  If multiple match, removes the one whose peak is closest in time.
+   *  No-op when nothing matches. */
+  removeBurstAt: (group: number, series: number, sweep: number, timeS: number) => void
+  /** Store the burst-detection form state for a given series so the
+   *  window can restore it after close/reopen. Broadcast + persisted. */
+  setBurstFormParams: (group: number, series: number, params: FieldBurstsParams) => void
 
   // Field PSP actions
   runFPsp: (
@@ -926,6 +1000,13 @@ interface AppState {
        *  (replacing any rows with matching sweepIndex). Used by "single
        *  sweep" mode. When false, the table is replaced outright. */
       appendToExisting?: boolean
+      /** When true, the backend skips the .pgf stimulus lookup and
+       *  reconstructs Im per sweep from the four manual params below. */
+      manualImEnabled?: boolean
+      manualImStartS?: number
+      manualImEndS?: number
+      manualImStartPA?: number
+      manualImStepPA?: number
     },
   ) => Promise<void>
   clearIVCurve: (group?: number, series?: number) => void
@@ -1032,6 +1113,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   resistanceResult: null,
   resistanceMonitor: null,
   fieldBursts: {},
+  burstFormParams: {},
   ivCurves: {},
   fpspCurves: {},
   cursorAnalyses: {},
@@ -1056,7 +1138,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     return defaults
   })(),
   zoomMode: false,
-  showCursors: true,
+  // Cursors default OFF so the main viewer stays clean on first open;
+  // the user turns them on from the right panel when they need them.
+  showCursors: false,
   showBurstMarkers: true,
   showCoordinates: false,
   loading: false,
@@ -1348,6 +1432,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       additionalTraces: {},
       visibleTraces: {},
       fieldBursts: {},
+      burstFormParams: {},
       ivCurves: {},
       fpspCurves: {},
       cursorAnalyses: {},
@@ -1383,6 +1468,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // Burst-detection form state (survives window close even without
+        // a Run). Keyed by "g:s" per recording.
+        const savedBurstForm = await _loadPersistedBurstFormParams(recording.filePath)
+        if (savedBurstForm) {
+          set({ burstFormParams: savedBurstForm })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'burst-form-params-update', burstFormParams: savedBurstForm })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -2127,6 +2223,79 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  addManualBurst: (group, series, burst) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fieldBursts[key]
+      const existing = entry?.bursts ?? []
+      const next = [...existing, { ...burst, manual: true }].sort((a, b) => {
+        if (a.sweepIndex !== b.sweepIndex) return a.sweepIndex - b.sweepIndex
+        return a.startS - b.startS
+      })
+      // If there's no existing entry yet (user happens to click before any
+      // auto-detection has run), create a minimal one so the burst still
+      // renders. Thresholds stay null; params are echoed as empty.
+      const baseEntry: FieldBurstsData = entry ?? {
+        channel: 0,
+        bursts: [],
+        baselineValue: 0,
+        thresholdHigh: null,
+        thresholdLow: null,
+        selectedIdx: null,
+        params: { method: 'threshold', baseline_mode: 'percentile' } as FieldBurstsParams,
+      }
+      return {
+        fieldBursts: {
+          ...s.fieldBursts,
+          [key]: { ...baseEntry, bursts: next },
+        },
+      }
+    })
+    _broadcastBursts(get().fieldBursts, get().fieldBursts[key]?.params ?? { method: 'threshold', baseline_mode: 'percentile' } as FieldBurstsParams)
+  },
+
+  removeBurstAt: (group, series, sweep, timeS) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.fieldBursts[key]
+      if (!entry) return s
+      // Find candidate bursts on the clicked sweep. Prefer bursts whose
+      // [startS, endS] span contains the click; fall back to the one
+      // whose peak is closest in time within 0.5 s so the click still
+      // lands when the user hits the marker dot outside the span.
+      let best: { idx: number; dist: number } | null = null
+      entry.bursts.forEach((b, i) => {
+        if (b.sweepIndex !== sweep) return
+        const inside = timeS >= b.startS && timeS <= b.endS
+        const peakDist = Math.abs(timeS - b.peakTimeS)
+        const dist = inside ? 0 : peakDist
+        if (inside || peakDist < 0.5) {
+          if (!best || dist < best.dist) best = { idx: i, dist }
+        }
+      })
+      if (!best) return s
+      // `best` is narrowed inside the callbacks above; TS doesn't follow
+      // the mutation back out so assert it here.
+      const removeIdx = (best as { idx: number; dist: number }).idx
+      const nextBursts = entry.bursts.filter((_, i) => i !== removeIdx)
+      return {
+        fieldBursts: {
+          ...s.fieldBursts,
+          [key]: { ...entry, bursts: nextBursts },
+        },
+      }
+    })
+    _broadcastBursts(get().fieldBursts, get().fieldBursts[key]?.params ?? { method: 'threshold', baseline_mode: 'percentile' } as FieldBurstsParams)
+  },
+
+  setBurstFormParams: (group, series, params) => {
+    const key = `${group}:${series}`
+    set((s) => ({
+      burstFormParams: { ...s.burstFormParams, [key]: params },
+    }))
+    _broadcastBurstFormParams(get().burstFormParams)
+  },
+
   exportFieldBurstsCSV: async () => {
     const { fieldBursts, recording, backendUrl } = get()
     const keys = Object.keys(fieldBursts)
@@ -2206,6 +2375,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       if (params.sweepIndices && params.sweepIndices.length > 0) {
         qs.set('sweeps', params.sweepIndices.join(','))
+      }
+      if (params.manualImEnabled) {
+        qs.set('manual_im_enabled', 'true')
+        qs.set('manual_im_start_s', String(params.manualImStartS ?? 0))
+        qs.set('manual_im_end_s', String(params.manualImEndS ?? 0))
+        qs.set('manual_im_start_pa', String(params.manualImStartPA ?? 0))
+        qs.set('manual_im_step_pa', String(params.manualImStepPA ?? 0))
       }
       const resp = await apiFetch(backendUrl, `/api/iv/run?${qs}`)
       const key = `${group}:${series}`
@@ -2621,6 +2797,18 @@ useAppStore.subscribe((state) => {
   _lastPersistedBurstsRef = state.fieldBursts
   if (state.recording?.filePath) {
     _savePersistedBursts(state.recording.filePath, state.fieldBursts)
+  }
+})
+
+// Burst-detection form state — writes whenever the user tweaks any
+// field in the FieldBurstWindow, so closing and reopening the window
+// (or restarting the app) restores the same method / params per series.
+let _lastPersistedBurstFormRef: Record<string, FieldBurstsParams> | null = null
+useAppStore.subscribe((state) => {
+  if (state.burstFormParams === _lastPersistedBurstFormRef) return
+  _lastPersistedBurstFormRef = state.burstFormParams
+  if (state.recording?.filePath) {
+    _savePersistedBurstFormParams(state.recording.filePath, state.burstFormParams)
   }
 })
 

@@ -14,7 +14,7 @@ import { NumInput } from '../common/NumInput'
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ marginBottom: 10 }}>
+    <div style={{ marginBottom: 16 }}>
       {title && (
         <div
           style={{
@@ -23,7 +23,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
             textTransform: 'uppercase',
             letterSpacing: 0.4,
             color: 'var(--text-muted)',
-            marginBottom: 4,
+            marginBottom: 6,
           }}
         >
           {title}
@@ -31,6 +31,18 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       )}
       {children}
     </div>
+  )
+}
+
+function Divider() {
+  return (
+    <div
+      style={{
+        borderTop: '1px solid var(--border)',
+        margin: '6px 0 14px 0',
+      }}
+      aria-hidden="true"
+    />
   )
 }
 
@@ -119,25 +131,47 @@ function RangeInput({
 function quickMeasure(
   time: Float64Array, values: Float64Array, cursors: CursorPositions, sr: number,
 ) {
-  const idx = (t: number) => Math.max(0, Math.min(values.length - 1, Math.round(t * sr)))
+  // Binary-search the time array for the index whose sample time is >= t.
+  // traceData.time comes from the backend's LTTB decimator — the spacing is
+  // non-uniform, so `Math.round(t * sr)` (which assumes time[i] = i / sr)
+  // would return indices pointing to wrong samples, especially for cursors
+  // later in the sweep. Search explicitly instead.
+  const n = values.length
+  if (n === 0 || time.length === 0) {
+    return { baseline: 0, peak: 0, amplitude: 0, peakTime: 0 }
+  }
+  const idx = (t: number): number => {
+    if (t <= time[0]) return 0
+    if (t >= time[n - 1]) return n - 1
+    let lo = 0, hi = n - 1
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1
+      if (time[mid] <= t) lo = mid
+      else hi = mid
+    }
+    // lo has time[lo] <= t < time[hi]. Pick the closer of the two.
+    return (t - time[lo]) <= (time[hi] - t) ? lo : hi
+  }
+
   const blI0 = idx(cursors.baselineStart)
-  const blI1 = idx(cursors.baselineEnd)
+  const blI1 = Math.max(blI0 + 1, idx(cursors.baselineEnd))
   const pkI0 = idx(cursors.peakStart)
-  const pkI1 = idx(cursors.peakEnd)
+  const pkI1 = Math.max(pkI0 + 1, idx(cursors.peakEnd))
 
   let blSum = 0
-  const blN = Math.max(1, blI1 - blI0)
-  for (let i = blI0; i < blI1 && i < values.length; i++) blSum += values[i]
-  const baseline = blSum / blN
+  let blN = 0
+  for (let i = blI0; i < blI1 && i < n; i++) { blSum += values[i]; blN++ }
+  const baseline = blN > 0 ? blSum / blN : (values[blI0] ?? 0)
 
   let peakVal = values[pkI0] ?? 0
   let peakIdx = pkI0
-  for (let i = pkI0; i < pkI1 && i < values.length; i++) {
+  for (let i = pkI0; i < pkI1 && i < n; i++) {
     if (Math.abs(values[i] - baseline) > Math.abs(peakVal - baseline)) {
       peakVal = values[i]; peakIdx = i
     }
   }
-  return { baseline, peak: peakVal, amplitude: peakVal - baseline, peakTime: peakIdx / sr }
+  void sr
+  return { baseline, peak: peakVal, amplitude: peakVal - baseline, peakTime: time[peakIdx] }
 }
 
 export function CursorPanel() {
@@ -189,6 +223,7 @@ export function CursorPanel() {
             series: state.currentSeries,
             trace: state.currentTrace,
             fieldBursts: state.fieldBursts,
+            burstFormParams: state.burstFormParams,
             ivCurves: state.ivCurves,
             fpspCurves: state.fpspCurves,
             cursorAnalyses: state.cursorAnalyses,
@@ -200,6 +235,14 @@ export function CursorPanel() {
         // main TraceViewer's burst-marker overlay has data to draw.
         if (ev.data?.type === 'bursts-update' && ev.data.fieldBursts) {
           useAppStore.setState({ fieldBursts: ev.data.fieldBursts })
+        }
+        // Burst-detection form state (method + params) pushed from the
+        // analysis window — adopt so the main-window store can persist
+        // it to electron prefs. Without this the settings wouldn't
+        // survive an app restart because only the main window has
+        // `recording.filePath` set for the persistence subscribe.
+        if (ev.data?.type === 'burst-form-params-update' && ev.data.burstFormParams) {
+          useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
         }
         // I-V curves pushed from an analysis window → adopt here so the main
         // window's store has them for persistence.
@@ -321,6 +364,8 @@ export function CursorPanel() {
         </Section>
       )}
 
+      <Divider />
+
       {/* ---- Detected events visibility toggle ----
            Generic label ("Show/hide detected events") so this reuses cleanly
            when we add minis, action potentials, etc. — not just bursts. */}
@@ -363,6 +408,8 @@ export function CursorPanel() {
           )}
         </label>
       </Section>
+
+      <Divider />
 
       {/* ---- Axis Ranges ---- */}
       <Section title="Axis ranges">
@@ -424,6 +471,8 @@ export function CursorPanel() {
           </p>
         )}
       </Section>
+
+      <Divider />
 
       {/* ---- Filter ---- */}
       <Section title="Filter">

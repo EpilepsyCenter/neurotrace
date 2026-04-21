@@ -229,7 +229,8 @@ class BurstDetection(AnalysisBase):
         # trace. Bursts were detected on `filtered`; their y-values are
         # relative to `filtered`.
         self._populate_burst_fields(bursts, filtered, sr,
-                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)))
+                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)),
+                                    peak_direction=str(params.get("peak_direction", "auto")))
 
         return {
             "method": "threshold",
@@ -292,7 +293,8 @@ class BurstDetection(AnalysisBase):
         # signal — the bandpass that defines "oscillation" is an internal
         # detection step, not something the user means to measure against.
         self._populate_burst_fields(bursts, data_in, sr,
-                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)))
+                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)),
+                                    peak_direction=str(params.get("peak_direction", "auto")))
 
         # Extra: band power for each burst.
         for burst in bursts:
@@ -376,7 +378,8 @@ class BurstDetection(AnalysisBase):
         # Measure amplitudes on the filtered signal (ISI detection ran on it)
         # so the mini-viewer markers line up with the displayed filtered trace.
         self._populate_burst_fields(bursts, filtered, sr,
-                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)))
+                                    pre_burst_window_ms=float(params.get("pre_burst_window_ms", 100.0)),
+                                    peak_direction=str(params.get("peak_direction", "auto")))
         # For ISI bursts, prefer the spike-rate-based frequency.
         for b in bursts:
             isi_freq = b.pop("_isi_frequency_hz", None)
@@ -451,6 +454,7 @@ class BurstDetection(AnalysisBase):
         pre_burst_window_ms: float = 100.0,
         tail_fraction: float = 0.10,
         max_extend_ms: float = 500.0,
+        peak_direction: str = "auto",
     ) -> None:
         """Compute per-burst metrics on the raw signal.
 
@@ -547,7 +551,19 @@ class BurstDetection(AnalysisBase):
             segment = data[ext_start:ext_end]
             dev = segment - pre_baseline
             abs_dev = np.abs(dev)
-            pk_i = int(np.argmax(abs_dev))
+            # Peak-finding direction:
+            #   "auto"     → largest |deviation|, preserves sign (default).
+            #   "positive" → argmax of dev (only look at upward excursions).
+            #                Useful when spike-and-wave events have an
+            #                initial brief downward spike followed by a
+            #                larger upward wave — we want the wave's peak.
+            #   "negative" → argmin of dev.
+            if peak_direction == "positive":
+                pk_i = int(np.argmax(dev)) if dev.size > 0 else 0
+            elif peak_direction == "negative":
+                pk_i = int(np.argmin(dev)) if dev.size > 0 else 0
+            else:
+                pk_i = int(np.argmax(abs_dev)) if abs_dev.size > 0 else 0
             pk_val = float(abs_dev[pk_i])
 
             # Write back extended bounds so the table + overlay use them.

@@ -73,16 +73,91 @@ export function FPspWindow({
   void _mainSetCursors
 
   const [group, setGroup] = useState(mainGroup ?? 0)
-  const [series, setSeries] = useState(mainSeries ?? 0)
-  const [seriesB, setSeriesB] = useState<number | null>(null)  // LTP series
+
+  // Analysis mode (tab). Three flavours of fPSP analysis share the
+  // window: stimulus-intensity I-O curves, paired-pulse ratios, and
+  // LTP time course (the original single mode). Tab order mirrors the
+  // typical experimental order (characterise with I-O → measure PPR →
+  // induce LTP). Only LTP is wired up at this point; I-O and PPR show
+  // placeholders until their subcomponents are built.
+  type FPspMode = 'io' | 'ppr' | 'ltp'
+  const [mode, setMode] = useState<FPspMode>('ltp')
+
+  // Per-mode series selection. Each tab remembers its own series so
+  // the user can analyse different series under different tabs (e.g.
+  // LTP on series 1, I-O on series 2) without the selector jumping
+  // around on every tab switch. `series` below resolves to the active
+  // mode's slot; `setSeries` writes to it.
+  const [seriesByMode, setSeriesByMode] = useState<Record<FPspMode, number>>({
+    ltp: mainSeries ?? 0,
+    io: mainSeries ?? 0,
+    ppr: mainSeries ?? 0,
+  })
+  const series = seriesByMode[mode]
+  // Track which modes the user has manually changed series for. We
+  // use this below to avoid clobbering a manual pick when the
+  // persisted-entry auto-seed effect arrives via state-update (which
+  // can land a few ms after first mount in analysis windows).
+  const manuallyChangedSeriesRef = useRef<Record<FPspMode, boolean>>({
+    ltp: false, io: false, ppr: false,
+  })
+  const setSeries = useCallback((v: number) => {
+    manuallyChangedSeriesRef.current[mode] = true
+    setSeriesByMode((p) => ({ ...p, [mode]: v }))
+  }, [mode])
+  const [seriesB, setSeriesB] = useState<number | null>(null)  // LTP-only secondary
   const [channel, setChannel] = useState(mainTrace ?? 0)
+
+  // Visibility signals bumped whenever a (previously hidden) results
+  // panel becomes the active tab. The panel components watch these
+  // and resize+redraw their uPlot instances on change — needed
+  // because display-toggling around a plot leaves it in whatever
+  // 0-dim state the ResizeObserver happened to setSize it to while
+  // hidden. Without this, flipping tabs made the plot come back
+  // blank until a data change forced a full rebuild.
+  const [ltpVisibilitySignal, setLtpVisibilitySignal] = useState(0)
+  const [ioVisibilitySignal, setIoVisibilitySignal] = useState(0)
+  const [pprVisibilitySignal, setPprVisibilitySignal] = useState(0)
+  useEffect(() => {
+    if (mode === 'ltp') setLtpVisibilitySignal((s) => s + 1)
+    if (mode === 'io') setIoVisibilitySignal((s) => s + 1)
+    if (mode === 'ppr') setPprVisibilitySignal((s) => s + 1)
+  }, [mode])
+
+  // I-O tab parameters. Rehydrated from the entry if one exists. The
+  // intensity axis is always a pure frontend construct — no backend
+  // changes — computed as `initial + sweepIndex * step` per point.
+  // Unit is fixed to µA for v1 (per brainstorm); expose as a dropdown
+  // later if people ask for V or %.
+  const [ioInitialIntensity, setIoInitialIntensity] = useState<number>(0)
+  const [ioIntensityStep, setIoIntensityStep] = useState<number>(100)
+  const [ioMetric, setIoMetric] = useState<'slope' | 'amplitude'>('slope')
+  const ioUnit = 'µA'
+
+  // PPR tab parameters. V2/F2 cursor windows are local to this window
+  // for v1 (not pushed to the main viewer's cursor state), so the
+  // global CursorPositions shape stays unchanged. ISI is stored as
+  // a convenience for the "place V2/F2 from ISI" helper. Initial
+  // defaults are 50 ms apart from V1/F1 — a harmless placeholder
+  // until the user drags or uses the helper.
+  const [volley2Start, setVolley2Start] = useState<number>(0.051)
+  const [volley2End, setVolley2End] = useState<number>(0.052)
+  const [fepsp2Start, setFepsp2Start] = useState<number>(0.052)
+  const [fepsp2End, setFepsp2End] = useState<number>(0.055)
+  const [pprIsiMs, setPprIsiMs] = useState<number>(50)
+  const [pprMetric, setPprMetric] = useState<'amp' | 'slope'>('amp')
   const hasSyncedRef = useRef(false)
   useEffect(() => {
     if (hasSyncedRef.current) return
     if (mainGroup == null && mainSeries == null && mainTrace == null) return
     hasSyncedRef.current = true
     if (mainGroup != null) setGroup(mainGroup)
-    if (mainSeries != null) setSeries(mainSeries)
+    // Seed every tab with the main viewer's current series — otherwise
+    // a freshly-opened FPsp window would stick each tab on series 0
+    // regardless of where the user was browsing.
+    if (mainSeries != null) {
+      setSeriesByMode({ ltp: mainSeries, io: mainSeries, ppr: mainSeries })
+    }
     if (mainTrace != null) setChannel(mainTrace)
   }, [mainGroup, mainSeries, mainTrace])
 
@@ -90,8 +165,63 @@ export function FPspWindow({
     if (!fileInfo) return
     if (group >= fileInfo.groupCount) setGroup(0)
     const ser = fileInfo.groups?.[group]?.series
-    if (ser && series >= ser.length) setSeries(0)
-  }, [fileInfo, group, series])
+    const count = ser?.length ?? 0
+    // Clamp every tab's stored series, not just the active one —
+    // otherwise an inactive tab could hold a stale out-of-range
+    // index that would glitch when the user finally switches to it.
+    setSeriesByMode((prev) => {
+      const next = { ...prev }
+      let changed = false
+      for (const k of Object.keys(next) as FPspMode[]) {
+        if (next[k] >= count) { next[k] = 0; changed = true }
+      }
+      return changed ? next : prev
+    })
+  }, [fileInfo, group])
+
+  // Auto-seed each tab's series from persisted analyses once
+  // `fpspCurves` has arrived via state-update. A window reopened on
+  // a recording with prior runs should show those runs' series
+  // without the user having to navigate back manually. Skips any mode
+  // where the user has already manually picked a series, and runs at
+  // most once per mode (guarded by `autoSeededRef`). Ignores the main
+  // viewer's current series — if there's a saved analysis, that
+  // takes priority over where the user happens to be in the main
+  // viewer at the moment.
+  const autoSeededRef = useRef<Record<FPspMode, boolean>>({
+    ltp: false, io: false, ppr: false,
+  })
+  useEffect(() => {
+    if (!fileInfo) return
+    const prefix = `${group}:`
+    setSeriesByMode((prev) => {
+      const next = { ...prev }
+      let changed = false
+      for (const m of ['ltp', 'io', 'ppr'] as FPspMode[]) {
+        if (autoSeededRef.current[m]) continue
+        if (manuallyChangedSeriesRef.current[m]) continue
+        // Pick the highest-index series with a saved entry for this
+        // mode in the current group. Higher index ≈ most recent run
+        // in typical recordings; lacking timestamps, it's the closest
+        // heuristic to "last analysed".
+        let best: number | null = null
+        for (const key of Object.keys(fpspCurves)) {
+          if (!key.startsWith(prefix) || !key.endsWith(`:${m}`)) continue
+          const parts = key.split(':')
+          if (parts.length !== 3) continue
+          const s = Number(parts[1])
+          if (!isFinite(s)) continue
+          if (best == null || s > best) best = s
+        }
+        if (best != null && best !== prev[m]) {
+          autoSeededRef.current[m] = true
+          next[m] = best
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [fileInfo, group, fpspCurves])
 
   const channels = useMemo(() => channelsForSeries(fileInfo, group, series), [fileInfo, group, series])
   useEffect(() => {
@@ -142,6 +272,11 @@ export function FPspWindow({
   const [sweepTraceTime, setSweepTraceTime] = useState<number[] | null>(null)
   const [sweepTraceValues, setSweepTraceValues] = useState<number[] | null>(null)
   const [sweepTraceUnits, setSweepTraceUnits] = useState<string>('')
+  /** DC offset the backend subtracted when `zero_offset=true`. Needed
+   *  to shift the detection marker dots by the same amount so they
+   *  stay aligned with the displayed trace — raw measurements come
+   *  from the unshifted signal, the display is shifted. */
+  const [sweepZeroOffsetApplied, setSweepZeroOffsetApplied] = useState<number>(0)
   // Per-window zero-offset toggle — applied to the preview fetch only;
   // the run-time analysis already does its own baseline subtraction.
   const [zeroOffset, setZeroOffset] = useState(false)
@@ -172,6 +307,7 @@ export function FPspWindow({
         setSweepTraceTime(d.time ?? [])
         setSweepTraceValues(d.values ?? [])
         setSweepTraceUnits(d.units ?? '')
+        setSweepZeroOffsetApplied(Number(d.zero_offset ?? 0))
       })
       .catch(() => { if (!cancelled) { setSweepTraceTime(null); setSweepTraceValues(null) } })
     return () => { cancelled = true }
@@ -218,8 +354,24 @@ export function FPspWindow({
     document.addEventListener('mouseup', onUp)
   }
 
-  const key = `${group}:${series}`
+  // Mode-scoped lookup: I-O / PPR / LTP results for the same series
+  // live in separate slots so switching tabs swaps the data cleanly.
+  // `entry` is the CURRENT-mode entry (drives rehydration + summary).
+  // `ltpEntry` / `ioEntry` are read separately because the results
+  // panels for both modes stay mounted with display-toggle — without
+  // that, switching tabs unmounted the LTP over-time plot, and on
+  // return it tried to size itself while still display:none and came
+  // back blank until the user jiggled `normalize` or `index`.
+  const key = `${group}:${series}:${mode}`
   const entry = fpspCurves[key]
+  // Each mode's entry must use THAT mode's own stored series, not the
+  // currently-resolved `series` (which flips with the active tab).
+  // Otherwise the hidden tab's panel briefly looks at the wrong
+  // series's slot (typically empty), destroys its plot, and the plot
+  // can't come back until data changes on return.
+  const ltpEntry = fpspCurves[`${group}:${seriesByMode.ltp}:ltp`]
+  const ioEntry = fpspCurves[`${group}:${seriesByMode.io}:io`]
+  const pprEntry = fpspCurves[`${group}:${seriesByMode.ppr}:ppr`]
 
   // Rehydrate the form from the persisted entry whenever we "land on" a
   // (group, series) pair that has results stored — either because the
@@ -245,6 +397,19 @@ export function FPspWindow({
     setFilterLow(entry.filterLow)
     setFilterHigh(entry.filterHigh)
     setFilterOrder(entry.filterOrder)
+    if (entry.mode === 'io') {
+      if (entry.ioInitialIntensity != null) setIoInitialIntensity(entry.ioInitialIntensity)
+      if (entry.ioIntensityStep != null) setIoIntensityStep(entry.ioIntensityStep)
+      if (entry.ioMetric) setIoMetric(entry.ioMetric)
+    }
+    if (entry.mode === 'ppr') {
+      if (entry.volley2StartS != null) setVolley2Start(entry.volley2StartS)
+      if (entry.volley2EndS != null) setVolley2End(entry.volley2EndS)
+      if (entry.fepsp2StartS != null) setFepsp2Start(entry.fepsp2StartS)
+      if (entry.fepsp2EndS != null) setFepsp2End(entry.fepsp2EndS)
+      if (entry.pprIsiMs != null) setPprIsiMs(entry.pprIsiMs)
+      if (entry.pprMetric) setPprMetric(entry.pprMetric)
+    }
   }, [entry, key])
 
   /** Auto-place cursors: detect stim onset from the backend, then place
@@ -320,7 +485,8 @@ export function FPspWindow({
       appendToExisting = true
     }
     runFPsp(group, series, channel, {
-      seriesB,
+      mode,
+      seriesB: mode === 'ltp' ? seriesB : null,  // B-series is LTP-only
       baselineStartS: cursors.baselineStart,
       baselineEndS: cursors.baselineEnd,
       volleyStartS: cursors.fitStart,
@@ -331,9 +497,31 @@ export function FPspWindow({
       slopeLowPct: slopeLow,
       slopeHighPct: slopeHigh,
       peakDirection: peakDir,
-      avgN,
+      // I-O always forces avgN=1 — averaging would conflate adjacent
+      // intensity steps, defeating the point of the curve. PPR and
+      // LTP honour the user's avgN; for PPR > 1 the right-side
+      // bin-waveform viewer takes over showing the averaged trace
+      // with detection dots (the LEFT sweep viewer's per-sweep dots
+      // are gated on sweepIndices.length === 1, so they only show
+      // when avgN == 1).
+      avgN: mode === 'io' ? 1 : avgN,
       sweepIndices,
       appendToExisting,
+      // I-O-specific metadata (echoed into the entry). Undefined for
+      // other modes so the entry doesn't carry stale fields.
+      ioInitialIntensity: mode === 'io' ? ioInitialIntensity : undefined,
+      ioIntensityStep: mode === 'io' ? ioIntensityStep : undefined,
+      ioUnit: mode === 'io' ? ioUnit : undefined,
+      ioMetric: mode === 'io' ? ioMetric : undefined,
+      // PPR: 2nd-response windows + ISI + scatter-metric toggle.
+      // The store fires two parallel /api/fpsp/run calls (V1/F1 and
+      // V2/F2) and merges the points with pprAmp / pprSlope ratios.
+      volley2StartS: mode === 'ppr' ? volley2Start : undefined,
+      volley2EndS: mode === 'ppr' ? volley2End : undefined,
+      fepsp2StartS: mode === 'ppr' ? fepsp2Start : undefined,
+      fepsp2EndS: mode === 'ppr' ? fepsp2End : undefined,
+      pprIsiMs: mode === 'ppr' ? pprIsiMs : undefined,
+      pprMetric: mode === 'ppr' ? pprMetric : undefined,
       filterEnabled,
       filterType,
       filterLow,
@@ -343,10 +531,15 @@ export function FPspWindow({
   }
 
   const onSelectPoint = (idx: number) => {
-    selectFPspPoint(group, series, idx)
+    selectFPspPoint(mode, group, series, idx)
     // Broadcast the first sweep of this bin so the main viewer jumps to it.
     const p = entry?.points[idx]
     if (p && p.sweepIndices.length > 0) {
+      // Also pan the LOCAL sweep viewer to that sweep so the
+      // detection markers show up on the displayed trace (without
+      // this, clicking a row would only move the main viewer and
+      // leave the analysis-window's mini-viewer on the previous sweep).
+      setPreviewSweep(p.sweepIndices[0])
       try {
         const ch = new BroadcastChannel('neurotrace-sync')
         ch.postMessage({ type: 'sweep-update', sweep: p.sweepIndices[0] })
@@ -354,6 +547,21 @@ export function FPspWindow({
       } catch { /* ignore */ }
     }
   }
+
+  // The point whose markers should be drawn on the sweep viewer:
+  // the currently-selected point, if it represents exactly this one
+  // sweep (so its measurements actually correspond to the trace the
+  // user is looking at). Multi-sweep bins (LTP avgN>1) are excluded —
+  // their measurements come from the averaged trace, not any
+  // individual sweep, so overlaying them on one sweep would mislead.
+  const markerPoint = useMemo(() => {
+    if (!entry || entry.selectedIdx == null) return null
+    const p = entry.points[entry.selectedIdx]
+    if (!p) return null
+    if (p.sweepIndices.length !== 1) return null
+    if (p.sweepIndices[0] !== previewSweep) return null
+    return p
+  }, [entry, previewSweep])
 
   const flaggedCount = entry ? entry.points.filter((p) => p.flagged).length : 0
 
@@ -375,27 +583,33 @@ export function FPspWindow({
             ))}
           </select>
         </Field>
-        <Field label="Baseline series">
+        <Field label="Primary series">
           <select value={series} onChange={(e) => setSeries(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
               <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
             ))}
           </select>
         </Field>
-        <Field label="LTP series (optional)">
-          <select
-            value={seriesB ?? ''}
-            onChange={(e) => setSeriesB(e.target.value === '' ? null : Number(e.target.value))}
-            disabled={!fileInfo}
-          >
-            <option value="">— none —</option>
-            {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
-              i !== series ? (
-                <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
-              ) : null
-            ))}
-          </select>
-        </Field>
+        {/* Secondary series only makes sense in LTP mode (to hold the
+            post-tetanus series for time-course concatenation). I-O and
+            PPR run on a single series, so we hide the selector there
+            rather than having a "doesn't do anything here" field. */}
+        {mode === 'ltp' && (
+          <Field label="Secondary (post-tetanus, optional)">
+            <select
+              value={seriesB ?? ''}
+              onChange={(e) => setSeriesB(e.target.value === '' ? null : Number(e.target.value))}
+              disabled={!fileInfo}
+            >
+              <option value="">— none —</option>
+              {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
+                i !== series ? (
+                  <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
+                ) : null
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Channel">
           <select value={channel} onChange={(e) => setChannel(Number(e.target.value))} disabled={channels.length === 0}>
             {channels.map((c: any) => (
@@ -439,6 +653,50 @@ export function FPspWindow({
         </Field>
       </div>
 
+      {/* Tab bar — I-O · PPR · LTP. All three tabs share the
+          selectors above and the mini-viewer / table chrome below;
+          the params + measurement logic differ per tab. Order matches
+          the experimental workflow most users follow. */}
+      <div style={{
+        display: 'flex', gap: 2, borderBottom: '1px solid var(--border)',
+        alignItems: 'flex-end',
+      }}>
+        {(['io', 'ppr', 'ltp'] as FPspMode[]).map((m) => {
+          const label = m === 'io' ? 'I-O curve'
+            : m === 'ppr' ? 'Paired-pulse ratio'
+            : 'LTP time course'
+          const active = mode === m
+          return (
+            <button
+              key={m}
+              className="btn"
+              onClick={() => setMode(m)}
+              style={{
+                padding: '4px 14px',
+                borderBottomLeftRadius: 0,
+                borderBottomRightRadius: 0,
+                borderBottom: active ? '2px solid var(--accent, #4a90e2)' : '2px solid transparent',
+                marginBottom: -1,
+                background: active ? 'var(--bg-primary)' : 'transparent',
+                color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                fontWeight: active ? 600 : 400,
+                fontSize: 'var(--font-size-label)',
+              }}
+              title={
+                m === 'io' ? 'Stimulus intensity vs fEPSP slope/amplitude'
+                : m === 'ppr' ? 'Paired-pulse ratio (amp/slope of response 2 ÷ response 1)'
+                : 'LTP time course — slope/amplitude over time, normalised to baseline'
+              }
+            >{label}</button>
+          )
+        })}
+      </div>
+
+      {/* LTP + I-O + PPR share almost all chrome (cursor readout,
+          filter, params shell, run controls, mini-viewer). The lower
+          results panel and some mode-specific param fields differ. */}
+      {(mode === 'ltp' || mode === 'io' || mode === 'ppr') && (
+        <>
       {/* Cursor readout + Auto-place */}
       <div style={{
         display: 'flex',
@@ -454,10 +712,22 @@ export function FPspWindow({
       }}>
         <span style={{ color: MARKER.baseline, fontWeight: 600 }}>Baseline:</span>
         <span>{cursors.baselineStart.toFixed(4)}→{cursors.baselineEnd.toFixed(4)}s</span>
-        <span style={{ color: MARKER.volley, fontWeight: 600 }}>Volley:</span>
+        <span style={{ color: MARKER.volley, fontWeight: 600 }}>
+          {mode === 'ppr' ? 'V1:' : 'Volley:'}
+        </span>
         <span>{cursors.fitStart.toFixed(4)}→{cursors.fitEnd.toFixed(4)}s</span>
-        <span style={{ color: MARKER.fepsp, fontWeight: 600 }}>fEPSP:</span>
+        <span style={{ color: MARKER.fepsp, fontWeight: 600 }}>
+          {mode === 'ppr' ? 'F1:' : 'fEPSP:'}
+        </span>
         <span>{cursors.peakStart.toFixed(4)}→{cursors.peakEnd.toFixed(4)}s</span>
+        {mode === 'ppr' && (
+          <>
+            <span style={{ color: MARKER.volley, fontWeight: 600 }}>V2:</span>
+            <span>{volley2Start.toFixed(4)}→{volley2End.toFixed(4)}s</span>
+            <span style={{ color: MARKER.fepsp, fontWeight: 600 }}>F2:</span>
+            <span>{fepsp2Start.toFixed(4)}→{fepsp2End.toFixed(4)}s</span>
+          </>
+        )}
         <button
           className="btn"
           onClick={onAutoPlace}
@@ -552,8 +822,52 @@ export function FPspWindow({
             <option value="positive">Positive</option>
           </select>
         </Field>
-        <ParamRow label="Average N sweeps" value={avgN} step={1} min={1}
-          onChange={(v) => setAvgN(Math.max(1, Math.round(v)))} />
+        {(mode === 'ltp' || mode === 'ppr') && (
+          <ParamRow label="Average N sweeps" value={avgN} step={1} min={1}
+            onChange={(v) => setAvgN(Math.max(1, Math.round(v)))} />
+        )}
+        {/* I-O specific: stimulus intensity ramp. Each sweep gets
+            `initial + sweepIndex * step` assigned to the x-axis of
+            the scatter plot below. Excluded sweeps are skipped on run
+            but do not shift intensity — the sweep index is preserved. */}
+        {mode === 'io' && (
+          <>
+            <ParamRow label={`Initial intensity (${ioUnit})`}
+              value={ioInitialIntensity} step={10} min={0}
+              onChange={setIoInitialIntensity} />
+            <ParamRow label={`Step (${ioUnit})`}
+              value={ioIntensityStep} step={10} min={0}
+              onChange={setIoIntensityStep} />
+          </>
+        )}
+        {/* PPR specific: ISI input + "Place V2/F2 from ISI" helper.
+            Copies V1/F1 offsets forward by ISI ms so the user doesn't
+            have to drag both pairs manually on every sweep. */}
+        {mode === 'ppr' && (
+          <>
+            <ParamRow label="ISI (ms)"
+              value={pprIsiMs} step={5} min={1}
+              onChange={setPprIsiMs} />
+            <div style={{
+              display: 'flex', alignItems: 'flex-end',
+            }}>
+              <button
+                className="btn"
+                onClick={() => {
+                  const dt = pprIsiMs / 1000
+                  setVolley2Start(cursors.fitStart + dt)
+                  setVolley2End(cursors.fitEnd + dt)
+                  setFepsp2Start(cursors.peakStart + dt)
+                  setFepsp2End(cursors.peakEnd + dt)
+                }}
+                title="Place the 2nd-response volley + fEPSP cursors at the V1/F1 positions shifted forward by ISI milliseconds."
+                style={{ width: '100%' }}
+              >
+                Place V2/F2 from ISI
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Run controls */}
@@ -607,7 +921,7 @@ export function FPspWindow({
           style={{ marginLeft: 8 }}>
           {loading ? 'Running…' : 'Run'}
         </button>
-        <button className="btn" onClick={() => clearFPsp(group, series)} disabled={!entry}>
+        <button className="btn" onClick={() => clearFPsp(mode, group, series)} disabled={!entry}>
           Clear
         </button>
         <button className="btn" onClick={() => exportFPspCSV()}
@@ -631,8 +945,9 @@ export function FPspWindow({
         </div>
       )}
 
-      {/* Summary + graph-mode toggles */}
-      {entry && (
+      {/* Summary + graph-mode toggles (LTP-specific: the timestamp/
+          index toggle + normalize toggle only apply to over-time plots) */}
+      {mode === 'ltp' && entry && (
         <div style={{
           fontSize: 'var(--font-size-label)',
           color: 'var(--text-muted)',
@@ -657,18 +972,18 @@ export function FPspWindow({
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <input type="radio" checked={entry.timeAxis === 'timestamp'}
-                onChange={() => setFPspTimeAxis(group, series, 'timestamp')} />
+                onChange={() => setFPspTimeAxis(mode, group, series, 'timestamp')} />
               time
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <input type="radio" checked={entry.timeAxis === 'index'}
-                onChange={() => setFPspTimeAxis(group, series, 'index')} />
+                onChange={() => setFPspTimeAxis(mode, group, series, 'index')} />
               index
             </label>
             <span style={{ color: 'var(--border)' }}>|</span>
             <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <input type="checkbox" checked={entry.normalize}
-                onChange={(e) => setFPspNormalize(group, series, e.target.checked)} />
+                onChange={(e) => setFPspNormalize(mode, group, series, e.target.checked)} />
               normalize
             </label>
             {entry.normalize && (
@@ -676,6 +991,93 @@ export function FPspWindow({
                 (% of mean across all baseline-series points)
               </span>
             )}
+          </span>
+        </div>
+      )}
+
+      {/* PPR summary: point count + metric toggle for the over-time
+          ratio scatter. Mean PPR is shown for at-a-glance QC. */}
+      {mode === 'ppr' && entry && (() => {
+        // Average pprAmp / pprSlope across non-null points for the
+        // summary strip. Cheap and runs only when the entry changes.
+        const amps: number[] = []
+        const slopes: number[] = []
+        for (const p of entry.points) {
+          if (p.pprAmp != null && isFinite(p.pprAmp)) amps.push(p.pprAmp)
+          if (p.pprSlope != null && isFinite(p.pprSlope)) slopes.push(p.pprSlope)
+        }
+        const meanAmp = amps.length ? amps.reduce((a, b) => a + b, 0) / amps.length : null
+        const meanSlope = slopes.length ? slopes.reduce((a, b) => a + b, 0) / slopes.length : null
+        return (
+          <div style={{
+            fontSize: 'var(--font-size-label)',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+            background: 'var(--bg-primary)',
+            padding: '4px 8px',
+            borderRadius: 3,
+            border: '1px solid var(--border)',
+            display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+          }}>
+            <span>
+              <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> sweeps ·
+              ISI {(entry.pprIsiMs ?? 0).toFixed(1)} ms ·
+              mean PPR-amp {meanAmp != null ? meanAmp.toFixed(3) : '—'} ·
+              mean PPR-slope {meanSlope != null ? meanSlope.toFixed(3) : '—'} ·
+              stim onset {entry.stimOnsetS.toFixed(4)}s ·
+              unit {entry.responseUnit || '—'}
+            </span>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
+              <span style={{ color: 'var(--text-muted)' }}>over-time y:</span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <input type="radio" checked={pprMetric === 'amp'}
+                  onChange={() => setPprMetric('amp')} />
+                PPR (amp)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <input type="radio" checked={pprMetric === 'slope'}
+                  onChange={() => setPprMetric('slope')} />
+                PPR (slope)
+              </label>
+            </span>
+          </div>
+        )
+      })()}
+
+      {/* I-O summary: one line showing point count, intensity range
+          and the y-axis metric toggle for the scatter plot. */}
+      {mode === 'io' && entry && (
+        <div style={{
+          fontSize: 'var(--font-size-label)',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-mono)',
+          background: 'var(--bg-primary)',
+          padding: '4px 8px',
+          borderRadius: 3,
+          border: '1px solid var(--border)',
+          display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+        }}>
+          <span>
+            <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> sweeps ·
+            intensity {(entry.ioInitialIntensity ?? 0).toFixed(1)}–
+            {((entry.ioInitialIntensity ?? 0)
+              + Math.max(0, entry.points.length - 1) * (entry.ioIntensityStep ?? 0)
+            ).toFixed(1)} {entry.ioUnit ?? 'µA'} ·
+            stim onset {entry.stimOnsetS.toFixed(4)}s ·
+            unit {entry.responseUnit || '—'}
+          </span>
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
+            <span style={{ color: 'var(--text-muted)' }}>y-axis:</span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <input type="radio" checked={ioMetric === 'slope'}
+                onChange={() => setIoMetric('slope')} />
+              slope
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <input type="radio" checked={ioMetric === 'amplitude'}
+                onChange={() => setIoMetric('amplitude')} />
+              amplitude
+            </label>
           </span>
         </div>
       )}
@@ -706,14 +1108,35 @@ export function FPspWindow({
               fontSize={fontSize}
               zeroOffset={zeroOffset}
               onZeroOffsetChange={setZeroOffset}
+              zeroOffsetApplied={sweepZeroOffsetApplied}
+              markerPoint={markerPoint}
+              markerEntry={entry}
+              pprBands={mode === 'ppr' ? {
+                volleyStart: volley2Start,
+                volleyEnd: volley2End,
+                fepspStart: fepsp2Start,
+                fepspEnd: fepsp2End,
+              } : null}
             />
           </div>
-          {/* RIGHT: selected-bin averaged waveform, unchanged — shows
-              whichever bin the user clicks in the results table. */}
-          <div style={{ flex: 1, minWidth: 0 }}>
+          {/* RIGHT: selected-bin averaged waveform.
+              - LTP: always shown.
+              - PPR: shown — averaged trace with R1 + R2 detection dots
+                and 5 cursor bands. This is the canonical view when
+                avgN > 1 (the LEFT viewer's per-sweep dots are
+                suppressed for averaged bins).
+              - I-O: hidden — each row is a single sweep, no averaging.
+              All cases stay mounted (display-toggle) so the inner
+              uPlot instance / zoom / scroll survive mode round-trips.
+              Each mode is fed its OWN entry so toggling tabs doesn't
+              flash the wrong data. */}
+          <div style={{
+            flex: 1, minWidth: 0,
+            display: (mode === 'ltp' || mode === 'ppr') ? 'block' : 'none',
+          }}>
             <FPspMiniViewer
               backendUrl={backendUrl}
-              entry={entry}
+              entry={mode === 'ppr' ? pprEntry : ltpEntry}
               group={group} series={series} channel={channel}
               heightSignal={topHeight}
             />
@@ -736,12 +1159,48 @@ export function FPspWindow({
           }} />
         </div>
 
-        {/* Bottom: tabs (Table | Over-time) */}
-        <FPspResultsTabs
-          entry={entry}
-          onSelectPoint={onSelectPoint}
-        />
+        {/* Bottom: LTP gets tabs (Table | Over-time); I-O gets its
+            own table + intensity-vs-metric scatter. BOTH panels stay
+            mounted (display-toggle) across mode switches so internal
+            state (sub-tab, plot instance, zoom) survives. */}
+        <div style={{
+          display: mode === 'ltp' ? 'flex' : 'none',
+          flexDirection: 'column',
+          flex: 1, minHeight: 0,
+        }}>
+          <FPspResultsTabs
+            entry={ltpEntry}
+            onSelectPoint={onSelectPoint}
+            visibilitySignal={ltpVisibilitySignal}
+          />
+        </div>
+        <div style={{
+          display: mode === 'io' ? 'flex' : 'none',
+          flex: 1, minHeight: 0,
+        }}>
+          <IOResultsPanel
+            entry={ioEntry}
+            metric={ioMetric}
+            onSelectPoint={onSelectPoint}
+            theme={theme}
+            fontSize={fontSize}
+            visibilitySignal={ioVisibilitySignal}
+          />
+        </div>
+        <div style={{
+          display: mode === 'ppr' ? 'flex' : 'none',
+          flex: 1, minHeight: 0,
+        }}>
+          <PPRResultsPanel
+            entry={pprEntry}
+            metric={pprMetric}
+            onSelectPoint={onSelectPoint}
+            visibilitySignal={pprVisibilitySignal}
+          />
+        </div>
       </div>
+        </>
+      )}
     </div>
   )
 }
@@ -788,6 +1247,17 @@ function FPspMiniViewer({
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  // Default tuned range (recomputed on each plot rebuild) and the
+  // user's current zoom/pan range. Range callbacks prefer the user
+  // ranges when set; reset clears them. Refs (not state) so wheel /
+  // pan don't trigger React re-renders — uPlot redraws on setScale.
+  const tunedXRangeRef = useRef<[number, number] | null>(null)
+  const tunedYRangeRef = useRef<[number, number] | null>(null)
+  const userXRangeRef = useRef<[number, number] | null>(null)
+  const userYRangeRef = useRef<[number, number] | null>(null)
+  // Bumping this on Reset zoom forces a re-render so the button can
+  // also clear via setScale (refs alone don't trigger redraw cycles).
+  const [, forceRedraw] = useState(0)
 
   const selected: FPspPoint | null =
     entry && entry.selectedIdx != null && entry.selectedIdx < entry.points.length
@@ -797,16 +1267,26 @@ function FPspMiniViewer({
   const [data, setData] = useState<{ time: Float64Array; values: Float64Array } | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
+  // Furthest-right cursor edge in the entry — F1's end for LTP/I-O,
+  // F2's end for PPR. Used to size both the fetch window and the
+  // x-axis range so the viewer always shows the full event(s).
+  const fEnd = entry
+    ? (entry.mode === 'ppr' && entry.fepsp2EndS != null
+        ? Math.max(entry.fepspEndS, entry.fepsp2EndS)
+        : entry.fepspEndS)
+    : 0
+
   // Fetch the AVERAGED waveform for the bin's sweeps via the new
   // /api/fpsp/bin_waveform endpoint. The mini-viewer then shows exactly
   // the signal the baseline/volley/fEPSP/slope measurements were
   // computed on. Note: uses the point's sourceSeries (baseline or LTP).
   useEffect(() => {
     if (!selected || !backendUrl || !entry) { setData(null); return }
-    // X window: from 0 to 2 × fEPSP end-cursor (so the event sits in the
-    // left half and we show an equal chunk of tail after it).
+    // X window: from 0 to 2 × the furthest fEPSP end (F1 for LTP/I-O,
+    // F2 for PPR), so the event(s) sit in the left half with an equal
+    // chunk of tail after them.
     const tStart = 0
-    const tEnd = Math.max(entry.fepspEndS * 2, entry.fepspEndS + 0.005)
+    const tEnd = Math.max(fEnd * 2, fEnd + 0.005)
     const qs = new URLSearchParams({
       group: String(group),
       series: String(selected.sourceSeries),
@@ -846,36 +1326,54 @@ function FPspMiniViewer({
     if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     if (!data || data.time.length === 0 || !selected) return
 
-    // Y-axis range: the stim artifact dominates auto-scaling and buries
-    // the actual volley/fEPSP deflections. Instead, center the y view on
-    // the bin's baseline and size it to 2× the larger of volley/fEPSP
-    // amplitudes — that zooms straight onto the event regardless of how
-    // big the artifact is. Falls back to data bounds for edge cases.
+    // Y-axis tuned range: the stim artifact dominates auto-scaling and
+    // buries the actual volley/fEPSP deflections. Center y on the bin
+    // baseline + size to 2× the largest measured deflection (R2
+    // included for PPR) so we zoom straight onto the event(s)
+    // regardless of artifact size.
     const sel = selected
     const maxAmp = Math.max(
       Math.abs(sel.volleyAmp),
       Math.abs(sel.fepspAmp),
+      Math.abs(sel.volleyAmp2 ?? 0),
+      Math.abs(sel.fepspAmp2 ?? 0),
     )
-    // Y: 2 × max amplitude on each side of the baseline level.
-    const yRange = (maxAmp > 0)
-      ? [sel.baseline - 2 * maxAmp, sel.baseline + 2 * maxAmp] as [number, number]
+    const tunedY: [number, number] | null = (maxAmp > 0)
+      ? [sel.baseline - 2 * maxAmp, sel.baseline + 2 * maxAmp]
       : null
-    // X: 0 → 2 × fEPSP end-cursor, pinned so the stim artifact + event
-    // fill the left half of the plot and are never clipped by auto-scale.
-    const xRange: [number, number] = [
+    // X tuned range: 0 → 2 × furthest fEPSP end-cursor.
+    const tunedX: [number, number] = [
       0,
-      Math.max(entry!.fepspEndS * 2, entry!.fepspEndS + 0.005),
+      Math.max(fEnd * 2, fEnd + 0.005),
     ]
+    tunedXRangeRef.current = tunedX
+    tunedYRangeRef.current = tunedY
+    // Don't carry user zoom across data rebuilds — different bins
+    // have different deflection magnitudes, so a stale zoom from bin
+    // 5 may leave bin 6 entirely off-screen. Reset on rebuild.
+    userXRangeRef.current = null
+    userYRangeRef.current = null
 
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
       height: Math.max(120, el.clientHeight || 180),
       scales: {
-        x: { time: false, range: () => xRange },
-        y: yRange
-          ? { range: () => yRange }
-          : {},
+        // Range callbacks return the user range when present (wheel /
+        // pan), otherwise the tuned range. Identical pattern to the
+        // sweep viewer's locked-zoom — keeps `data` rebuilds from
+        // wiping the user's inspection state within a bin.
+        x: {
+          time: false,
+          range: () => userXRangeRef.current ?? tunedXRangeRef.current ?? tunedX,
+        },
+        y: {
+          range: () => userYRangeRef.current
+            ?? tunedYRangeRef.current
+            ?? (tunedY as [number, number])
+            ?? [0, 1],
+        },
       },
+      legend: { show: false },
       axes: [
         {
           stroke: cssVar('--chart-axis'),
@@ -893,7 +1391,7 @@ function FPspMiniViewer({
       cursor: { drag: { x: false, y: false } },
       series: [
         {},
-        { label: 'trace', stroke: cssVar('--trace-color-1'), width: 1.25 },
+        { stroke: cssVar('--trace-color-1'), width: 1.25 },
       ],
       hooks: {
         draw: [() => drawMiniOverlay(plotRef.current, overlayRef.current, entry, selected)],
@@ -902,7 +1400,103 @@ function FPspMiniViewer({
     const payload: uPlot.AlignedData = [Array.from(data.time), Array.from(data.values)]
     plotRef.current = new uPlot(opts, payload, el)
     drawMiniOverlay(plotRef.current, overlayRef.current, entry, selected)
+
+    // ---- Wheel zoom (X by default, Y with ⌥) + drag-to-pan ----
+    // Mirrors the sweep viewer so the UX feels identical: scroll to
+    // zoom around the cursor, ⌥-scroll to zoom Y, click-and-drag to
+    // pan both axes. Touch-ups go directly through uPlot.setScale
+    // (which redraws), and the user range refs are updated so the
+    // next rebuild keeps the user view (until they click Reset).
+    const u = plotRef.current
+    const over = el.querySelector<HTMLDivElement>('.u-over')
+    if (!over) return
+
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault()
+      const rect = over.getBoundingClientRect()
+      const pxX = ev.clientX - rect.left
+      const pxY = ev.clientY - rect.top
+      const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
+      if (ev.altKey) {
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (yMin == null || yMax == null) return
+        const yAtCur = u.posToVal(pxY, 'y')
+        const newMin = yAtCur - (yAtCur - yMin) * factor
+        const newMax = yAtCur + (yMax - yAtCur) * factor
+        userYRangeRef.current = [newMin, newMax]
+        u.setScale('y', { min: newMin, max: newMax })
+      } else {
+        const xMin = u.scales.x.min, xMax = u.scales.x.max
+        if (xMin == null || xMax == null) return
+        const xAtCur = u.posToVal(pxX, 'x')
+        const newMin = xAtCur - (xAtCur - xMin) * factor
+        const newMax = xAtCur + (xMax - xAtCur) * factor
+        userXRangeRef.current = [newMin, newMax]
+        u.setScale('x', { min: newMin, max: newMax })
+      }
+    }
+    let drag: null | {
+      startPxX: number; startPxY: number
+      xMin: number; xMax: number; yMin: number; yMax: number
+    } = null
+    const onDown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return
+      const rect = over.getBoundingClientRect()
+      const xMin = u.scales.x.min, xMax = u.scales.x.max
+      const yMin = u.scales.y.min, yMax = u.scales.y.max
+      if (xMin == null || xMax == null || yMin == null || yMax == null) return
+      drag = {
+        startPxX: ev.clientX - rect.left,
+        startPxY: ev.clientY - rect.top,
+        xMin, xMax, yMin, yMax,
+      }
+      over.setPointerCapture(ev.pointerId)
+      over.style.cursor = 'grabbing'
+    }
+    const onMove = (ev: PointerEvent) => {
+      if (!drag) return
+      const rect = over.getBoundingClientRect()
+      const dxPx = (ev.clientX - rect.left) - drag.startPxX
+      const dyPx = (ev.clientY - rect.top) - drag.startPxY
+      const bboxW = u.bbox.width / (devicePixelRatio || 1)
+      const bboxH = u.bbox.height / (devicePixelRatio || 1)
+      const dx = -(dxPx / bboxW) * (drag.xMax - drag.xMin)
+      const dy = (dyPx / bboxH) * (drag.yMax - drag.yMin)
+      const nx: [number, number] = [drag.xMin + dx, drag.xMax + dx]
+      const ny: [number, number] = [drag.yMin + dy, drag.yMax + dy]
+      userXRangeRef.current = nx
+      userYRangeRef.current = ny
+      u.setScale('x', { min: nx[0], max: nx[1] })
+      u.setScale('y', { min: ny[0], max: ny[1] })
+    }
+    const onUp = (ev: PointerEvent) => {
+      if (!drag) return
+      drag = null
+      try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
+      over.style.cursor = ''
+    }
+    over.addEventListener('wheel', onWheel, { passive: false })
+    over.addEventListener('pointerdown', onDown)
+    over.addEventListener('pointermove', onMove)
+    over.addEventListener('pointerup', onUp)
+    // Cleanup happens automatically on next destroy (next rebuild).
   }, [data, entry, selected])
+
+  // Reset-zoom helper used by the header button. Clears the user
+  // range refs and re-applies the tuned range via setScale so we
+  // don't have to rebuild the plot.
+  const resetZoom = () => {
+    const u = plotRef.current
+    userXRangeRef.current = null
+    userYRangeRef.current = null
+    if (!u) { forceRedraw((n) => n + 1); return }
+    if (tunedXRangeRef.current) {
+      u.setScale('x', { min: tunedXRangeRef.current[0], max: tunedXRangeRef.current[1] })
+    }
+    if (tunedYRangeRef.current) {
+      u.setScale('y', { min: tunedYRangeRef.current[0], max: tunedYRangeRef.current[1] })
+    }
+  }
 
   // Resize handling.
   useEffect(() => {
@@ -965,7 +1559,16 @@ function FPspMiniViewer({
               </span>
             )}
             {selected.slope != null && <span>slope {selected.slope.toFixed(3)}</span>}
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+              <button
+                className="btn"
+                onClick={resetZoom}
+                style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+                title="Restore the tuned default view (centred on baseline, scaled to event amplitudes)"
+              >
+                Reset zoom
+              </button>
+              <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
               <LegendDot color={MARKER.baseline} label="baseline" />
               <LegendDot color={MARKER.volley} label="volley" />
               <LegendDot color={MARKER.fepsp} label="fEPSP" />
@@ -977,6 +1580,14 @@ function FPspMiniViewer({
           <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
             <canvas ref={overlayRef}
               style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5, width: '100%', height: '100%' }} />
+          </div>
+          <div style={{
+            padding: '2px 8px', fontSize: 'var(--font-size-label)',
+            color: 'var(--text-muted)', fontStyle: 'italic',
+            background: 'var(--bg-secondary)',
+            borderTop: '1px solid var(--border)',
+          }}>
+            scroll = zoom X · ⌥ scroll = zoom Y · drag = pan
           </div>
           {err && (
             <div style={{ position: 'absolute', top: 30, left: 10, color: '#f44336', fontSize: 'var(--font-size-label)' }}>
@@ -1055,6 +1666,26 @@ function drawMiniOverlay(
   }
   if (selected.slopeHigh) {
     const [px, py] = toPx(selected.slopeHigh.t, selected.slopeHigh.v)
+    dot(px, py, MARKER.slopeHi)
+  }
+  // PPR mode: also draw the 2nd-response markers. The bin viewer
+  // shows the averaged trace, so these dots are the canonical "this
+  // is what was measured" reference (the LEFT raw-sweep viewer
+  // suppresses dots when avgN > 1).
+  if (selected.volleyAmp2 != null && selected.volleyPeakTs2 != null) {
+    const [px, py] = toPx(selected.volleyPeakTs2, selected.volleyPeak2 ?? 0)
+    dot(px, py, MARKER.volley)
+  }
+  if (selected.fepspAmp2 != null && selected.fepspPeakTs2 != null) {
+    const [px, py] = toPx(selected.fepspPeakTs2, selected.fepspPeak2 ?? 0)
+    dot(px, py, MARKER.fepsp)
+  }
+  if (selected.slopeLow2) {
+    const [px, py] = toPx(selected.slopeLow2.t, selected.slopeLow2.v)
+    dot(px, py, MARKER.slopeLo)
+  }
+  if (selected.slopeHigh2) {
+    const [px, py] = toPx(selected.slopeHigh2.t, selected.slopeHigh2.v)
     dot(px, py, MARKER.slopeHi)
   }
 }
@@ -1189,6 +1820,7 @@ function FPspOverTimeGraph({
       width: el.clientWidth || 400,
       height: Math.max(120, el.clientHeight || 180),
       scales: { x: { time: false }, y: {} },
+      legend: { show: false },
       axes: [
         {
           stroke: cssVar('--chart-axis'),
@@ -1211,7 +1843,6 @@ function FPspOverTimeGraph({
       series: [
         {},
         {
-          label: metricLabel,
           stroke: cssVar('--trace-color-1'),
           width: 1.5,
           points: { size: 5, stroke: cssVar('--trace-color-1'), fill: cssVar('--bg-surface') },
@@ -1240,12 +1871,21 @@ function FPspOverTimeGraph({
     const ro = new ResizeObserver(() => {
       const u = plotRef.current
       if (!u || !el) return
-      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      // Guard against 0-dim setSize: when the panel is hidden via
+      // display:none (tab switched away), ResizeObserver fires with
+      // width=0/height=0 and uPlot can't redraw itself out of that
+      // state — the plot comes back blank until something else
+      // triggers a rebuild. Skip and let the visibility-signal effect
+      // below handle the recovery.
+      const w = el.clientWidth, h = el.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     })
     ro.observe(el)
     const onWin = () => {
       const u = plotRef.current
-      if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      if (!u || !el) return
+      const w = el.clientWidth, h = el.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     }
     window.addEventListener('resize', onWin)
     return () => { ro.disconnect(); window.removeEventListener('resize', onWin) }
@@ -1255,12 +1895,16 @@ function FPspOverTimeGraph({
     // Defer via rAF: when this effect fires because the tab just became
     // visible (display: none → block), the browser hasn't yet laid out
     // the container, so clientWidth/Height would still read 0. Waiting
-    // a frame lets the layout settle before we resize uPlot.
+    // a frame lets the layout settle before we resize uPlot. We also
+    // call redraw() — setSize alone isn't always enough to recover
+    // after a 0-dim hide/restore round trip, because intermediate
+    // ResizeObserver firings may have corrupted the plot state.
     const raf = requestAnimationFrame(() => {
       const u = plotRef.current
       const el = containerRef.current
       if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
         u.setSize({ width: el.clientWidth, height: el.clientHeight })
+        u.redraw()
       }
     })
     return () => cancelAnimationFrame(raf)
@@ -1450,7 +2094,9 @@ function FPspSweepViewer({
   previewSweep, totalSweeps,
   source,
   isExcluded, theme, fontSize,
-  zeroOffset, onZeroOffsetChange,
+  zeroOffset, onZeroOffsetChange, zeroOffsetApplied,
+  markerPoint, markerEntry,
+  pprBands,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -1465,12 +2111,41 @@ function FPspSweepViewer({
   fontSize: number
   zeroOffset: boolean
   onZeroOffsetChange: (v: boolean) => void
+  /** DC offset (in trace units) the backend subtracted from the
+   *  displayed samples when zero-offset was on. 0 when off. Used to
+   *  shift detection-marker dots so they stay glued to the displayed
+   *  (shifted) trace rather than floating above/below it. */
+  zeroOffsetApplied?: number
+  /** Detection result for the sweep currently displayed, if any —
+   *  i.e. the selected row in the results table whose single sweep
+   *  matches previewSweep. Drawn as dots on top of the bands so the
+   *  user can see exactly what got measured. Pass null to suppress. */
+  markerPoint?: FPspPoint | null
+  /** Entry the marker point came from — needed for baseline-window
+   *  midpoint (so the baseline dot can be placed inside the band). */
+  markerEntry?: FPspData | null
+  /** PPR-mode only. When set, the viewer additionally renders V2/F2
+   *  cursor bands (read-only — positioned via the "Place V2/F2 from
+   *  ISI" helper, not dragged inline yet). Markers for the 2nd
+   *  response are also drawn when markerPoint carries pprAmp/pprSlope. */
+  pprBands?: {
+    volleyStart: number; volleyEnd: number
+    fepspStart: number; fepspEnd: number
+  } | null
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
 
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
+  const markerPointRef = useRef<FPspPoint | null | undefined>(markerPoint)
+  markerPointRef.current = markerPoint
+  const markerEntryRef = useRef<FPspData | null | undefined>(markerEntry)
+  markerEntryRef.current = markerEntry
+  const zeroOffsetAppliedRef = useRef<number>(zeroOffsetApplied ?? 0)
+  zeroOffsetAppliedRef.current = zeroOffsetApplied ?? 0
+  const pprBandsRef = useRef(pprBands)
+  pprBandsRef.current = pprBands
 
   const xRangeRef = useRef<[number, number] | null>(null)
   const yRangeRef = useRef<[number, number] | null>(null)
@@ -1543,9 +2218,93 @@ function FPspSweepViewer({
       ctx.fillText(label, Math.min(px0, px1) + 2 * dpr, yTop + 12 * dpr)
       ctx.restore()
     }
+    const pb = pprBandsRef.current
     drawBand(cur.baselineStart, cur.baselineEnd, FPSP_BASELINE_COLOR, 'BL')
-    drawBand(cur.fitStart, cur.fitEnd, FPSP_VOLLEY_COLOR, 'Vol')
-    drawBand(cur.peakStart, cur.peakEnd, FPSP_FEPSP_COLOR, 'fEPSP')
+    drawBand(cur.fitStart, cur.fitEnd, FPSP_VOLLEY_COLOR, pb ? 'V1' : 'Vol')
+    drawBand(cur.peakStart, cur.peakEnd, FPSP_FEPSP_COLOR, pb ? 'F1' : 'fEPSP')
+    // PPR: 2nd-response bands, same colours (measurement is identical,
+    // just on a different time window). Read-only in v1 — positioned
+    // via the "Place V2/F2 from ISI" helper.
+    if (pb) {
+      drawBand(pb.volleyStart, pb.volleyEnd, FPSP_VOLLEY_COLOR, 'V2')
+      drawBand(pb.fepspStart, pb.fepspEnd, FPSP_FEPSP_COLOR, 'F2')
+    }
+
+    // Detection markers for the selected-row sweep. Same dot style
+    // as the LTP right-side bin viewer — single circle per quantity,
+    // thin white outline so they sit cleanly on the trace. Drawn in
+    // canvas pixels (not CSS pixels) so we scale by dpr inline.
+    const point = markerPointRef.current
+    const markEntry = markerEntryRef.current
+    if (point && markEntry) {
+      const dpr = devicePixelRatio || 1
+      // Marker y-values come from the raw signal; the displayed trace
+      // has been DC-shifted by zeroOffsetApplied when the zero-offset
+      // toggle is on. Subtract the same offset to keep dots glued to
+      // the visible waveform.
+      const yOffset = zeroOffsetAppliedRef.current
+      const toPxRaw = (x: number, y: number): [number, number] => [
+        u.valToPos(x, 'x', true),
+        u.valToPos(y - yOffset, 'y', true),
+      ]
+      const dot = (px: number, py: number, color: string) => {
+        if (!isFinite(px) || !isFinite(py)) return
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(px, py, 5 * dpr, 0, Math.PI * 2)
+        ctx.fillStyle = color
+        ctx.fill()
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1.2 * dpr
+        ctx.stroke()
+        ctx.restore()
+      }
+      // Baseline: dot at the middle of the baseline window at the
+      // measured baseline y-value.
+      {
+        const tMid = (markEntry.baselineStartS + markEntry.baselineEndS) / 2
+        const [px, py] = toPxRaw(tMid, point.baseline)
+        dot(px, py, MARKER.baseline)
+      }
+      // Volley peak
+      {
+        const [px, py] = toPxRaw(point.volleyPeakTs, point.volleyPeak)
+        dot(px, py, MARKER.volley)
+      }
+      // fEPSP peak
+      {
+        const [px, py] = toPxRaw(point.fepspPeakTs, point.fepspPeak)
+        dot(px, py, MARKER.fepsp)
+      }
+      // Slope low/high crossings (when range_slope method was used)
+      if (point.slopeLow) {
+        const [px, py] = toPxRaw(point.slopeLow.t, point.slopeLow.v)
+        dot(px, py, MARKER.slopeLo)
+      }
+      if (point.slopeHigh) {
+        const [px, py] = toPxRaw(point.slopeHigh.t, point.slopeHigh.v)
+        dot(px, py, MARKER.slopeHi)
+      }
+      // PPR mode: 2nd-response dots (V2 peak, F2 peak, slope2
+      // crossings). Presence of volleyAmp2/fepspAmp2 tells us this
+      // entry was measured in PPR mode.
+      if (point.volleyAmp2 != null && point.volleyPeakTs2 != null) {
+        const [px, py] = toPxRaw(point.volleyPeakTs2, point.volleyPeak2 ?? 0)
+        dot(px, py, MARKER.volley)
+      }
+      if (point.fepspAmp2 != null && point.fepspPeakTs2 != null) {
+        const [px, py] = toPxRaw(point.fepspPeakTs2, point.fepspPeak2 ?? 0)
+        dot(px, py, MARKER.fepsp)
+      }
+      if (point.slopeLow2) {
+        const [px, py] = toPxRaw(point.slopeLow2.t, point.slopeLow2.v)
+        dot(px, py, MARKER.slopeLo)
+      }
+      if (point.slopeHigh2) {
+        const [px, py] = toPxRaw(point.slopeHigh2.t, point.slopeHigh2.v)
+        dot(px, py, MARKER.slopeHi)
+      }
+    }
   }
 
   useEffect(() => {
@@ -1561,6 +2320,7 @@ function FPspSweepViewer({
       hasRealDataRef.current = true
       const opts: uPlot.Options = {
         width: w, height: h,
+        legend: { show: false },
         scales: {
           x: {
             time: false,
@@ -1599,7 +2359,7 @@ function FPspSweepViewer({
         cursor: { drag: { x: false, y: false } },
         series: [
           {},
-          { label: 'Trace', stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
+          { stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
         ],
         hooks: { draw: [(u) => drawOverlays(u)] },
       }
@@ -1800,6 +2560,14 @@ function FPspSweepViewer({
 
   useEffect(() => { plotRef.current?.redraw() }, [cursors])
   useEffect(() => { plotRef.current?.redraw() }, [theme, fontSize])
+  // Redraw when the marker point (selected row) changes so the
+  // detection dots update without rebuilding the plot. Same for
+  // zero-offset toggling — the dots need to shift with the trace.
+  useEffect(() => { plotRef.current?.redraw() }, [markerPoint, markerEntry, zeroOffsetApplied])
+  // PPR cursor bands live outside the main cursor store, so redraw
+  // on their changes too (moving V1/F1 + clicking "Place V2/F2 from
+  // ISI" must show the new positions immediately).
+  useEffect(() => { plotRef.current?.redraw() }, [pprBands])
 
   useEffect(() => {
     const el = containerRef.current
@@ -1878,73 +2646,668 @@ function FPspSweepViewer({
 // ---------------------------------------------------------------------------
 
 function FPspResultsTabs({
-  entry, onSelectPoint,
+  entry, onSelectPoint, visibilitySignal,
 }: {
   entry: FPspData | undefined
   onSelectPoint: (idx: number) => void
+  /** Bumped by the parent when the LTP tab becomes visible. Forwarded
+   *  to FPspOverTimeGraph as heightSignal so the plot resizes + redraws
+   *  after a mode-switch round-trip (which would otherwise leave it
+   *  stuck at whatever 0-dim setSize the ResizeObserver applied while
+   *  hidden). */
+  visibilitySignal?: number
 }) {
-  const [activeTab, setActiveTab] = useState<'table' | 'overtime'>('table')
-  const pointCount = entry?.points.length ?? 0
+  // Side-by-side layout (table left, over-time graph right) to match
+  // the I-O and PPR result panels. The earlier subtab layout had two
+  // failure modes — the over-time plot started 0×0 the first time the
+  // user clicked into it, and switching modes-then-back lost the
+  // user's place. Inline both views and the user always sees both.
   return (
     <div style={{
-      flex: 1, display: 'flex', flexDirection: 'column',
-      minHeight: 0, overflow: 'hidden',
+      flex: 1, display: 'flex', gap: 6, minHeight: 0,
     }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <FPspTable entry={entry} onSelect={onSelectPoint} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <FPspOverTimeGraph
+          entry={entry}
+          onSelectIdx={onSelectPoint}
+          heightSignal={visibilitySignal ?? 0}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// I-O tab result components
+//
+// I-O results are presented inline: table on the left, intensity-vs-metric
+// scatter on the right. Unlike LTP (which tabs between Table and Over-time
+// because the over-time plot needs the full width to be useful), I-O
+// users typically want to read a row and eyeball the curve at the same
+// time, so side-by-side is more informative.
+// ---------------------------------------------------------------------------
+
+function IOResultsPanel({
+  entry, metric, onSelectPoint, theme, fontSize, visibilitySignal,
+}: {
+  entry: FPspData | undefined
+  metric: 'slope' | 'amplitude'
+  onSelectPoint: (idx: number) => void
+  theme: string
+  fontSize: number
+  /** Bumped by the parent every time the panel becomes visible. */
+  visibilitySignal?: number
+}) {
+  void theme; void fontSize  // captured via cssVar inside IOScatter
+  return (
+    <div style={{
+      flex: 1, display: 'flex', gap: 6, minHeight: 0,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <IOTable entry={entry} onSelect={onSelectPoint} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <IOScatter
+          entry={entry}
+          metric={metric}
+          onSelectIdx={onSelectPoint}
+          visibilitySignal={visibilitySignal}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Per-sweep I-O results table. One row per sweep (I-O runs always
+ *  set avgN=1), with intensity computed frontend-side from the
+ *  entry's `ioInitialIntensity + sweepIndex * ioIntensityStep`. The
+ *  row-click navigates the main viewer to that sweep, same as every
+ *  other analysis-window table. */
+function IOTable({
+  entry, onSelect,
+}: {
+  entry: FPspData | undefined
+  onSelect: (idx: number) => void
+}) {
+  if (!entry || entry.points.length === 0) {
+    return (
       <div style={{
-        display: 'flex', alignItems: 'stretch',
-        borderBottom: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', flexShrink: 0,
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+        border: '1px dashed var(--border)', borderRadius: 4,
+        height: '100%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
-        {([
-          { id: 'table' as const, label: 'Table' },
-          { id: 'overtime' as const, label: 'Over time' },
-        ]).map((t) => {
-          const active = activeTab === t.id
-          return (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setActiveTab(t.id)}
-              style={{
-                cursor: 'pointer',
-                userSelect: 'none',
-                padding: '6px 14px',
-                border: 'none',
-                borderBottom: active ? '3px solid var(--accent)' : '3px solid transparent',
-                background: active ? 'var(--bg-primary)' : 'transparent',
-                color: active ? 'var(--accent)' : 'var(--text-muted)',
-                fontSize: 'var(--font-size-sm)',
-                fontFamily: 'var(--font-ui)',
-                fontWeight: active ? 700 : 400,
-              }}
-            >
-              {t.label}
-              {pointCount > 0 && t.id === 'table' && (
-                <span style={{ marginLeft: 6, color: 'var(--text-muted)', fontSize: 'var(--font-size-label)', fontWeight: 400 }}>
-                  ({pointCount})
-                </span>
-              )}
-            </button>
-          )
-        })}
+        {entry ? 'No points.' : 'Run to populate the I-O curve.'}
       </div>
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        <div style={{ display: activeTab === 'table' ? 'block' : 'none', height: '100%', overflow: 'auto' }}>
-          <FPspTable entry={entry} onSelect={onSelectPoint} />
-        </div>
-        <div style={{ display: activeTab === 'overtime' ? 'block' : 'none', height: '100%' }}>
-          {/* Incrementing heightSignal whenever THIS tab becomes active
-              forces FPspOverTimeGraph to run its "setSize on heightSignal
-              change" effect — which in turn picks up the container's now-
-              real clientWidth/Height (0 while display:none). Without this
-              the plot stayed stuck at the 400×180 fallback from mount. */}
-          <FPspOverTimeGraph
-            entry={entry}
-            onSelectIdx={onSelectPoint}
-            heightSignal={activeTab === 'overtime' ? 1 : 0}
-          />
-        </div>
+    )
+  }
+  const u = entry.responseUnit || ''
+  const unit = entry.ioUnit ?? 'µA'
+  const i0 = entry.ioInitialIntensity ?? 0
+  const step = entry.ioIntensityStep ?? 0
+
+  return (
+    <div style={{
+      border: '1px solid var(--border)', borderRadius: 4,
+      overflow: 'auto', height: '100%',
+    }}>
+      <table style={{
+        width: '100%', borderCollapse: 'collapse',
+        fontSize: 'var(--font-size-label)', fontFamily: 'var(--font-mono)',
+      }}>
+        <thead>
+          <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left', position: 'sticky', top: 0 }}>
+            <Th>#</Th>
+            <Th>Sweep</Th>
+            <Th>Intensity ({unit})</Th>
+            <Th>Baseline ({u})</Th>
+            <Th>Volley ({u})</Th>
+            <Th>fEPSP amp ({u})</Th>
+            <Th>Slope</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {entry.points.map((p, i) => {
+            const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+            const intensity = i0 + sweepIdx * step
+            const selectedBg = i === entry.selectedIdx
+              ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+              : undefined
+            return (
+              <tr
+                key={i}
+                onClick={() => onSelect(i)}
+                style={{
+                  background: selectedBg ?? 'transparent',
+                  cursor: 'pointer',
+                  borderTop: '1px solid var(--border)',
+                }}
+              >
+                <Td>{i + 1}</Td>
+                <Td>{sweepIdx + 1}</Td>
+                <Td>{intensity.toFixed(2)}</Td>
+                <Td>{p.baseline.toFixed(3)}</Td>
+                <Td>{p.volleyAmp.toFixed(3)}</Td>
+                <Td>{p.fepspAmp.toFixed(3)}</Td>
+                <Td>{p.slope != null ? p.slope.toFixed(3) : '—'}</Td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** uPlot scatter of fEPSP slope (or amplitude) versus stimulus
+ *  intensity — the actual "I-O curve". Clicking a point selects the
+ *  corresponding row in the table. Rebuild-on-data pattern, same
+ *  as the LTP over-time plot. */
+function IOScatter({
+  entry, metric, onSelectIdx, visibilitySignal,
+}: {
+  entry: FPspData | undefined
+  metric: 'slope' | 'amplitude'
+  onSelectIdx: (idx: number) => void
+  /** Incremented by the parent whenever this panel becomes visible
+   *  (tab switched to I-O). Triggers a setSize+redraw after rAF so
+   *  the plot recovers from any 0-dim state the display-toggle put
+   *  it in while the panel was hidden. */
+  visibilitySignal?: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  // Mirror the selected index into a ref so the draw hook picks up
+  // selection changes without having to rebuild the plot — which, if
+  // left in the rebuild-deps, made the scatter visibly flash and the
+  // user's zoom reset on every row click.
+  const selectedRef = useRef<number | null>(entry?.selectedIdx ?? null)
+  selectedRef.current = entry?.selectedIdx ?? null
+
+  // Build the (intensity, y) pairs. Deps are scoped to actual data
+  // fields so a selection change (new entry identity, same points)
+  // does NOT produce new array refs and does NOT trigger rebuild.
+  // Slope is taken absolute — classical fEPSPs have negative slopes
+  // (downward flank to the sink), and plotting |slope| yields a
+  // positive correlation with stimulus intensity which reads more
+  // naturally on the curve.
+  const { xs, ys } = useMemo(() => {
+    if (!entry) return { xs: [] as number[], ys: [] as (number | null)[] }
+    const i0 = entry.ioInitialIntensity ?? 0
+    const step = entry.ioIntensityStep ?? 0
+    const xs: number[] = []
+    const ys: (number | null)[] = []
+    entry.points.forEach((p) => {
+      const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+      xs.push(i0 + sweepIdx * step)
+      if (metric === 'amplitude') {
+        ys.push(Math.abs(p.fepspAmp))
+      } else {
+        ys.push(p.slope != null ? Math.abs(p.slope) : null)
+      }
+    })
+    return { xs, ys }
+    // Intentionally field-scoped — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    entry?.points,
+    entry?.ioInitialIntensity,
+    entry?.ioIntensityStep,
+    metric,
+  ])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!entry || xs.length === 0) return
+
+    const yUnit = entry.responseUnit || ''
+    const yLabel = metric === 'amplitude'
+      ? `|fEPSP amp| (${yUnit})`
+      : `|Slope| (${yUnit}/s)`
+    const xLabel = `Intensity (${entry.ioUnit ?? 'µA'})`
+
+    const opts: uPlot.Options = {
+      width: container.clientWidth || 400,
+      height: Math.max(140, container.clientHeight || 220),
+      scales: { x: { time: false }, y: {} },
+      legend: { show: false },
+      axes: [
+        {
+          stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          label: xLabel,
+          labelSize: 22,
+          labelFont: `${cssVar('--font-size-label')} ${cssVar('--font-ui')}`,
+        },
+        {
+          stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          label: yLabel,
+          labelSize: 22,
+          labelFont: `${cssVar('--font-size-label')} ${cssVar('--font-ui')}`,
+        },
+      ],
+      cursor: { drag: { x: false, y: false } },
+      series: [
+        {},
+        {
+          stroke: cssVar('--trace-color-1'),
+          width: 1.25,
+          points: { show: true, size: 6, stroke: cssVar('--trace-color-1'), fill: cssVar('--trace-color-1') },
+        },
+      ],
+      hooks: {
+        draw: [(u) => drawGraphSelected(u, selectedRef.current)],
+      },
+    }
+    const payload: uPlot.AlignedData = [xs, ys]
+    plotRef.current = new uPlot(opts, payload, container)
+    // Click-to-select: find nearest point by x-distance.
+    const over = container.querySelector<HTMLDivElement>('.u-over')
+    if (over) {
+      const onClick = (ev: MouseEvent) => {
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const u = plotRef.current
+        if (!u) return
+        const xVal = u.posToVal(pxX, 'x')
+        // xs is in sweep-order (often monotonic but may not be strictly
+        // so if sweeps were excluded mid-ramp). Linear scan is fine:
+        // I-O curves have ~10–30 points.
+        let best = -1
+        let bestDist = Infinity
+        for (let i = 0; i < xs.length; i++) {
+          const d = Math.abs(xs[i] - xVal)
+          if (d < bestDist) { bestDist = d; best = i }
+        }
+        if (best >= 0) onSelectIdx(best)
+      }
+      over.addEventListener('click', onClick)
+      // Cleanup handled on next rebuild; the next destroy nukes `over`.
+    }
+    // Deps intentionally exclude `entry` (whole) — selection-only
+    // changes produce a new entry ref, but the memoized xs/ys remain
+    // stable (field-scoped deps above), so the plot keeps its instance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xs, ys, metric, entry?.responseUnit, entry?.ioUnit])
+
+  useEffect(() => { plotRef.current?.redraw() }, [entry?.selectedIdx])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (!u || !el) return
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // When the parent signals the panel has (re)become visible after a
+  // tab switch, resize to the now-measurable container + force a
+  // redraw. Mirrors FPspOverTimeGraph's pattern; without this the
+  // scatter came back blank until the user clicked a control that
+  // changed data (slope/amplitude toggle) and triggered a rebuild.
+  useEffect(() => {
+    if (visibilitySignal == null) return
+    const raf = requestAnimationFrame(() => {
+      const u = plotRef.current
+      const el = containerRef.current
+      if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+        u.redraw()
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [visibilitySignal])
+
+  if (!entry || xs.length === 0) {
+    return (
+      <div style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        {entry ? 'No points yet.' : 'Run to populate the I-O curve.'}
       </div>
+    )
+  }
+  return (
+    <div style={{
+      height: '100%',
+      border: '1px solid var(--border)', borderRadius: 4,
+      background: 'var(--bg-primary)',
+    }}>
+      <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// PPR tab result components
+//
+// Same shape as the I-O panel (table left, scatter right) — but the
+// scatter plots paired-pulse ratio vs sweep index, with the user
+// choosing whether ratio is computed from amplitude or slope. The
+// table shows the full R1/R2/PPR breakdown so mistakes in cursor
+// placement are easy to spot (e.g. an R1 accidentally landing on a
+// flat window gives a PPR that jumps around).
+// ---------------------------------------------------------------------------
+
+function PPRResultsPanel({
+  entry, metric, onSelectPoint, visibilitySignal,
+}: {
+  entry: FPspData | undefined
+  metric: 'amp' | 'slope'
+  onSelectPoint: (idx: number) => void
+  visibilitySignal?: number
+}) {
+  return (
+    <div style={{
+      flex: 1, display: 'flex', gap: 6, minHeight: 0,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <PPRTable entry={entry} onSelect={onSelectPoint} metric={metric} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <PPRScatter
+          entry={entry}
+          metric={metric}
+          onSelectIdx={onSelectPoint}
+          visibilitySignal={visibilitySignal}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Per-sweep PPR table. Row = one sweep. Columns cover both responses
+ *  and both ratios so the user can spot outliers at a glance. The
+ *  currently-active ratio metric (amp vs slope) is highlighted in
+ *  the column header so it's clear which one the scatter is tracking. */
+function PPRTable({
+  entry, onSelect, metric,
+}: {
+  entry: FPspData | undefined
+  onSelect: (idx: number) => void
+  metric: 'amp' | 'slope'
+}) {
+  if (!entry || entry.points.length === 0) {
+    return (
+      <div style={{
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+        border: '1px dashed var(--border)', borderRadius: 4,
+        height: '100%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        {entry ? 'No points.' : 'Run to populate the PPR table.'}
+      </div>
+    )
+  }
+  const u = entry.responseUnit || ''
+  const highlight = (which: 'amp' | 'slope') =>
+    metric === which ? { background: 'rgba(100,181,246,0.12)' } : undefined
+
+  return (
+    <div style={{
+      border: '1px solid var(--border)', borderRadius: 4,
+      overflow: 'auto', height: '100%',
+    }}>
+      <table style={{
+        width: '100%', borderCollapse: 'collapse',
+        fontSize: 'var(--font-size-label)', fontFamily: 'var(--font-mono)',
+      }}>
+        <thead>
+          <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left', position: 'sticky', top: 0 }}>
+            <Th>#</Th>
+            <Th>Sweep</Th>
+            <Th>R1 amp ({u})</Th>
+            <Th>R2 amp ({u})</Th>
+            <Th>R1 slope</Th>
+            <Th>R2 slope</Th>
+            <th style={{ padding: '4px 8px', fontWeight: 600, fontSize: 'var(--font-size-label)', ...highlight('amp') }}>
+              PPR (amp)
+            </th>
+            <th style={{ padding: '4px 8px', fontWeight: 600, fontSize: 'var(--font-size-label)', ...highlight('slope') }}>
+              PPR (slope)
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {entry.points.map((p, i) => {
+            const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+            const selectedBg = i === entry.selectedIdx
+              ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+              : undefined
+            return (
+              <tr
+                key={i}
+                onClick={() => onSelect(i)}
+                style={{
+                  background: selectedBg ?? 'transparent',
+                  cursor: 'pointer',
+                  borderTop: '1px solid var(--border)',
+                }}
+              >
+                <Td>{i + 1}</Td>
+                <Td>{sweepIdx + 1}</Td>
+                <Td>{p.fepspAmp.toFixed(3)}</Td>
+                <Td>{p.fepspAmp2 != null ? p.fepspAmp2.toFixed(3) : '—'}</Td>
+                <Td>{p.slope != null ? p.slope.toFixed(3) : '—'}</Td>
+                <Td>{p.slope2 != null ? p.slope2.toFixed(3) : '—'}</Td>
+                <td style={{ padding: '3px 8px', whiteSpace: 'nowrap', ...highlight('amp') }}>
+                  {p.pprAmp != null ? p.pprAmp.toFixed(3) : '—'}
+                </td>
+                <td style={{ padding: '3px 8px', whiteSpace: 'nowrap', ...highlight('slope') }}>
+                  {p.pprSlope != null ? p.pprSlope.toFixed(3) : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** PPR-over-sweeps scatter. Same rebuild-on-data / redraw-on-select
+ *  pattern as IOScatter. A dashed guide at y=1 makes depression vs
+ *  facilitation readable at a glance (< 1 = depression, > 1 = facilitation). */
+function PPRScatter({
+  entry, metric, onSelectIdx, visibilitySignal,
+}: {
+  entry: FPspData | undefined
+  metric: 'amp' | 'slope'
+  onSelectIdx: (idx: number) => void
+  visibilitySignal?: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const selectedRef = useRef<number | null>(entry?.selectedIdx ?? null)
+  selectedRef.current = entry?.selectedIdx ?? null
+
+  const { xs, ys } = useMemo(() => {
+    if (!entry) return { xs: [] as number[], ys: [] as (number | null)[] }
+    const xs: number[] = []
+    const ys: (number | null)[] = []
+    entry.points.forEach((p) => {
+      const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+      xs.push(sweepIdx + 1)  // 1-based for human display
+      ys.push(metric === 'amp' ? (p.pprAmp ?? null) : (p.pprSlope ?? null))
+    })
+    return { xs, ys }
+    // Field-scoped deps so row-click (selectedIdx change) doesn't rebuild.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry?.points, metric])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!entry || xs.length === 0) return
+
+    const yLabel = metric === 'amp' ? 'PPR (amp)' : 'PPR (slope)'
+    const xLabel = 'Sweep #'
+
+    const opts: uPlot.Options = {
+      width: container.clientWidth || 400,
+      height: Math.max(140, container.clientHeight || 220),
+      scales: { x: { time: false }, y: {} },
+      legend: { show: false },
+      axes: [
+        {
+          stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          label: xLabel,
+          labelSize: 22,
+          labelFont: `${cssVar('--font-size-label')} ${cssVar('--font-ui')}`,
+        },
+        {
+          stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          label: yLabel,
+          labelSize: 22,
+          labelFont: `${cssVar('--font-size-label')} ${cssVar('--font-ui')}`,
+        },
+      ],
+      cursor: { drag: { x: false, y: false } },
+      series: [
+        {},
+        {
+          stroke: cssVar('--trace-color-1'),
+          width: 1.25,
+          points: { show: true, size: 6, stroke: cssVar('--trace-color-1'), fill: cssVar('--trace-color-1') },
+        },
+      ],
+      hooks: {
+        draw: [
+          // Dashed unity line — the "depression vs facilitation"
+          // boundary most readers look for first.
+          (u) => {
+            const ctx = u.ctx
+            const dpr = devicePixelRatio || 1
+            const px1 = u.bbox.left / dpr
+            const px2 = (u.bbox.left + u.bbox.width) / dpr
+            const py = u.valToPos(1, 'y', true) / dpr
+            if (!isFinite(py)) return
+            ctx.save()
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+            ctx.strokeStyle = 'rgba(158,158,158,0.7)'
+            ctx.lineWidth = 1
+            ctx.setLineDash([5, 4])
+            ctx.beginPath()
+            ctx.moveTo(px1, py)
+            ctx.lineTo(px2, py)
+            ctx.stroke()
+            ctx.setLineDash([])
+            ctx.fillStyle = 'rgba(158,158,158,0.9)'
+            ctx.font = `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`
+            ctx.fillText('PPR = 1', px1 + 4, py - 3)
+            ctx.restore()
+          },
+          (u) => drawGraphSelected(u, selectedRef.current),
+        ],
+      },
+    }
+    const payload: uPlot.AlignedData = [xs, ys]
+    plotRef.current = new uPlot(opts, payload, container)
+
+    // Click-to-select: find nearest x (sweep index) in the list.
+    const over = container.querySelector<HTMLDivElement>('.u-over')
+    if (over) {
+      const onClick = (ev: MouseEvent) => {
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const u = plotRef.current
+        if (!u) return
+        const xVal = u.posToVal(pxX, 'x')
+        let best = -1
+        let bestDist = Infinity
+        for (let i = 0; i < xs.length; i++) {
+          const d = Math.abs(xs[i] - xVal)
+          if (d < bestDist) { bestDist = d; best = i }
+        }
+        if (best >= 0) onSelectIdx(best)
+      }
+      over.addEventListener('click', onClick)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xs, ys, metric, entry?.responseUnit])
+
+  useEffect(() => { plotRef.current?.redraw() }, [entry?.selectedIdx])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (!u || !el) return
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (visibilitySignal == null) return
+    const raf = requestAnimationFrame(() => {
+      const u = plotRef.current
+      const el = containerRef.current
+      if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+        u.redraw()
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [visibilitySignal])
+
+  if (!entry || xs.length === 0) {
+    return (
+      <div style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        {entry ? 'No points yet.' : 'Run PPR to populate the ratio scatter.'}
+      </div>
+    )
+  }
+  return (
+    <div style={{
+      height: '100%',
+      border: '1px solid var(--border)', borderRadius: 4,
+      background: 'var(--bg-primary)',
+    }}>
+      <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )
 }

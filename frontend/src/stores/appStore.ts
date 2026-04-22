@@ -219,13 +219,36 @@ function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
 }
 
 /** Load/save fPSP data per-recording via Electron preferences. */
+/** Migrate FPsp entries saved before the I-O/PPR/LTP tab bar landed.
+ *  Old keys were `"${group}:${series}"` (two parts); new keys are
+ *  `"${group}:${series}:${mode}"` (three parts). Old entries also
+ *  lacked a `mode` field. Treat anything missing both as LTP.
+ *  Idempotent: a pass over an already-migrated map returns it as-is. */
+function _migrateFPspCurves(raw: Record<string, any>): Record<string, FPspData> {
+  const out: Record<string, FPspData> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (!v || typeof v !== 'object') continue
+    const parts = k.split(':')
+    if (parts.length === 3) {
+      out[k] = { ...v, mode: v.mode ?? (parts[2] as FPspMode) }
+    } else if (parts.length === 2) {
+      // Legacy pre-tab-bar entry.
+      out[`${k}:ltp`] = { ...v, mode: 'ltp' }
+    } else {
+      // Unrecognised — drop it rather than corrupt the state.
+    }
+  }
+  return out
+}
+
 async function _loadPersistedFPsp(filePath: string): Promise<Record<string, FPspData> | null> {
   const api = window.electronAPI
   if (!api?.getPreferences || !filePath) return null
   try {
     const prefs = (await api.getPreferences()) ?? {}
     const store = prefs.savedFPspCurves as Record<string, any> | undefined
-    return store?.[filePath] ?? null
+    const raw = store?.[filePath]
+    return raw ? _migrateFPspCurves(raw) : null
   } catch {
     return null
   }
@@ -509,6 +532,12 @@ export type FPspMeasurementMethod = 'amplitude' | 'full_slope' | 'range_slope'
 export type FPspPeakDirection = 'auto' | 'negative' | 'positive'
 export type FPspTimeAxis = 'timestamp' | 'index'
 
+/** Which flavour of fPSP analysis an FPspData entry holds. All three
+ *  modes share the same per-sweep measurement machinery (slope, amp,
+ *  baseline, volley/fEPSP values) — they differ only in how the result
+ *  table is presented and which axis is used in the secondary plot. */
+export type FPspMode = 'io' | 'ppr' | 'ltp'
+
 export interface FPspPoint {
   sourceSeries: number       // which series index this bin came from
   binIndex: number           // index WITHIN its source series (0-based)
@@ -526,14 +555,35 @@ export interface FPspPoint {
   slopeHigh: { t: number; v: number } | null
   ratio: number | null
   flagged: boolean
+  // ---- PPR mode only: second response + paired-pulse ratios ----
+  // Populated when the run was in PPR mode (two fEPSP windows per
+  // sweep). Undefined in I-O / LTP entries. Ratios are
+  // second/first, so a PPR < 1 means synaptic depression and > 1
+  // means facilitation.
+  volleyPeak2?: number
+  volleyPeakTs2?: number
+  volleyAmp2?: number
+  fepspPeak2?: number
+  fepspPeakTs2?: number
+  fepspAmp2?: number
+  slope2?: number | null
+  slopeLow2?: { t: number; v: number } | null
+  slopeHigh2?: { t: number; v: number } | null
+  pprAmp?: number | null      // fepspAmp2 / fepspAmp
+  pprSlope?: number | null    // slope2 / slope (both in |abs| terms)
 }
 
 export interface FPspData {
+  /** Which tab this entry was produced from. Distinguishes I-O / PPR
+   *  / LTP runs that may coexist for the same (group, series). Defaults
+   *  to 'ltp' when absent for backward-compat with pre-tab-bar saves. */
+  mode: FPspMode
   channel: number
   responseUnit: string
   /** Primary ("baseline") series index in the file. */
   seriesA: number
-  /** Optional second ("LTP" / post-tetanus) series index. */
+  /** Optional second ("LTP" / post-tetanus) series index. Only used
+   *  in LTP mode. */
   seriesB: number | null
   stimOnsetS: number
   /** Inter-sweep intervals (seconds) parsed from .pgf for each series.
@@ -567,6 +617,31 @@ export interface FPspData {
   normBaselineTo: number     //   concatenated points list)
   points: FPspPoint[]
   selectedIdx: number | null
+  /** I-O mode only: echoed back so the results table and scatter plot
+   *  can label points with their stimulus intensity. Each point's
+   *  intensity is computed as `ioInitialIntensity + sweepIndex * ioIntensityStep`
+   *  on the frontend (preserves intensity alignment across excluded sweeps). */
+  ioInitialIntensity?: number
+  ioIntensityStep?: number
+  /** Unit shown on the intensity axis (µA by default). Not converted
+   *  — purely a label attached to the user's own input. */
+  ioUnit?: string
+  /** Which metric drives the I-O scatter's y-axis: slope (default) or
+   *  amplitude. User-togglable; persisted with the entry. */
+  ioMetric?: 'slope' | 'amplitude'
+  // ---- PPR mode only ----
+  /** Cursor window for the 2nd response's volley / fEPSP. The
+   *  baseline window is shared with the 1st response (field above). */
+  volley2StartS?: number
+  volley2EndS?: number
+  fepsp2StartS?: number
+  fepsp2EndS?: number
+  /** Inter-stimulus interval used for the last "Place V2/F2 from ISI"
+   *  action. Persisted so the control retains the last-used value
+   *  when the window reopens. */
+  pprIsiMs?: number
+  /** Whether the PPR over-time scatter shows amp-ratio or slope-ratio. */
+  pprMetric?: 'amp' | 'slope'
 }
 
 /** Per-series I-V output, keyed in the store by "group:series". */
@@ -955,6 +1030,11 @@ interface AppState {
   runFPsp: (
     group: number, series: number, channel: number,
     params: {
+      /** Which tab the run was triggered from. Defaults to 'ltp' for
+       *  back-compat. The mode determines which slot the result lands
+       *  in (keyed `${group}:${series}:${mode}`) and how the window
+       *  renders the output. */
+      mode?: FPspMode
       /** Optional second (LTP) series in the same group. */
       seriesB?: number | null
       baselineStartS: number
@@ -976,13 +1056,28 @@ interface AppState {
       filterLow?: number
       filterHigh?: number
       filterOrder?: number
+      /** I-O mode only — stored on the entry for display. */
+      ioInitialIntensity?: number
+      ioIntensityStep?: number
+      ioUnit?: string
+      ioMetric?: 'slope' | 'amplitude'
+      /** PPR mode only — 2nd response cursor windows. When mode is
+       *  'ppr' the run fires two parallel `/api/fpsp/run` requests
+       *  (one with V1/F1, one with V2/F2) and merges the points
+       *  frontend-side into a single entry with ratios computed. */
+      volley2StartS?: number
+      volley2EndS?: number
+      fepsp2StartS?: number
+      fepsp2EndS?: number
+      pprIsiMs?: number
+      pprMetric?: 'amp' | 'slope'
     },
   ) => Promise<void>
-  clearFPsp: (group?: number, series?: number) => void
-  selectFPspPoint: (group: number, series: number, idx: number | null) => void
-  setFPspTimeAxis: (group: number, series: number, axis: FPspTimeAxis) => void
-  setFPspNormalize: (group: number, series: number, normalize: boolean) => void
-  setFPspNormBaseline: (group: number, series: number, from: number, to: number) => void
+  clearFPsp: (mode: FPspMode, group?: number, series?: number) => void
+  selectFPspPoint: (mode: FPspMode, group: number, series: number, idx: number | null) => void
+  setFPspTimeAxis: (mode: FPspMode, group: number, series: number, axis: FPspTimeAxis) => void
+  setFPspNormalize: (mode: FPspMode, group: number, series: number, normalize: boolean) => void
+  setFPspNormBaseline: (mode: FPspMode, group: number, series: number, from: number, to: number) => void
   exportFPspCSV: () => Promise<void>
 
   // I-V curve actions
@@ -2517,39 +2612,43 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!backendUrl) return
     set({ loading: true, error: null })
     try {
-      const qs = new URLSearchParams({
-        group: String(group),
-        series: String(series),
-        trace: String(channel),
-        baseline_start_s: String(params.baselineStartS),
-        baseline_end_s: String(params.baselineEndS),
-        volley_start_s: String(params.volleyStartS),
-        volley_end_s: String(params.volleyEndS),
-        fepsp_start_s: String(params.fepspStartS),
-        fepsp_end_s: String(params.fepspEndS),
-        method: params.method,
-        slope_low_pct: String(params.slopeLowPct),
-        slope_high_pct: String(params.slopeHighPct),
-        peak_direction: params.peakDirection,
-        avg_n: String(Math.max(1, Math.round(params.avgN))),
-      })
-      if (params.seriesB != null) {
-        qs.set('series_b', String(params.seriesB))
+      const mode: FPspMode = params.mode ?? 'ltp'
+      // Build a /api/fpsp/run query. The `volS`/`volE`/`fepS`/`fepE`
+      // args let us reuse this for both responses in PPR mode.
+      const buildQuery = (volS: number, volE: number, fepS: number, fepE: number) => {
+        const qs = new URLSearchParams({
+          group: String(group),
+          series: String(series),
+          trace: String(channel),
+          baseline_start_s: String(params.baselineStartS),
+          baseline_end_s: String(params.baselineEndS),
+          volley_start_s: String(volS),
+          volley_end_s: String(volE),
+          fepsp_start_s: String(fepS),
+          fepsp_end_s: String(fepE),
+          method: params.method,
+          slope_low_pct: String(params.slopeLowPct),
+          slope_high_pct: String(params.slopeHighPct),
+          peak_direction: params.peakDirection,
+          avg_n: String(Math.max(1, Math.round(params.avgN))),
+        })
+        if (params.seriesB != null) qs.set('series_b', String(params.seriesB))
+        if (params.sweepIndices && params.sweepIndices.length > 0) {
+          qs.set('sweeps', params.sweepIndices.join(','))
+        }
+        if (params.filterEnabled) {
+          qs.set('filter_enabled', 'true')
+          qs.set('filter_type', params.filterType ?? 'lowpass')
+          qs.set('filter_low', String(params.filterLow ?? 1))
+          qs.set('filter_high', String(params.filterHigh ?? 1000))
+          qs.set('filter_order', String(params.filterOrder ?? 4))
+        }
+        return qs
       }
-      if (params.sweepIndices && params.sweepIndices.length > 0) {
-        qs.set('sweeps', params.sweepIndices.join(','))
-      }
-      if (params.filterEnabled) {
-        qs.set('filter_enabled', 'true')
-        qs.set('filter_type', params.filterType ?? 'lowpass')
-        qs.set('filter_low', String(params.filterLow ?? 1))
-        qs.set('filter_high', String(params.filterHigh ?? 1000))
-        qs.set('filter_order', String(params.filterOrder ?? 4))
-      }
-      const resp = await apiFetch(backendUrl, `/api/fpsp/run?${qs}`)
-      const key = `${group}:${series}`
-      const existing = get().fpspCurves[key]
-      const newPoints: FPspPoint[] = (resp.points ?? []).map((p: any) => ({
+      // Parse a single backend point-dict into an FPspPoint. Used for
+      // the primary response always; the PPR secondary response parses
+      // into a "shadow" list that later gets merged into the primary.
+      const parsePoint = (p: any): FPspPoint => ({
         sourceSeries: Number(p.source_series ?? series),
         binIndex: Number(p.bin_index ?? 0),
         sweepIndices: (p.sweep_indices ?? []).map((x: any) => Number(x)),
@@ -2570,7 +2669,65 @@ export const useAppStore = create<AppState>((set, get) => ({
           : null,
         ratio: p.ratio != null ? Number(p.ratio) : null,
         flagged: Boolean(p.flagged),
-      }))
+      })
+
+      const qs = buildQuery(
+        params.volleyStartS, params.volleyEndS,
+        params.fepspStartS, params.fepspEndS,
+      )
+      // PPR mode: fire the 2nd-response request in parallel with the
+      // 1st. Both use the same baseline window + method/filter; only
+      // the volley/fepsp windows differ. Merged by binIndex below.
+      const wantPPR = mode === 'ppr'
+        && params.volley2StartS != null && params.volley2EndS != null
+        && params.fepsp2StartS != null && params.fepsp2EndS != null
+      const qs2 = wantPPR
+        ? buildQuery(
+            params.volley2StartS!, params.volley2EndS!,
+            params.fepsp2StartS!, params.fepsp2EndS!,
+          )
+        : null
+      const [resp, resp2] = await Promise.all([
+        apiFetch(backendUrl, `/api/fpsp/run?${qs}`),
+        qs2 ? apiFetch(backendUrl, `/api/fpsp/run?${qs2}`) : Promise.resolve(null),
+      ])
+      const key = `${group}:${series}:${mode}`
+      const existing = get().fpspCurves[key]
+      const newPoints: FPspPoint[] = (resp.points ?? []).map(parsePoint)
+
+      // Merge the 2nd-response fields into the primary points (matched
+      // on binIndex + sourceSeries). PPR amp/slope ratios are computed
+      // in |abs| terms so negative-going fEPSPs give sensibly-signed
+      // ratios (both peak amplitudes are negative; R2/R1 is positive).
+      if (wantPPR && resp2) {
+        const second = new Map<string, any>()
+        for (const p of (resp2.points ?? [])) {
+          second.set(`${p.source_series}:${p.bin_index}`, p)
+        }
+        for (const p of newPoints) {
+          const s = second.get(`${p.sourceSeries}:${p.binIndex}`)
+          if (!s) continue
+          p.volleyPeak2 = Number(s.volley_peak ?? 0)
+          p.volleyPeakTs2 = Number(s.volley_peak_t_s ?? 0)
+          p.volleyAmp2 = Number(s.volley_amp ?? 0)
+          p.fepspPeak2 = Number(s.fepsp_peak ?? 0)
+          p.fepspPeakTs2 = Number(s.fepsp_peak_t_s ?? 0)
+          p.fepspAmp2 = Number(s.fepsp_amp ?? 0)
+          p.slope2 = s.slope != null ? Number(s.slope) : null
+          p.slopeLow2 = s.slope_low_point
+            ? { t: Number(s.slope_low_point.t), v: Number(s.slope_low_point.v) }
+            : null
+          p.slopeHigh2 = s.slope_high_point
+            ? { t: Number(s.slope_high_point.t), v: Number(s.slope_high_point.v) }
+            : null
+          const a1 = Math.abs(p.fepspAmp)
+          const a2 = Math.abs(p.fepspAmp2 ?? 0)
+          p.pprAmp = a1 > 0 ? a2 / a1 : null
+          const s1 = p.slope != null ? Math.abs(p.slope) : null
+          const s2Abs = p.slope2 != null ? Math.abs(p.slope2) : null
+          p.pprSlope = (s1 != null && s1 > 0 && s2Abs != null) ? s2Abs / s1 : null
+        }
+      }
 
       // For append mode, only rows from the SAME source-series+bin pair
       // get replaced; everything else stays. Keeps points from seriesB
@@ -2588,6 +2745,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       const next: FPspData = {
+        mode,
         channel,
         responseUnit: String(resp.response_unit ?? existing?.responseUnit ?? ''),
         seriesA: series,
@@ -2617,6 +2775,30 @@ export const useAppStore = create<AppState>((set, get) => ({
         normBaselineTo: existing?.normBaselineTo ?? Math.max(1, Math.min(10, merged.length)),
         points: merged,
         selectedIdx: null,
+        // I-O mode only — preserved on the entry so the scatter plot
+        // and results table can show intensities without re-prompting.
+        ioInitialIntensity: mode === 'io'
+          ? (params.ioInitialIntensity ?? existing?.ioInitialIntensity ?? 0)
+          : existing?.ioInitialIntensity,
+        ioIntensityStep: mode === 'io'
+          ? (params.ioIntensityStep ?? existing?.ioIntensityStep ?? 0)
+          : existing?.ioIntensityStep,
+        ioUnit: mode === 'io'
+          ? (params.ioUnit ?? existing?.ioUnit ?? 'µA')
+          : existing?.ioUnit,
+        ioMetric: mode === 'io'
+          ? (params.ioMetric ?? existing?.ioMetric ?? 'slope')
+          : existing?.ioMetric,
+        // PPR mode only — echoed onto the entry so reopening the
+        // window restores the 5 bands / ISI / metric toggle.
+        volley2StartS: mode === 'ppr' ? params.volley2StartS : existing?.volley2StartS,
+        volley2EndS: mode === 'ppr' ? params.volley2EndS : existing?.volley2EndS,
+        fepsp2StartS: mode === 'ppr' ? params.fepsp2StartS : existing?.fepsp2StartS,
+        fepsp2EndS: mode === 'ppr' ? params.fepsp2EndS : existing?.fepsp2EndS,
+        pprIsiMs: mode === 'ppr' ? (params.pprIsiMs ?? existing?.pprIsiMs) : existing?.pprIsiMs,
+        pprMetric: mode === 'ppr'
+          ? (params.pprMetric ?? existing?.pprMetric ?? 'amp')
+          : existing?.pprMetric,
       }
       set((s) => ({ fpspCurves: { ...s.fpspCurves, [key]: next }, loading: false }))
       _broadcastFPsp(get().fpspCurves)
@@ -2625,18 +2807,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  clearFPsp: (group, series) => {
+  clearFPsp: (mode, group, series) => {
     set((s) => {
       if (group == null || series == null) return { fpspCurves: {} }
-      const key = `${group}:${series}`
+      const key = `${group}:${series}:${mode}`
       const { [key]: _dropped, ...rest } = s.fpspCurves
       return { fpspCurves: rest }
     })
     _broadcastFPsp(get().fpspCurves)
   },
 
-  selectFPspPoint: (group, series, idx) => {
-    const key = `${group}:${series}`
+  selectFPspPoint: (mode, group, series, idx) => {
+    const key = `${group}:${series}:${mode}`
     set((s) => {
       const entry = s.fpspCurves[key]
       if (!entry) return s
@@ -2644,8 +2826,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  setFPspTimeAxis: (group, series, axis) => {
-    const key = `${group}:${series}`
+  setFPspTimeAxis: (mode, group, series, axis) => {
+    const key = `${group}:${series}:${mode}`
     set((s) => {
       const entry = s.fpspCurves[key]
       if (!entry) return s
@@ -2654,8 +2836,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     _broadcastFPsp(get().fpspCurves)
   },
 
-  setFPspNormalize: (group, series, normalize) => {
-    const key = `${group}:${series}`
+  setFPspNormalize: (mode, group, series, normalize) => {
+    const key = `${group}:${series}:${mode}`
     set((s) => {
       const entry = s.fpspCurves[key]
       if (!entry) return s
@@ -2664,8 +2846,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     _broadcastFPsp(get().fpspCurves)
   },
 
-  setFPspNormBaseline: (group, series, from, to) => {
-    const key = `${group}:${series}`
+  setFPspNormBaseline: (mode, group, series, from, to) => {
+    const key = `${group}:${series}:${mode}`
     set((s) => {
       const entry = s.fpspCurves[key]
       if (!entry) return s
@@ -2693,7 +2875,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch { /* ignore */ }
     }
     const header = [
-      'file', 'group', 'source_series', 'bin_index', 'sweep_indices',
+      'file', 'mode', 'group', 'source_series', 'bin_index', 'sweep_indices',
+      'io_intensity', 'io_unit',
       'baseline', 'volley_peak', 'volley_peak_t_s', 'volley_amp',
       'fepsp_peak', 'fepsp_peak_t_s', 'fepsp_amp',
       'ratio', 'flagged',
@@ -2706,14 +2889,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     for (const key of keys) {
       const [g] = key.split(':').map(Number)
       const entry = fpspCurves[key]
+      const mode = entry.mode ?? 'ltp'
       entry.points.forEach((p) => {
         const ival = p.sourceSeries === entry.seriesA
           ? entry.sweepIntervalA
           : (entry.sweepIntervalB || 0)
+        // I-O: one row per sweep; intensity = initial + sweepIndex * step.
+        // Use the first (only) sweep in the bin. For LTP bins containing
+        // multiple sweeps, leave intensity blank.
+        const ioIntensity =
+          mode === 'io' && p.sweepIndices.length === 1 &&
+          entry.ioInitialIntensity != null && entry.ioIntensityStep != null
+            ? (entry.ioInitialIntensity + p.sweepIndices[0] * entry.ioIntensityStep).toFixed(3)
+            : ''
         rows.push([
           JSON.stringify(fileName),
+          mode,
           g, p.sourceSeries, p.binIndex,
           JSON.stringify(p.sweepIndices.join(' ')),
+          ioIntensity,
+          mode === 'io' ? JSON.stringify(entry.ioUnit ?? 'µA') : '',
           p.baseline.toFixed(4),
           p.volleyPeak.toFixed(4),
           p.volleyPeakTs.toFixed(6),

@@ -30,6 +30,11 @@ jobs:
             artifact: NeuroTrace-linux-x64
             builder_flags: --linux AppImage --x64
             freeze: bash scripts/build-backend.sh
+          - os: ubuntu-24.04-arm       # GH-provided ARM64 runner (free for public repos)
+            arch: arm64
+            artifact: NeuroTrace-linux-arm64
+            builder_flags: --linux AppImage --arm64
+            freeze: bash scripts/build-backend.sh
 
     runs-on: ${{ matrix.os }}
 

@@ -41,6 +41,8 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 - **S** — All analysis windows: global decimal-precision setting (currently hardcoded at 3 in most places)
 - **M** — Mini-viewer in every analysis window: a small "go to this sweep in main" button on each table row (currently only some windows do this)
 - **M** — Save/load analysis templates: dump all params of the current analysis window to a named preset, reload on another file
+- **M** — Unify splitter persistence across all analysis windows. AP window already persists `topHeight` to electron prefs under `apWindowUI`; mirror the same pattern (own prefs key, mount-time hydrate, write on splitter `mouseup`) for FPsp / Burst / Cursor / IV / Resistance windows. Each gets its own `<window>WindowUI` slot so they track independently.
+- **M** — Multi-trace overlay in analysis-window mini-viewers — let the user toggle additional channels (most importantly the stimulus trace, but also e.g. an Im monitor) into the same mini-viewer the analysis runs against. Mirrors the main viewer's `Traces` dropdown but per-analysis-window. Useful in the AP window to see the current command alongside Vm without leaving the analysis context; also useful in Burst / FPsp for sanity-checking detection vs the stim line.
 
 ## Data I/O
 
@@ -49,6 +51,24 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 - **M** — Export an analysis window's result table as XLSX (not just CSV) with sheet per series
 - **M** — Drag-and-drop a `.dat` file onto the app window to open it
 - **L** — Session save/load: snapshot of open analysis windows, their params, cursor positions, and results into a single `.ntsession` JSON that reopens on a relaunch
+
+## Export & persistence pipeline (Prism / JSON sidecar)
+
+Coherent pipeline from the Apr 21 brainstorm (`NeuroTrace_brainstorming.md`). Items are deliberately ordered so each one builds on the previous — don't start mid-stack.
+
+- **L** — JSON sidecar persistence: after every analysis run, write a `.<recording>.ntjson` file next to the source recording with `{neurotrace_version, created, recording: {source_file, format, date_recorded}, analyses: {<type>: {timestamp, parameters, results}}}`. No user action required. Schema in brainstorm doc.
+  - **S** — within that: decide overwrite-vs-append when the same analysis is re-run with different parameters. Recommendation from brainstorm: keep last run initially; consider a versioned list later.
+- **L** — GraphPad Prism `.pzfx` export via the `pzfx` Python lib (v0.3.1). New `backend/export/prism.py` with a `PrismExporter` class; one method per analysis type (`fepsp_timecourse`, `input_output`, `paired_pulse`, `iv_curve`, `ap_properties`, `mini_summary`, `burst_summary`, `full_experiment`). **Always export raw replicates, never pre-summarized mean±SEM** — Prism computes stats itself.
+- **M** — Multi-file Prism export flow: user selects N `.ntjson` sidecars (or a folder), NeuroTrace groups by analysis type → one Prism table per type, columns = recordings → single `.pzfx`. Depends on the two items above.
+  - **S** — parameter-mismatch warnings before multi-file export (e.g. different voltage ranges in IO curves across files): list the diverging params, let the user proceed or abort.
+- **S** — Analysis-log sheet in every exported `.pzfx`: software version, commit hash, date, source files, full params used per analysis. Cheap to write, gets quoted in Methods sections.
+
+## Analysis modules — tracked in ROADMAP
+
+These came up in the brainstorm but are module-scale, not tweak-scale — they live in `ROADMAP.md`, listed here only as a reminder they're pending:
+
+- Paired-pulse ratio (single ISI + multi-ISI curves). Distinct from the S-sized "2nd/1st amplitude" measurement already in the FPsp tweaks section.
+- Input-output curve (stimulus intensity vs fEPSP slope). Slope only — curve fitting delegates to the existing fitting module.
 
 ## Cursors & bands
 
@@ -91,6 +111,8 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 - **M** — unit tests for `backend/analysis/*.py` — a handful of synthetic-trace tests per module
 - **M** — structured logging: replace scattered `print()` with loguru or stdlib logging with levels, persisted to a log file
 - **M** — centralized error responses: `HTTPException` with a JSON `{error, detail, suggestion}` shape the frontend can render consistently
+- **M** — ABF end-to-end pass: run every analysis module against representative ABF files (episodic and gap-free, ABF1 + ABF2, multi-channel). Units/scaling are the most likely landmines. Blocks the "representative ABF files" ask in the external-beta plan.
+- **M** — benchmark event and burst detection against Clampfit on a shared fixture set. Publish the comparison table; this is the kind of thing that gets a methods paper cited.
 - **L** — GitHub Actions CI: typecheck, build, py_compile, lint on every push
 
 ## Theme / display
@@ -103,4 +125,5 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 
 - **S** — update `README.md` with current feature list
 - **S** — screenshots in README for each analysis window
+- **S** — start a `CHANGELOG.md` from day one. Cheap now, becomes validation documentation if an industry/CRO customer ever asks for IQ/OQ paperwork later.
 - **M** — per-analysis-window doc page (`docs/analyses/fpsp.md`, etc.) with screenshots + parameter explanations

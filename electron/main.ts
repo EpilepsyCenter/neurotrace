@@ -208,6 +208,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   cursors: 'Cursor Measurements',
   resistance: 'Rs / Rin / Cm',
   iv: 'I-V Curve',
+  action_potential: 'Action Potentials',
   events: 'Event Detection',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',

@@ -18,6 +18,7 @@ from api.iv import router as iv_router
 from api.fpsp import router as fpsp_router
 from api.cursors import router as cursors_router
 from api.bursts import router as bursts_router
+from api.ap import router as ap_router
 
 
 @asynccontextmanager
@@ -28,7 +29,7 @@ async def lifespan(app: FastAPI):
     print("NeuroTrace backend shutting down...")
 
 
-app = FastAPI(title="NeuroTrace Backend", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="NeuroTrace Backend", version="0.2.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,11 +49,12 @@ app.include_router(iv_router, prefix="/api/iv", tags=["iv"])
 app.include_router(fpsp_router, prefix="/api/fpsp", tags=["fpsp"])
 app.include_router(cursors_router, prefix="/api/cursors", tags=["cursors"])
 app.include_router(bursts_router, prefix="/api/bursts", tags=["bursts"])
+app.include_router(ap_router, prefix="/api/ap", tags=["ap"])
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.2.1"}
 
 
 if __name__ == "__main__":

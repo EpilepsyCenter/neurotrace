@@ -313,6 +313,42 @@ function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisD
   } catch { /* ignore */ }
 }
 
+/** AP analyses — same per-recording pattern as FPsp / IV / Cursor.
+ *  Keyed by ${group}:${series} (one detection result per series; the
+ *  three tabs Counting/Kinetics/Phase all read from the same blob). */
+async function _loadPersistedAP(filePath: string): Promise<Record<string, APData> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedAPAnalyses as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch { return null }
+}
+
+async function _savePersistedAP(filePath: string, ap: Record<string, APData>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedAPAnalyses as Record<string, any>) ?? {}
+    if (Object.keys(ap).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = ap
+    }
+    await api.setPreferences({ ...prefs, savedAPAnalyses: store })
+  } catch { /* ignore */ }
+}
+
+function _broadcastAP(apAnalyses: Record<string, APData>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'ap-update', apAnalyses })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 /** Excluded-sweeps persistence — same per-recording pattern as the
  *  other analysis slices. Stored as nested dict keyed by file path,
  *  with each file's value being `Record<"g:s", number[]>`. */
@@ -730,6 +766,129 @@ export interface CursorMeasurement {
   } | null
 }
 
+// ---- Action Potentials analysis ----
+
+export type APThresholdMethod =
+  | 'first_deriv_cutoff'
+  | 'first_deriv_max'
+  | 'third_deriv_cutoff'
+  | 'third_deriv_max'
+  | 'sekerli_I'
+  | 'sekerli_II'
+  | 'leading_inflection'
+  | 'max_curvature'
+
+export type APDetectionMethod = 'auto_rec' | 'auto_spike' | 'manual'
+export type APRheobaseMode = 'record' | 'exact' | 'ramp'
+
+export interface APDetectionParams {
+  method: APDetectionMethod
+  manual_threshold_mv: number
+  min_amplitude_mv: number
+  pos_dvdt_mv_ms: number
+  neg_dvdt_mv_ms: number
+  width_ms: number
+  min_distance_ms: number
+  bounds_start_s: number
+  bounds_end_s: number
+  filter_enabled: boolean
+  filter_type: 'lowpass' | 'highpass' | 'bandpass'
+  filter_low: number
+  filter_high: number
+  filter_order: number
+}
+
+export interface APKineticsParams {
+  threshold_method: APThresholdMethod
+  threshold_cutoff_mv_ms: number
+  threshold_search_ms_before_peak: number
+  sekerli_lower_bound_mv_ms: number
+  rise_low_pct: number
+  rise_high_pct: number
+  decay_low_pct: number
+  decay_high_pct: number
+  decay_end: 'to_threshold' | 'to_fahp'
+  fahp_search_start_ms: number
+  fahp_search_end_ms: number
+  mahp_search_start_ms: number
+  mahp_search_end_ms: number
+  max_slope_window_ms: number
+  interpolate_to_200khz: boolean
+}
+
+export interface APRampParams {
+  t_start_s: number
+  t_end_s: number
+  im_start_pa: number
+  im_end_pa: number
+}
+
+/** One detected spike with all kinetic measurements. `manual` flags
+ *  spikes the user added via left-click (drawn with a ring marker). */
+export interface APPoint {
+  sweep: number
+  spikeIndex: number
+  thresholdVm: number
+  thresholdT: number
+  peakVm: number
+  peakT: number
+  amplitudeMv: number
+  riseTimeS: number | null
+  decayTimeS: number | null
+  halfWidthS: number | null
+  fahpVm: number | null
+  fahpT: number | null
+  mahpVm: number | null
+  mahpT: number | null
+  maxRiseSlopeMvMs: number | null
+  maxDecaySlopeMvMs: number | null
+  manual: boolean
+}
+
+/** Per-sweep counting metrics — one row per analysed sweep. */
+export interface APPerSweep {
+  sweep: number
+  spikeCount: number
+  peakTimes: number[]
+  firstSpikeLatency: number | null
+  meanISI: number | null
+  sfaDivisor: number | null
+  localVariance: number | null
+  imMean: number | null
+  spikeRateHz: number | null
+}
+
+/** User overrides on top of auto-detection. Replayed on every run so
+ *  edits survive parameter tweaks; `Clear manual edits` button drops
+ *  these wholesale. Sweep keys are 0-based; values are peak times in
+ *  seconds within the sweep. */
+export interface APManualEdits {
+  added: Record<number, number[]>
+  removed: Record<number, number[]>
+}
+
+export interface APData {
+  group: number
+  series: number
+  trace: number
+  imTrace: number | null
+  /** Series the Im channel is read from. null = same as `series`. */
+  imSeries: number | null
+  detection: APDetectionParams
+  kinetics: APKineticsParams
+  rheobaseMode: APRheobaseMode
+  rampParams: APRampParams | null
+  manualEdits: APManualEdits
+  perSweep: APPerSweep[]
+  perSpike: APPoint[]
+  fiCurve: { im: number[]; rate: number[]; sweep: number[] } | null
+  rheobase: { mode: APRheobaseMode; value: number | null } | null
+  spikeTimesPerSweep: number[][]
+  selectedSpikeIdx: number | null
+  imOnsetS: number | null
+  samplingRate: number
+}
+
 export interface CursorAnalysisData {
   group: number
   series: number
@@ -863,6 +1022,11 @@ interface AppState {
   // Contains the full slot configuration plus the last run's measurements,
   // so reopening the window on the same file restores the previous state.
   cursorAnalyses: Record<string, CursorAnalysisData>
+
+  // Action Potentials analyses — keyed by `${group}:${series}` so
+  // detection results survive series switches. The three AP-window
+  // tabs (Counting / Kinetics / Phase) all read from the same blob.
+  apAnalyses: Record<string, APData>
   /** Global (per-user, not per-file) UI prefs for the cursor window:
    *  splitter position, visible columns per tab, active tab. */
   cursorWindowUI: CursorWindowUI
@@ -1080,6 +1244,30 @@ interface AppState {
   setFPspNormBaseline: (mode: FPspMode, group: number, series: number, from: number, to: number) => void
   exportFPspCSV: () => Promise<void>
 
+  // Action Potentials actions
+  /** Run the full AP pipeline (detection + counting + optional kinetics)
+   *  on the given series. Replaces any prior result for that
+   *  (group, series). Manual edits + form params get echoed onto the
+   *  resulting entry so closing/reopening the window restores them. */
+  runAP: (
+    group: number, series: number, trace: number,
+    imTrace: number | null,
+    /** Im channel's source series. null = same as Vm series. Used
+     *  when Vm and Im are on different series (common HEKA layout). */
+    imSeries: number | null,
+    sweepIndices: number[] | null,
+    detection: APDetectionParams,
+    kinetics: APKineticsParams,
+    rheobaseMode: APRheobaseMode,
+    rampParams: APRampParams | null,
+    manualEdits: APManualEdits,
+    measureKinetics: boolean,
+  ) => Promise<void>
+  /** Drop AP results for one series (or all if both are null). */
+  clearAP: (group?: number, series?: number) => void
+  /** Highlight one spike row in the per-spike table + on the mini-viewer. */
+  selectAPSpike: (group: number, series: number, idx: number | null) => void
+
   // I-V curve actions
   runIVCurve: (
     group: number, series: number, channel: number,
@@ -1212,6 +1400,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ivCurves: {},
   fpspCurves: {},
   cursorAnalyses: {},
+  apAnalyses: {},
   excludedSweeps: {},
   selectedSweeps: {},
   averagedSweeps: {},
@@ -1531,6 +1720,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       ivCurves: {},
       fpspCurves: {},
       cursorAnalyses: {},
+      apAnalyses: {},
       excludedSweeps: {},
       selectedSweeps: {},
       averagedSweeps: {},
@@ -1604,6 +1794,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // Action Potentials analyses.
+        const savedAP = await _loadPersistedAP(recording.filePath)
+        if (savedAP) {
+          set({ apAnalyses: savedAP })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -2944,6 +3144,131 @@ export const useAppStore = create<AppState>((set, get) => ({
     a.click()
     URL.revokeObjectURL(url)
   },
+
+  // ---- Action Potentials ----
+
+  runAP: async (group, series, trace, imTrace, imSeries, sweepIndices, detection, kinetics, rheobaseMode, rampParams, manualEdits, measureKinetics) => {
+    const { backendUrl } = get()
+    if (!backendUrl) return
+    set({ loading: true, error: null })
+    try {
+      // POST body — params are too nested for a query string. The
+      // backend handles bounds_end_s = 0 as "use full sweep length".
+      const body = {
+        group, series, trace,
+        im_trace: imTrace,
+        im_series: imSeries,
+        sweeps: sweepIndices,
+        detection,
+        kinetics,
+        rheobase_mode: rheobaseMode,
+        ramp_params: rampParams,
+        // Manual edits: convert sparse map keys (numbers) to strings
+        // for the JSON wire (the backend re-parses them as ints).
+        manual_edits: {
+          added: Object.fromEntries(
+            Object.entries(manualEdits.added).filter(([, v]) => v && v.length),
+          ),
+          removed: Object.fromEntries(
+            Object.entries(manualEdits.removed).filter(([, v]) => v && v.length),
+          ),
+        },
+        measure_kinetics: measureKinetics,
+      }
+      const resp = await fetch(`${backendUrl}/api/ap/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) {
+        const txt = await resp.text()
+        throw new Error(txt || `HTTP ${resp.status}`)
+      }
+      const data = await resp.json()
+      // Convert per-sweep + per-spike rows from the snake_case backend
+      // shape into our camelCase APData shape.
+      const perSweep: APPerSweep[] = (data.per_sweep ?? []).map((p: any) => ({
+        sweep: Number(p.sweep ?? 0),
+        spikeCount: Number(p.spike_count ?? 0),
+        peakTimes: (p.peak_times_s ?? []).map((t: any) => Number(t)),
+        firstSpikeLatency: p.first_spike_latency_s != null ? Number(p.first_spike_latency_s) : null,
+        meanISI: p.mean_isi_s != null ? Number(p.mean_isi_s) : null,
+        sfaDivisor: p.sfa_divisor != null ? Number(p.sfa_divisor) : null,
+        localVariance: p.local_variance != null ? Number(p.local_variance) : null,
+        imMean: p.im_mean_pa != null ? Number(p.im_mean_pa) : null,
+        spikeRateHz: p.spike_rate_hz != null ? Number(p.spike_rate_hz) : null,
+      }))
+      const perSpike: APPoint[] = (data.per_spike ?? []).map((p: any) => ({
+        sweep: Number(p.sweep ?? 0),
+        spikeIndex: Number(p.spike_index ?? 0),
+        thresholdVm: Number(p.threshold_vm ?? 0),
+        thresholdT: Number(p.threshold_t_s ?? 0),
+        peakVm: Number(p.peak_vm ?? 0),
+        peakT: Number(p.peak_t_s ?? 0),
+        amplitudeMv: Number(p.amplitude_mv ?? 0),
+        riseTimeS: p.rise_time_s != null ? Number(p.rise_time_s) : null,
+        decayTimeS: p.decay_time_s != null ? Number(p.decay_time_s) : null,
+        halfWidthS: p.half_width_s != null ? Number(p.half_width_s) : null,
+        fahpVm: p.fahp_vm != null ? Number(p.fahp_vm) : null,
+        fahpT: p.fahp_t_s != null ? Number(p.fahp_t_s) : null,
+        mahpVm: p.mahp_vm != null ? Number(p.mahp_vm) : null,
+        mahpT: p.mahp_t_s != null ? Number(p.mahp_t_s) : null,
+        maxRiseSlopeMvMs: p.max_rise_slope_mv_ms != null ? Number(p.max_rise_slope_mv_ms) : null,
+        maxDecaySlopeMvMs: p.max_decay_slope_mv_ms != null ? Number(p.max_decay_slope_mv_ms) : null,
+        manual: Boolean(p.manual),
+      }))
+      const fi = data.fi_curve
+      const fiCurve = fi
+        ? {
+            im: (fi.im ?? []).map((x: any) => Number(x)),
+            rate: (fi.rate ?? []).map((x: any) => Number(x)),
+            sweep: (fi.sweep ?? []).map((x: any) => Number(x)),
+          }
+        : null
+      const next: APData = {
+        group, series, trace, imTrace, imSeries,
+        detection, kinetics,
+        rheobaseMode,
+        rampParams,
+        manualEdits,
+        perSweep,
+        perSpike,
+        fiCurve,
+        rheobase: data.rheobase ?? null,
+        spikeTimesPerSweep: (data.spike_times_per_sweep ?? []).map(
+          (xs: any) => (xs ?? []).map((t: any) => Number(t)),
+        ),
+        selectedSpikeIdx: null,
+        imOnsetS: data.im_onset_s != null ? Number(data.im_onset_s) : null,
+        samplingRate: Number(data.sampling_rate ?? 0),
+      }
+      const key = `${group}:${series}`
+      set((s) => ({ apAnalyses: { ...s.apAnalyses, [key]: next }, loading: false }))
+      _broadcastAP(get().apAnalyses)
+    } catch (err: any) {
+      set({ error: err.message, loading: false })
+    }
+  },
+
+  clearAP: (group, series) => {
+    set((s) => {
+      if (group == null || series == null) return { apAnalyses: {} }
+      const key = `${group}:${series}`
+      const { [key]: _dropped, ...rest } = s.apAnalyses
+      return { apAnalyses: rest }
+    })
+    _broadcastAP(get().apAnalyses)
+  },
+
+  selectAPSpike: (group, series, idx) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.apAnalyses[key]
+      if (!entry) return s
+      return { apAnalyses: { ...s.apAnalyses, [key]: { ...entry, selectedSpikeIdx: idx } } }
+    })
+    _broadcastAP(get().apAnalyses)
+  },
 }))
 
 /** Normalize a single-sweep burst-detector response into BurstRecord[]. */
@@ -3034,6 +3359,16 @@ useAppStore.subscribe((state) => {
   _lastPersistedCursorRef = state.cursorAnalyses
   if (state.recording?.filePath) {
     _savePersistedCursors(state.recording.filePath, state.cursorAnalyses)
+  }
+})
+
+// AP-analyses persistence subscribe.
+let _lastPersistedAPRef: Record<string, APData> | null = null
+useAppStore.subscribe((state) => {
+  if (state.apAnalyses === _lastPersistedAPRef) return
+  _lastPersistedAPRef = state.apAnalyses
+  if (state.recording?.filePath) {
+    _savePersistedAP(state.recording.filePath, state.apAnalyses)
   }
 })
 

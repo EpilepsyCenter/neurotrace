@@ -227,6 +227,7 @@ export function CursorPanel() {
             ivCurves: state.ivCurves,
             fpspCurves: state.fpspCurves,
             cursorAnalyses: state.cursorAnalyses,
+            apAnalyses: state.apAnalyses,
             excludedSweeps: state.excludedSweeps,
             averagedSweeps: state.averagedSweeps,
           })
@@ -260,6 +261,12 @@ export function CursorPanel() {
         // the window showed defaults.
         if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
           useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+        }
+        // AP analyses pushed from the analysis window — same purpose
+        // as the cursor-analyses adoption above (main window owns
+        // disk persistence).
+        if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
+          useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
         }
         // Excluded-sweep changes from any window — adopt so the main
         // store persists to electron prefs and other windows see the

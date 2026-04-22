@@ -64,6 +64,14 @@ export function TraceViewer() {
   const fieldBurstsRef = useRef(useAppStore.getState().fieldBursts)
   const currentSweepRef = useRef(useAppStore.getState().currentSweep)
   const showBurstMarkersRef = useRef(useAppStore.getState().showBurstMarkers)
+  // AP-marker refs — same pattern as bursts. Drawn always when an
+  // entry exists for the current group/series; toggle could be added
+  // later mirroring the bursts checkbox.
+  const apAnalysesRef = useRef(useAppStore.getState().apAnalyses)
+  // Latest traceData snapshot — read from drawCursors when painting
+  // counting-only (no kinetics) AP markers, so we can look up the
+  // y-value at a peak time without relying on react render cycles.
+  const traceDataRef = useRef(useAppStore.getState().traceData)
   const showCoordinatesRef = useRef(useAppStore.getState().showCoordinates)
   const coordTooltipRef = useRef<HTMLDivElement>(null)
 
@@ -89,6 +97,7 @@ export function TraceViewer() {
     currentSweep,
     fieldBursts,
     showBurstMarkers,
+    apAnalyses,
     showCoordinates,
     toggleCoordinates,
   } = useAppStore()
@@ -126,6 +135,8 @@ export function TraceViewer() {
   fieldBurstsRef.current = fieldBursts
   currentSweepRef.current = currentSweep
   showBurstMarkersRef.current = showBurstMarkers
+  apAnalysesRef.current = apAnalyses
+  traceDataRef.current = traceData
   showCoordinatesRef.current = showCoordinates
 
   const [hoverCursor, setHoverCursor] = useState<string>('')
@@ -305,6 +316,159 @@ export function TraceViewer() {
         ctx.lineTo(px1, py1)
         ctx.stroke()
         ctx.setLineDash([])
+      }
+    }
+
+    // ---- Action-Potential markers ----
+    // Same approach as bursts — independent layer, reads the
+    // current group/series's AP entry and draws spike-peak dots
+    // (plus threshold dots when kinetics were measured) on the
+    // current sweep. Y-values are raw signal so subtract yOffset
+    // when zero-offset is on.
+    const apKey = `${st.currentGroup}:${st.currentSeries}`
+    const ap = apAnalysesRef.current[apKey]
+    if (ap) {
+      const xScale2 = u.scales.x
+      const xMin2 = xScale2?.min ?? -Infinity
+      const xMax2 = xScale2?.max ?? Infinity
+      const sweep = currentSweepRef.current
+      // Per-sweep peak times are the cheapest source — they exist
+      // even when kinetics weren't measured. perSpike adds threshold,
+      // amplitude, etc. when available; we use it to also dot the
+      // threshold for visual context.
+      const ps = ap.perSweep.find((p) => p.sweep === sweep)
+      const peakTimes = ps?.peakTimes ?? []
+      const sweepSpikes = ap.perSpike.filter((sp) => sp.sweep === sweep)
+      const drawAPDot = (px: number, py: number, color: string, manual: boolean = false) => {
+        if (!isFinite(px) || !isFinite(py)) return
+        ctx.beginPath()
+        ctx.arc(px, py, 4, 0, 2 * Math.PI)
+        ctx.fillStyle = color
+        ctx.fill()
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1
+        ctx.stroke()
+        if (manual) {
+          ctx.beginPath()
+          ctx.arc(px, py, 7, 0, 2 * Math.PI)
+          ctx.strokeStyle = color
+          ctx.lineWidth = 1.2
+          ctx.stroke()
+        }
+      }
+      if (sweepSpikes.length > 0) {
+        // Color scheme matches the AP-window viewer's legend:
+        //   peak       = #e57373 (red)
+        //   threshold  = #9e9e9e (grey)
+        //   FWHM tips  = #ffeb3b (yellow)
+        //   fAHP       = #ffb74d (orange)
+        //   mAHP       = #ff7043 (darker orange)
+        const td = traceDataRef.current
+        const tt = td?.time
+        const tv = td?.values
+        for (const sp of sweepSpikes) {
+          if (sp.peakT < xMin2 || sp.peakT > xMax2) continue
+          // Peak (always)
+          const px = u.valToPos(sp.peakT, 'x', true) / dpr
+          const py = u.valToPos(sp.peakVm - yOffset, 'y', true) / dpr
+          drawAPDot(px, py, '#e57373', sp.manual)
+          // Threshold (when kinetics measured)
+          if (sp.thresholdT !== 0 || sp.thresholdVm !== 0) {
+            const tpx = u.valToPos(sp.thresholdT, 'x', true) / dpr
+            const tpy = u.valToPos(sp.thresholdVm - yOffset, 'y', true) / dpr
+            drawAPDot(tpx, tpy, '#9e9e9e')
+          }
+          // FWHM crossings — find them on the main viewer's trace
+          // data using the same walk-the-samples approach as the
+          // AP window. Adds two small yellow dots + a dashed line
+          // at the half-amplitude level.
+          if (
+            sp.halfWidthS != null && sp.amplitudeMv > 0 &&
+            tt && tv && tt.length > 0
+          ) {
+            const halfV = sp.thresholdVm + sp.amplitudeMv / 2
+            const tLo = sp.thresholdT
+            const tHi = sp.peakT + sp.halfWidthS + 0.005
+            const findCross = (t0: number, t1: number, ascending: boolean): number | null => {
+              let prevT = -Infinity, prevV = NaN
+              for (let i = 0; i < tt.length; i++) {
+                const t = tt[i]
+                if (t < t0) { prevT = t; prevV = tv[i]; continue }
+                if (t > t1) break
+                const v = tv[i]
+                const above = v >= halfV
+                if (isFinite(prevV)) {
+                  const wasAbove = prevV >= halfV
+                  if (ascending && !wasAbove && above) {
+                    const frac = (halfV - prevV) / (v - prevV)
+                    return prevT + frac * (t - prevT)
+                  }
+                  if (!ascending && wasAbove && !above) {
+                    const frac = (halfV - prevV) / (v - prevV)
+                    return prevT + frac * (t - prevT)
+                  }
+                }
+                prevT = t; prevV = v
+              }
+              return null
+            }
+            const tLeft = findCross(tLo, sp.peakT, true)
+            const tRight = findCross(sp.peakT, tHi, false)
+            if (tLeft != null && tRight != null) {
+              const pxL = u.valToPos(tLeft, 'x', true) / dpr
+              const pyL = u.valToPos(halfV - yOffset, 'y', true) / dpr
+              const pxR = u.valToPos(tRight, 'x', true) / dpr
+              const pyR = u.valToPos(halfV - yOffset, 'y', true) / dpr
+              if (isFinite(pxL) && isFinite(pyL) && isFinite(pxR) && isFinite(pyR)) {
+                ctx.save()
+                ctx.strokeStyle = '#ffeb3b'
+                ctx.lineWidth = 1
+                ctx.setLineDash([3, 3])
+                ctx.beginPath()
+                ctx.moveTo(pxL, pyL); ctx.lineTo(pxR, pyR)
+                ctx.stroke()
+                ctx.setLineDash([])
+                ctx.restore()
+                drawAPDot(pxL, pyL, '#ffeb3b')
+                drawAPDot(pxR, pyR, '#ffeb3b')
+              }
+            }
+          }
+          // fAHP
+          if (sp.fahpVm != null && sp.fahpT != null) {
+            const px2 = u.valToPos(sp.fahpT, 'x', true) / dpr
+            const py2 = u.valToPos(sp.fahpVm - yOffset, 'y', true) / dpr
+            drawAPDot(px2, py2, '#ffb74d')
+          }
+          // mAHP
+          if (sp.mahpVm != null && sp.mahpT != null) {
+            const px3 = u.valToPos(sp.mahpT, 'x', true) / dpr
+            const py3 = u.valToPos(sp.mahpVm - yOffset, 'y', true) / dpr
+            drawAPDot(px3, py3, '#ff7043')
+          }
+        }
+      } else if (peakTimes.length > 0) {
+        // Counting-only fallback: dot at peak time using the
+        // displayed-trace y-value (kinetics weren't measured so we
+        // don't know peak Vm to a high precision).
+        const td = traceDataRef.current
+        if (td && td.time && td.values) {
+          for (const t of peakTimes) {
+            if (t < xMin2 || t > xMax2) continue
+            // Nearest sample (linear scan — typical sweeps have a few
+            // hundred AP markers max; binary search would be premature).
+            let nearestIdx = 0
+            let bestDist = Infinity
+            for (let i = 0; i < td.time.length; i++) {
+              const d = Math.abs(td.time[i] - t)
+              if (d < bestDist) { bestDist = d; nearestIdx = i }
+            }
+            const y = td.values[nearestIdx]
+            const px = u.valToPos(t, 'x', true) / dpr
+            const py = u.valToPos(y, 'y', true) / dpr
+            drawAPDot(px, py, '#e57373', false)
+          }
+        }
       }
     }
   }
@@ -912,7 +1076,7 @@ export function TraceViewer() {
   // ================================================================
   useEffect(() => {
     drawCursors()
-  }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers])
+  }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers, apAnalyses])
 
   // Hide the coordinate tooltip immediately when the toggle flips off.
   useEffect(() => {

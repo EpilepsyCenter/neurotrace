@@ -6,6 +6,7 @@ import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
 import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
 import { FPspWindow } from './components/AnalysisWindows/FPspWindow'
 import { CursorAnalysisWindow } from './components/AnalysisWindows/CursorAnalysisWindow'
+import { APWindow } from './components/AnalysisWindows/APWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -131,6 +132,9 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.cursorAnalyses) {
             useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
           }
+          if (ev.data.apAnalyses) {
+            useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
+          }
           if (ev.data.excludedSweeps) {
             useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
           }
@@ -146,6 +150,9 @@ export function AnalysisWindow({ view }: { view: string }) {
         }
         if (ev.data?.type === 'cursor-analyses-update' && ev.data.cursorAnalyses) {
           useAppStore.setState({ cursorAnalyses: ev.data.cursorAnalyses })
+        }
+        if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
+          useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
         }
         if (ev.data?.type === 'excluded-update' && ev.data.excludedSweeps) {
           useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
@@ -171,6 +178,7 @@ export function AnalysisWindow({ view }: { view: string }) {
     cursors: 'Cursor Measurements',
     resistance: 'Rs / Rin / Cm',
     iv: 'I-V Curve',
+    action_potential: 'Action Potentials',
     events: 'Event Detection',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
@@ -265,6 +273,14 @@ export function AnalysisWindow({ view }: { view: string }) {
             mainSeries={mainSeries}
             mainTrace={mainTrace}
             cursors={cursors}
+          />
+        ) : view === 'action_potential' ? (
+          <APWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
           />
         ) : (
           <div style={{

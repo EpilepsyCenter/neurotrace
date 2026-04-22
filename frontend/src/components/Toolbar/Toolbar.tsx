@@ -8,6 +8,7 @@ const ANALYSIS_TYPES = [
   { type: 'cursors', label: 'Cursor Measurements' },
   { type: 'resistance', label: 'Rs / Rin / Cm' },
   { type: 'iv', label: 'I-V Curve' },
+  { type: 'action_potential', label: 'Action Potentials' },
   { type: 'events', label: 'Event Detection' },
   { type: 'bursts', label: 'Burst Detection' },
   { type: 'field_potential', label: 'Field Potential' },

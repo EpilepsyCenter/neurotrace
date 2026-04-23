@@ -170,23 +170,84 @@ export function FieldBurstWindow({
     return defaults
   })
 
-  // Draggable splitter between mini-viewer and table.
+  // Splitters — both persist to Electron prefs under burstWindowUI so
+  // the layout survives window reopens. Same recipe as AP/FPsp/IV/
+  // Resistance. Hydrate on mount, write on mouseup only.
   const [miniHeight, setMiniHeight] = useState(340)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const ui = prefs?.burstWindowUI
+        if (cancelled || !ui) return
+        if (typeof ui.leftPanelWidth === 'number'
+            && ui.leftPanelWidth >= 200 && ui.leftPanelWidth <= 500) {
+          setLeftPanelWidth(ui.leftPanelWidth)
+        }
+        if (typeof ui.miniHeight === 'number'
+            && ui.miniHeight >= 150 && ui.miniHeight <= 800) {
+          setMiniHeight(ui.miniHeight)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const writeUIPref = useCallback(async (patch: Record<string, any>) => {
+    try {
+      const api = window.electronAPI
+      if (!api?.getPreferences || !api?.setPreferences) return
+      const prefs = (await api.getPreferences()) ?? {}
+      const next = { ...(prefs.burstWindowUI ?? {}), ...patch }
+      await api.setPreferences({ ...prefs, burstWindowUI: next })
+    } catch { /* ignore */ }
+  }, [])
   const onSplitterMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
     const startY = e.clientY
     const startH = miniHeight
+    let latest = startH
     const onMove = (ev: MouseEvent) => {
       const dy = ev.clientY - startY
-      setMiniHeight(Math.max(150, Math.min(800, startH + dy)))
+      latest = Math.max(150, Math.min(800, startH + dy))
+      setMiniHeight(latest)
     }
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      writeUIPref({ miniHeight: latest })
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
   }
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = leftPanelWidth
+    let latest = startW
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      latest = Math.max(200, Math.min(500, startW + dx))
+      setLeftPanelWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeUIPref({ leftPanelWidth: latest })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
+  // Unified Sweeps-scope dropdown. Burst detection supports only two
+  // scopes (single sweep vs the whole series) — no "range" option,
+  // since the backend doesn't take a sweep-subset for this analysis.
+  type RunMode = 'all' | 'one'
+  const [runMode, setRunMode] = useState<RunMode>('all')
+  const [sweepOne, setSweepOne] = useState(1)
 
   // Rehydrate the form from the store's per-series blob whenever we
   // "land on" a (group, series) pair that has saved params. Matches the
@@ -313,11 +374,13 @@ export function FieldBurstWindow({
     })
   }
 
-  const onRunSweep = () => {
-    runFieldBurstsOnSweep(group, series, previewSweep, channel, params)
-  }
-  const onRunSeries = () => {
-    runFieldBurstsOnSeries(group, series, channel, params)
+  const onRun = () => {
+    if (runMode === 'all') {
+      runFieldBurstsOnSeries(group, series, channel, params)
+    } else {
+      const idx = Math.max(0, Math.min(totalSweeps - 1, sweepOne - 1))
+      runFieldBurstsOnSweep(group, series, idx, channel, params)
+    }
   }
 
   const onSelectRow = (idx: number) => {
@@ -389,172 +452,274 @@ export function FieldBurstWindow({
       gap: 10,
       minHeight: 0,
     }}>
-      {/* Top bar: selectors */}
+      {/* Top bar: scoping selectors only (Group/Series/Channel/Sweep).
+          Method + Baseline live in the LEFT panel now. */}
       <TopBar
         fileInfo={fileInfo}
         group={group} setGroup={setGroup}
         series={series} setSeries={setSeries}
         channels={channels} channel={channel} setChannel={setChannel}
-        method={method} setMethod={onMethodChange}
-        baselineMode={baselineMode} setBaselineMode={onBaselineModeChange}
         previewSweep={previewSweep} setPreviewSweep={setPreviewSweep}
         totalSweeps={totalSweeps}
       />
 
-      {/* Params form */}
-      <ParamsForm
-        method={method}
-        baselineMode={baselineMode}
-        params={params}
-        onChange={onParamChange}
-        onChangeRaw={onParamChangeRaw}
-      />
-
-      {/* Run buttons */}
-      <div style={{ display: 'flex', gap: 6 }}>
-        <button className="btn btn-primary" onClick={onRunSweep} disabled={loading || !fileInfo}>
-          {loading ? 'Running…' : `Run on sweep ${previewSweep + 1}`}
-        </button>
-        <button className="btn" onClick={onRunSeries} disabled={loading || !fileInfo}>
-          Run on series
-        </button>
-        <button className="btn" onClick={() => clearFieldBursts(group, series)} disabled={!entry}>
-          Clear
-        </button>
-        <button
-          className="btn"
-          onClick={() => exportFieldBurstsCSV()}
-          disabled={Object.keys(fieldBursts).length === 0}
-          style={{ marginLeft: 'auto' }}
-        >
-          Export CSV
-        </button>
-      </div>
-
-      {/* Error banner */}
-      {error && (
-        <div style={{
-          padding: '6px 10px',
-          background: 'var(--bg-error, #5c1b1b)',
-          color: '#fff',
-          borderRadius: 3,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          fontSize: 'var(--font-size-xs)',
-        }}>
-          <span style={{ flex: 1 }}>⚠ {error}</span>
-          <button
-            className="btn"
-            onClick={() => setError(null)}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-          >dismiss</button>
-        </div>
-      )}
-
-      {/* Baseline + threshold + signal summary. Displayed after any run so
-          the user can see why detection returned few or zero bursts. */}
-      {entry && (
-        <div style={{
-          fontSize: 'var(--font-size-label)',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-          background: 'var(--bg-primary)',
-          padding: '4px 8px',
-          borderRadius: 3,
-          border: '1px solid var(--border)',
-          lineHeight: 1.6,
-        }}>
-          <div>
-            <strong style={{ color: 'var(--text-primary)' }}>{entry.bursts.length}</strong> bursts
-            {' · '}baseline = {entry.baselineValue.toFixed(3)}
-            {entry.thresholdHigh != null && ` · thr ↑ ${entry.thresholdHigh.toFixed(3)}`}
-            {entry.thresholdLow != null && ` · thr ↓ ${entry.thresholdLow.toFixed(3)}`}
-          </div>
-          {entry.diag && (
-            <div style={{ color: 'var(--text-muted)' }}>
-              signal: median {entry.diag.median.toFixed(3)}, MAD {entry.diag.mad.toFixed(3)},
-              range [{entry.diag.min.toFixed(3)}, {entry.diag.max.toFixed(3)}],
-              max |dev| {entry.diag.maxAbsDev.toFixed(3)} · {entry.diag.durationS.toFixed(1)} s
-              {' '}({entry.diag.nSamples.toString()} samples)
-            </div>
-          )}
-          {entry.bursts.length === 0 && entry.diag && entry.thresholdHigh != null && (
-            <div style={{ color: 'var(--accent)', fontStyle: 'italic' }}>
-              No bursts above threshold. Max |signal − baseline| = {Math.max(
-                Math.abs(entry.diag.max - entry.baselineValue),
-                Math.abs(entry.diag.min - entry.baselineValue),
-              ).toFixed(3)} · threshold at {Math.abs(entry.thresholdHigh - entry.baselineValue).toFixed(3)}.
-              Try lowering <code>n_sd</code>, switching baseline mode, or raising <code>baseline_percentile</code>.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Split area: mini-viewer (top, resizable) + table (bottom, scroll).
-          The flex:1 parent keeps them filling whatever vertical space remains
-          below the header rows. minHeight:0 is required so children can
-          actually shrink and the table's internal scroll takes effect. */}
+      {/* Main body: two-column flex. LEFT = params column (scrollable
+          with Run controls pinned to its bottom); RIGHT = viewer +
+          results. Same layout as APWindow/FPspWindow/IVCurveWindow/
+          ResistanceWindow. */}
       <div style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
       }}>
-        <div style={{ height: miniHeight, minHeight: 150, flexShrink: 0 }}>
-          <BurstSweepViewer
-            backendUrl={backendUrl}
-            entry={entry}
-            liveParams={params}
-            group={group}
-            series={series}
-            channel={channel}
-            sweep={previewSweep}
-            viewport={viewport}
-            setViewport={setViewport}
-            heightSignal={miniHeight}
-            onAddBurst={onAddManualBurst}
-            onRemoveBurst={onRemoveBurstAt}
-            zeroOffset={zeroOffset}
-            onZeroOffsetChange={setZeroOffset}
-            theme={theme}
-            fontSize={fontSize}
-          />
-        </div>
+        {/* LEFT PANEL */}
+        <div style={{
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid var(--border)',
+        }}>
+          {/* Scrollable param sections. Run controls + error banner
+              sit outside the scrollable so they're always visible. */}
+          <div style={{
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,
+          }}>
+            {/* Method + Baseline-mode dropdowns. These two drive which
+                params show in ParamsForm below, so they live at the
+                top of the left panel. */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 6,
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+            }}>
+              <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)', gap: 2 }}>
+                <span style={{ color: 'var(--text-muted)' }}>Method</span>
+                <select value={method} onChange={(e) => onMethodChange(e.target.value as Method)}>
+                  <option value="threshold">Threshold</option>
+                  <option value="oscillation">Oscillation envelope</option>
+                  <option value="isi">ISI clustering</option>
+                </select>
+              </label>
+              {method !== 'isi' && (
+                <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)', gap: 2 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Baseline</span>
+                  <select value={baselineMode} onChange={(e) => onBaselineModeChange(e.target.value as BaselineMode)}>
+                    <option value="percentile">Percentile (default)</option>
+                    <option value="robust">Robust (median + MAD)</option>
+                    <option value="rolling">Rolling median</option>
+                    <option value="fixed_start">Fixed start</option>
+                  </select>
+                </label>
+              )}
+            </div>
 
-        {/* Draggable splitter */}
+            {/* Params form */}
+            <ParamsForm
+              method={method}
+              baselineMode={baselineMode}
+              params={params}
+              onChange={onParamChange}
+              onChangeRaw={onParamChangeRaw}
+            />
+          </div>
+
+          {/* Pinned footer: Run + Sweeps dropdown (all/one), then
+              secondary Clear + Export CSV below a separator. */}
+          <div style={{
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }}>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={loading || !fileInfo}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {loading ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={runMode}
+                onChange={(e) => setRunMode(e.target.value as RunMode)}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {/* Secondary actions — smaller, visually subordinate. */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={() => clearFieldBursts(group, series)} disabled={!entry}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn"
+                onClick={() => exportFieldBurstsCSV()}
+                disabled={Object.keys(fieldBursts).length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Export CSV
+              </button>
+            </div>
+          </div>
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+            </div>
+          )}
+        </div>{/* close LEFT panel */}
+
+        {/* Vertical splitter between LEFT and RIGHT. */}
         <div
-          onMouseDown={onSplitterMouseDown}
+          onMouseDown={onLeftSplitMouseDown}
+          title="Drag to resize"
           style={{
-            height: 6,
-            cursor: 'row-resize',
+            width: 3, flexShrink: 0, cursor: 'col-resize',
             background: 'var(--border)',
-            flexShrink: 0,
             position: 'relative',
           }}
-          title="Drag to resize"
         >
           <div style={{
-            position: 'absolute',
-            left: '50%',
-            top: 1,
-            transform: 'translateX(-50%)',
-            width: 40,
-            height: 4,
-            background: 'var(--text-muted)',
-            borderRadius: 2,
-            opacity: 0.5,
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
           }} />
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-          <BurstTable
-            bursts={entry?.bursts ?? []}
-            selectedIdx={entry?.selectedIdx ?? null}
-            onSelect={onSelectRow}
-          />
-        </div>
-      </div>
+        {/* RIGHT PANEL: viewer + horizontal splitter + summary strip + table. */}
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
+        }}>
+          <div style={{ height: miniHeight, minHeight: 150, flexShrink: 0 }}>
+            <BurstSweepViewer
+              backendUrl={backendUrl}
+              entry={entry}
+              liveParams={params}
+              group={group}
+              series={series}
+              channel={channel}
+              sweep={previewSweep}
+              viewport={viewport}
+              setViewport={setViewport}
+              heightSignal={miniHeight}
+              onAddBurst={onAddManualBurst}
+              onRemoveBurst={onRemoveBurstAt}
+              zeroOffset={zeroOffset}
+              onZeroOffsetChange={setZeroOffset}
+              theme={theme}
+              fontSize={fontSize}
+            />
+          </div>
+
+          {/* Horizontal splitter — thin (3px hit / 2px grip). */}
+          <div
+            onMouseDown={onSplitterMouseDown}
+            style={{
+              height: 3,
+              cursor: 'row-resize',
+              background: 'var(--border)',
+              flexShrink: 0,
+              position: 'relative',
+            }}
+            title="Drag to resize"
+          >
+            <div style={{
+              position: 'absolute', left: '50%', top: 0,
+              transform: 'translateX(-50%)',
+              width: 40, height: 2,
+              background: 'var(--text-muted)',
+              borderRadius: 1, opacity: 0.5,
+            }} />
+          </div>
+
+          {/* Summary strip — baseline + threshold + signal diag. Sits
+              right above the table so the "why did I get zero bursts"
+              context is visually adjacent to the results. */}
+          {entry && (
+            <div style={{
+              flexShrink: 0,
+              fontSize: 'var(--font-size-label)',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-primary)',
+              padding: '4px 8px',
+              borderRadius: 3,
+              border: '1px solid var(--border)',
+              marginTop: 6,
+              lineHeight: 1.6,
+            }}>
+              <div>
+                <strong style={{ color: 'var(--text-primary)' }}>{entry.bursts.length}</strong> bursts
+                {' · '}baseline = {entry.baselineValue.toFixed(3)}
+                {entry.thresholdHigh != null && ` · thr ↑ ${entry.thresholdHigh.toFixed(3)}`}
+                {entry.thresholdLow != null && ` · thr ↓ ${entry.thresholdLow.toFixed(3)}`}
+              </div>
+              {entry.diag && (
+                <div style={{ color: 'var(--text-muted)' }}>
+                  signal: median {entry.diag.median.toFixed(3)}, MAD {entry.diag.mad.toFixed(3)},
+                  range [{entry.diag.min.toFixed(3)}, {entry.diag.max.toFixed(3)}],
+                  max |dev| {entry.diag.maxAbsDev.toFixed(3)} · {entry.diag.durationS.toFixed(1)} s
+                  {' '}({entry.diag.nSamples.toString()} samples)
+                </div>
+              )}
+              {entry.bursts.length === 0 && entry.diag && entry.thresholdHigh != null && (
+                <div style={{ color: 'var(--accent)', fontStyle: 'italic' }}>
+                  No bursts above threshold. Max |signal − baseline| = {Math.max(
+                    Math.abs(entry.diag.max - entry.baselineValue),
+                    Math.abs(entry.diag.min - entry.baselineValue),
+                  ).toFixed(3)} · threshold at {Math.abs(entry.thresholdHigh - entry.baselineValue).toFixed(3)}.
+                  Try lowering <code>n_sd</code>, switching baseline mode, or raising <code>baseline_percentile</code>.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Burst table. */}
+          <div style={{
+            flex: 1, overflow: 'auto', minHeight: 0,
+            marginTop: 6,
+            border: '1px solid var(--border)', borderRadius: 4,
+          }}>
+            <BurstTable
+              bursts={entry?.bursts ?? []}
+              selectedIdx={entry?.selectedIdx ?? null}
+              onSelect={onSelectRow}
+            />
+          </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }
@@ -566,16 +731,12 @@ export function FieldBurstWindow({
 function TopBar({
   fileInfo, group, setGroup, series, setSeries,
   channels, channel, setChannel,
-  method, setMethod,
-  baselineMode, setBaselineMode,
   previewSweep, setPreviewSweep, totalSweeps,
 }: {
   fileInfo: FileInfo | null
   group: number; setGroup: (n: number) => void
   series: number; setSeries: (n: number) => void
   channels: any[]; channel: number; setChannel: (n: number) => void
-  method: Method; setMethod: (m: Method) => void
-  baselineMode: BaselineMode; setBaselineMode: (m: BaselineMode) => void
   previewSweep: number
   setPreviewSweep: React.Dispatch<React.SetStateAction<number>>
   totalSweeps: number
@@ -583,8 +744,18 @@ function TopBar({
   const groups = fileInfo?.groups ?? []
   const seriesList = fileInfo?.groups?.[group]?.series ?? []
 
+  // Only the scoping selectors (Group/Series/Channel/Sweep) live in
+  // the top row. Method + Baseline-mode — which drive which params
+  // show below — moved to the LEFT panel so the top row is consistent
+  // across all analysis windows.
   return (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+    <div style={{
+      display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flexShrink: 0,
+      background: 'var(--bg-secondary)',
+      padding: '6px 10px',
+      borderRadius: 4,
+      border: '1px solid var(--border)',
+    }}>
       <Field label="Group">
         <select value={group} onChange={(e) => setGroup(Number(e.target.value))} disabled={!fileInfo}>
           {groups.map((g: any, i: number) => (
@@ -621,23 +792,6 @@ function TopBar({
             title="Next sweep">→</button>
         </span>
       </Field>
-      <Field label="Method">
-        <select value={method} onChange={(e) => setMethod(e.target.value as Method)}>
-          <option value="threshold">Threshold</option>
-          <option value="oscillation">Oscillation envelope</option>
-          <option value="isi">ISI clustering</option>
-        </select>
-      </Field>
-      {method !== 'isi' && (
-        <Field label="Baseline">
-          <select value={baselineMode} onChange={(e) => setBaselineMode(e.target.value as BaselineMode)}>
-            <option value="percentile">Percentile (default)</option>
-            <option value="robust">Robust (median + MAD)</option>
-            <option value="rolling">Rolling median</option>
-            <option value="fixed_start">Fixed start</option>
-          </select>
-        </Field>
-      )}
     </div>
   )
 }

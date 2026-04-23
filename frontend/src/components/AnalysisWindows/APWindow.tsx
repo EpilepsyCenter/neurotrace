@@ -320,6 +320,56 @@ export function APWindow({
       await api.setPreferences({ ...prefs, apWindowUI: next })
     } catch { /* ignore */ }
   }, [])
+  // Left-panel width (vertical splitter between params column and
+  // viewer+results). Same prefs-persistence recipe as topHeight:
+  // hydrate on mount, write on mouseup-end-of-drag, clamp the saved
+  // value on restore so a pathologically small / large persisted
+  // width can't wedge the UI.
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const saved = prefs?.apWindowUI?.leftPanelWidth
+        if (!cancelled && typeof saved === 'number'
+            && saved >= 200 && saved <= 500) {
+          setLeftPanelWidth(saved)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const writeLeftPanelWidthToPrefs = useCallback(async (w: number) => {
+    try {
+      const api = window.electronAPI
+      if (!api?.getPreferences || !api?.setPreferences) return
+      const prefs = (await api.getPreferences()) ?? {}
+      const next = { ...(prefs.apWindowUI ?? {}), leftPanelWidth: w }
+      await api.setPreferences({ ...prefs, apWindowUI: next })
+    } catch { /* ignore */ }
+  }, [])
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = leftPanelWidth
+    let latest = startW
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      latest = Math.max(200, Math.min(500, startW + dx))
+      setLeftPanelWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeLeftPanelWidthToPrefs(latest)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
   const onSplitMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
     const startY = e.clientY
@@ -477,8 +527,22 @@ export function APWindow({
       display: 'flex', flexDirection: 'column', height: '100%',
       padding: 10, gap: 10, minHeight: 0,
     }}>
-      {/* Selectors */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* Selectors — stay as a thin top row (always visible). All
+          other param sections + Run controls + error banner live in
+          the LEFT panel below; the viewer + results panel live in
+          the RIGHT panel. The vertical splitter between them is
+          draggable and persists its width to Electron prefs under
+          apWindowUI.leftPanelWidth. */}
+      <div style={{
+        display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flexShrink: 0,
+        // Match the main-window tree sidebar tone so the window's
+        // "chrome" (selectors + left panel) reads as one cohesive
+        // region distinct from the content (viewer + results).
+        background: 'var(--bg-secondary)',
+        padding: '6px 10px',
+        borderRadius: 4,
+        border: '1px solid var(--border)',
+      }}>
         <Field label="Group">
           <select value={group} onChange={(e) => setGroup(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
@@ -543,10 +607,15 @@ export function APWindow({
         </Field>
       </div>
 
-      {/* Tab bar */}
+      {/* Tab bar — spans the full window width so it's visually above
+          BOTH columns. The tab choice drives which params show in
+          the left column (Rheobase for Counting, Kinetics for
+          Kinetics) and which results show on the right; placing the
+          bar inside the right column made it look like a local viewer
+          toggle, which misread its actual scope. */}
       <div style={{
         display: 'flex', gap: 2, borderBottom: '1px solid var(--border)',
-        alignItems: 'flex-end',
+        alignItems: 'flex-end', flexShrink: 0,
       }}>
         {(['counting', 'kinetics'] as APTab[]).map((t) => {
           const label = t === 'counting' ? 'Counting' : 'Kinetics'
@@ -557,118 +626,179 @@ export function APWindow({
               className="btn"
               onClick={() => setTab(t)}
               style={{
-                padding: '4px 14px',
+                padding: '8px 22px',
                 borderBottomLeftRadius: 0,
                 borderBottomRightRadius: 0,
-                borderBottom: active ? '2px solid var(--accent, #4a90e2)' : '2px solid transparent',
+                borderBottom: active ? '3px solid var(--accent, #4a90e2)' : '3px solid transparent',
                 marginBottom: -1,
                 background: active ? 'var(--bg-primary)' : 'transparent',
-                color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                fontWeight: active ? 600 : 400,
-                fontSize: 'var(--font-size-label)',
+                color: active ? 'var(--accent, #4a90e2)' : 'var(--text-muted)',
+                fontWeight: active ? 700 : 500,
+                fontSize: 'var(--font-size-sm)',
+                fontFamily: 'var(--font-ui)',
               }}
             >{label}</button>
           )
         })}
       </div>
 
-      {/* Detection params + filter — shared across tabs because all
-          three views read from the same per-series detection result. */}
-      <APDetectionPanel
-        detection={detection}
-        setDetection={setDetection}
-      />
-
-      {/* Tab-specific param row (kinetics-method picker for the
-          Kinetics tab; rheobase-mode picker for Counting; window+
-          interp for Phase). */}
-      {tab === 'kinetics' && (
-        <APKineticsPanel kinetics={kinetics} setKinetics={setKinetics} />
-      )}
-      {tab === 'counting' && (
-        <APRheobasePanel
-          rheobaseMode={rheobaseMode}
-          setRheobaseMode={setRheobaseMode}
-          rampParams={rampParams}
-          setRampParams={setRampParams}
-          backendUrl={backendUrl}
-          group={group} series={series}
-          imTrace={imTrace}
-        />
-      )}
-
-      {/* Run controls */}
+      {/* Main body: two-column flex. LEFT = params column (scrollable
+          with Run controls pinned to its bottom); RIGHT = viewer +
+          results. */}
       <div style={{
-        display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
       }}>
-        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>Run on:</span>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="ap-run-mode" checked={runMode === 'all'}
-            onChange={() => setRunMode('all')} />
-          all sweeps
-        </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="ap-run-mode" checked={runMode === 'range'}
-            onChange={() => setRunMode('range')} />
-          range
-        </label>
-        {runMode === 'range' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))} style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>–</span>
-            <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))} style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-            </span>
-          </span>
-        )}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="ap-run-mode" checked={runMode === 'one'}
-            onChange={() => setRunMode('one')} />
-          single sweep
-        </label>
-        {runMode === 'one' && (
-          <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
-            onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 48 }} />
-        )}
-        <button className="btn btn-primary" onClick={onRun} disabled={loading || !fileInfo}
-          style={{ marginLeft: 8 }}>
-          {loading ? 'Running…' : 'Run'}
-        </button>
-        <button className="btn" onClick={() => clearAP(group, series)} disabled={!entry}>
-          Clear
-        </button>
-        <button className="btn"
-          onClick={() => { setManualEdits({ added: {}, removed: {} }) }}
-          disabled={
-            Object.keys(manualEdits.added).length === 0 &&
-            Object.keys(manualEdits.removed).length === 0
-          }
-          title="Drop manual spike additions / removals (next Run will use raw auto-detection)"
-          style={{ marginLeft: 'auto' }}
-        >
-          Clear manual edits
-        </button>
-      </div>
-
-      {error && (
+        {/* LEFT PANEL */}
         <div style={{
-          padding: '6px 10px',
-          background: 'var(--bg-error, #5c1b1b)',
-          color: '#fff', borderRadius: 3,
-          display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 'var(--font-size-xs)',
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid var(--border)',
         }}>
-          <span style={{ flex: 1 }}>⚠ {error}</span>
-          <button className="btn" onClick={() => setError(null)}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+          {/* Scrollable param sections. Run controls + error banner
+              sit outside this scrollable so they're always visible. */}
+          <div style={{
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,  // room for the scrollbar
+          }}>
+            {/* Detection params (filter + method + bounds) live here. */}
+            <APDetectionPanel detection={detection} setDetection={setDetection} />
+            {/* Tab-specific params. */}
+            {tab === 'counting' && (
+              <APRheobasePanel
+                rheobaseMode={rheobaseMode}
+                setRheobaseMode={setRheobaseMode}
+                rampParams={rampParams}
+                setRampParams={setRampParams}
+                backendUrl={backendUrl}
+                group={group} series={series}
+                imTrace={imTrace}
+              />
+            )}
+            {tab === 'kinetics' && (
+              <APKineticsPanel kinetics={kinetics} setKinetics={setKinetics} />
+            )}
+          </div>
+          {/* Pinned footer: Run controls + error banner.
+              Primary: Run. Secondary (smaller): Clear, Clear edits.
+              Sweep-scope selector is a dropdown (progressive
+              disclosure) — "All sweeps" is the default; Range and
+              Single reveal their inline input rows only when chosen.
+              This replaces the earlier radios-on-one-row layout,
+              which got cramped in a narrow left column. */}
+          <div style={{
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }}>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={loading || !fileInfo}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {loading ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={runMode}
+                onChange={(e) => setRunMode(e.target.value as RunMode)}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="range">Range</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {runMode === 'range' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>from</span>
+                <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span>to</span>
+                <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {/* Secondary actions — smaller, visually subordinate. */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={() => clearAP(group, series)} disabled={!entry}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn"
+                onClick={() => { setManualEdits({ added: {}, removed: {} }) }}
+                disabled={
+                  Object.keys(manualEdits.added).length === 0 &&
+                  Object.keys(manualEdits.removed).length === 0
+                }
+                title="Drop manual spike additions / removals (next Run will use raw auto-detection)"
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear edits
+              </button>
+            </div>
+          </div>
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+            </div>
+          )}
+        </div>{/* close LEFT panel */}
+
+        {/* Vertical splitter between LEFT and RIGHT. */}
+        <div
+          onMouseDown={onLeftSplitMouseDown}
+          title="Drag to resize"
+          style={{
+            width: 3, flexShrink: 0, cursor: 'col-resize',
+            background: 'var(--border)',
+            position: 'relative',
+          }}
+        >
+          <div style={{
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
+          }} />
         </div>
-      )}
+
+        {/* RIGHT PANEL: tab bar + viewer + results. */}
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
+        }}>
 
       {/* Top: mode-dependent viewer area. Counting tab gets the full
           sweep viewer (whole trace + spike markers + draggable bounds).
@@ -716,6 +846,17 @@ export function APWindow({
                   onHideMarkersChange={setHideMarkers}
                   onSelectAll={selectAllSpikes}
                   onClearSelection={clearSpikeSelection}
+                  onSelectSpike={(idx) => {
+                    // Drive both the table-active selection + the
+                    // auto-zoom (so prev/next behaves exactly like
+                    // clicking a kinetics-table row).
+                    selectAPSpike(group, series, idx)
+                    const sp = entry?.perSpike[idx]
+                    if (sp) {
+                      setPreviewSweep(sp.sweep)
+                      requestZoomToSpike(sp.peakT, 15)
+                    }
+                  }}
                   filter={detection.filter_enabled ? {
                     type: detection.filter_type,
                     low: detection.filter_low,
@@ -743,14 +884,14 @@ export function APWindow({
         </div>
         <div onMouseDown={onSplitMouseDown}
           style={{
-            height: 6, cursor: 'row-resize', background: 'var(--border)',
+            height: 3, cursor: 'row-resize', background: 'var(--border)',
             flexShrink: 0, position: 'relative',
           }}
           title="Drag to resize">
           <div style={{
-            position: 'absolute', left: '50%', top: 1, transform: 'translateX(-50%)',
-            width: 40, height: 4, background: 'var(--text-muted)',
-            borderRadius: 2, opacity: 0.5,
+            position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)',
+            width: 40, height: 2, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
           }} />
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>
@@ -788,6 +929,8 @@ export function APWindow({
           </div>
         </div>
       </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }
@@ -852,22 +995,27 @@ function APDetectionPanel({
         )}
       </div>
 
-      {/* Detection params */}
+      {/* Detection params. Two-column grid with wider controls
+          (dropdowns) spanning both columns via gridColumn '1 / -1'.
+          Thin sub-header strips group related fields so the user can
+          scan the panel quickly. */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
         gap: 8, padding: 8,
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)',
       }}>
-        <Field label="Detection method">
-          <select value={detection.method}
-            onChange={(e) => set('method', e.target.value as APDetectionMethod)}>
-            <option value="auto_rec">Auto (adaptive)</option>
-            <option value="auto_spike">Auto (single pass)</option>
-            <option value="manual">Manual threshold</option>
-          </select>
-        </Field>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <Field label="Detection method">
+            <select value={detection.method}
+              onChange={(e) => set('method', e.target.value as APDetectionMethod)}>
+              <option value="auto_rec">Auto (adaptive)</option>
+              <option value="auto_spike">Auto (single pass)</option>
+              <option value="manual">Manual threshold</option>
+            </select>
+          </Field>
+        </div>
         {detection.method === 'manual' && (
           <ParamRow label="Manual threshold (mV)"
             value={detection.manual_threshold_mv} step={5}
@@ -875,6 +1023,7 @@ function APDetectionPanel({
         )}
         {detection.method !== 'manual' && (
           <>
+            <SubHeader>Thresholds</SubHeader>
             <ParamRow label="Min amplitude (mV)"
               value={detection.min_amplitude_mv} step={5} min={0}
               onChange={(v) => set('min_amplitude_mv', v)} />
@@ -886,12 +1035,14 @@ function APDetectionPanel({
               onChange={(v) => set('neg_dvdt_mv_ms', v)} />
           </>
         )}
+        <SubHeader>Spike shape</SubHeader>
         <ParamRow label="Max width (ms)"
           value={detection.width_ms} step={0.5} min={0.1}
           onChange={(v) => set('width_ms', v)} />
         <ParamRow label="Min distance (ms)"
           value={detection.min_distance_ms} step={0.5} min={0.1}
           onChange={(v) => set('min_distance_ms', v)} />
+        <SubHeader>Analysis bounds</SubHeader>
         <ParamRow label="Bounds start (s)"
           value={detection.bounds_start_s} step={0.05} min={0}
           onChange={(v) => set('bounds_start_s', Math.max(0, v))} />
@@ -922,24 +1073,26 @@ function APKineticsPanel({
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
       gap: 8, padding: 8,
       border: '1px solid var(--border)', borderRadius: 4,
       background: 'var(--bg-primary)',
     }}>
-      <Field label="Threshold method">
-        <select value={kinetics.threshold_method}
-          onChange={(e) => set('threshold_method', e.target.value as APThresholdMethod)}>
-          <option value="first_deriv_cutoff">First-deriv cutoff</option>
-          <option value="first_deriv_max">First-deriv max</option>
-          <option value="third_deriv_cutoff">Third-deriv cutoff</option>
-          <option value="third_deriv_max">Third-deriv max</option>
-          <option value="sekerli_I">Sekerli I</option>
-          <option value="sekerli_II">Sekerli II</option>
-          <option value="leading_inflection">Leading inflection</option>
-          <option value="max_curvature">Max curvature</option>
-        </select>
-      </Field>
+      <div style={{ gridColumn: '1 / -1' }}>
+        <Field label="Threshold method">
+          <select value={kinetics.threshold_method}
+            onChange={(e) => set('threshold_method', e.target.value as APThresholdMethod)}>
+            <option value="first_deriv_cutoff">First-deriv cutoff</option>
+            <option value="first_deriv_max">First-deriv max</option>
+            <option value="third_deriv_cutoff">Third-deriv cutoff</option>
+            <option value="third_deriv_max">Third-deriv max</option>
+            <option value="sekerli_I">Sekerli I</option>
+            <option value="sekerli_II">Sekerli II</option>
+            <option value="leading_inflection">Leading inflection</option>
+            <option value="max_curvature">Max curvature</option>
+          </select>
+        </Field>
+      </div>
       {isCutoff && (
         <ParamRow label="Cutoff (mV/ms)"
           value={kinetics.threshold_cutoff_mv_ms} step={1} min={0}
@@ -953,6 +1106,8 @@ function APKineticsPanel({
       <ParamRow label="Search before peak (ms)"
         value={kinetics.threshold_search_ms_before_peak} step={0.5} min={0.1}
         onChange={(v) => set('threshold_search_ms_before_peak', v)} />
+
+      <SubHeader>Rise / decay</SubHeader>
       <ParamRow label="Rise low %" value={kinetics.rise_low_pct} step={5} min={0} max={100}
         onChange={(v) => set('rise_low_pct', v)} />
       <ParamRow label="Rise high %" value={kinetics.rise_high_pct} step={5} min={0} max={100}
@@ -961,33 +1116,41 @@ function APKineticsPanel({
         onChange={(v) => set('decay_low_pct', v)} />
       <ParamRow label="Decay high %" value={kinetics.decay_high_pct} step={5} min={0} max={100}
         onChange={(v) => set('decay_high_pct', v)} />
-      <Field label="Decay end">
-        <select value={kinetics.decay_end}
-          onChange={(e) => set('decay_end', e.target.value as 'to_threshold' | 'to_fahp')}>
-          <option value="to_threshold">to threshold</option>
-          <option value="to_fahp">to fAHP</option>
-        </select>
-      </Field>
-      <ParamRow label="fAHP search start (ms)"
+      <div style={{ gridColumn: '1 / -1' }}>
+        <Field label="Decay end">
+          <select value={kinetics.decay_end}
+            onChange={(e) => set('decay_end', e.target.value as 'to_threshold' | 'to_fahp')}>
+            <option value="to_threshold">to threshold</option>
+            <option value="to_fahp">to fAHP</option>
+          </select>
+        </Field>
+      </div>
+
+      <SubHeader>AHP windows</SubHeader>
+      <ParamRow label="fAHP start (ms)"
         value={kinetics.fahp_search_start_ms} step={1} min={0}
         onChange={(v) => set('fahp_search_start_ms', v)} />
-      <ParamRow label="fAHP search end (ms)"
+      <ParamRow label="fAHP end (ms)"
         value={kinetics.fahp_search_end_ms} step={1} min={0}
         onChange={(v) => set('fahp_search_end_ms', v)} />
-      <ParamRow label="mAHP search start (ms)"
+      <ParamRow label="mAHP start (ms)"
         value={kinetics.mahp_search_start_ms} step={5} min={0}
         onChange={(v) => set('mahp_search_start_ms', v)} />
-      <ParamRow label="mAHP search end (ms)"
+      <ParamRow label="mAHP end (ms)"
         value={kinetics.mahp_search_end_ms} step={10} min={0}
         onChange={(v) => set('mahp_search_end_ms', v)} />
+
+      <SubHeader>Slope</SubHeader>
       <ParamRow label="Max-slope window (ms)"
         value={kinetics.max_slope_window_ms} step={0.1} min={0.1}
         onChange={(v) => set('max_slope_window_ms', v)} />
-      <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-label)' }}>
-        <input type="checkbox" checked={kinetics.interpolate_to_200khz}
-          onChange={(e) => set('interpolate_to_200khz', e.target.checked)} />
-        Interp to 200 kHz
-      </label>
+      <div style={{ gridColumn: '1 / -1' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-label)' }}>
+          <input type="checkbox" checked={kinetics.interpolate_to_200khz}
+            onChange={(e) => set('interpolate_to_200khz', e.target.checked)} />
+          Interp to 200 kHz
+        </label>
+      </div>
     </div>
   )
 }
@@ -1475,7 +1638,10 @@ function APPhasePlotPanel({
   // Default 10 ms window — big enough to capture the full AP loop
   // (rising phase → peak → repolarisation → AHP back to baseline).
   const [windowMs, setWindowMs] = useState(10)
-  const [interp, setInterp] = useState(10)
+  // Default 1× (no upsampling) — the kinetics measurements are
+  // already computed at the acquisition rate, and 10× was making
+  // the phase-loop look over-smoothed on typical 20-50 kHz recordings.
+  const [interp, setInterp] = useState(1)
 
   // Which spikes to plot. If the user has checked any, use that set;
   // otherwise fall back to a single-spike view of the table-active
@@ -1720,11 +1886,8 @@ function APPhasePlotPanel({
     return () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2) }
   }, [heightSignal])
 
-  const setSel = (n: number) => {
-    if (!entry || total === 0) return
-    const idx = Math.max(0, Math.min(total - 1, n))
-    useAppStore.getState().selectAPSpike(group, series, idx)
-  }
+  // setSel helper removed — prev/next now live in the overlay
+  // viewer's header (single source of truth for spike navigation).
 
   return (
     // height: '100%' (not flex: 1) — the parent wrapper isn't a flex
@@ -1736,17 +1899,11 @@ function APPhasePlotPanel({
         padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
       }}>
-        <button className="btn" onClick={() => setSel(selectedIdx - 1)}
-          disabled={total === 0 || selectedIdx <= 0}
-          style={{ padding: '1px 8px' }}>← prev</button>
-        <span style={{ color: 'var(--text-muted)' }}>
-          spike {total > 0 ? selectedIdx + 1 : '—'} / {total || '—'}
-          {selectedSpike && ` · sweep ${selectedSpike.sweep + 1}`}
-        </span>
-        <button className="btn" onClick={() => setSel(selectedIdx + 1)}
-          disabled={total === 0 || selectedIdx >= total - 1}
-          style={{ padding: '1px 8px' }}>next →</button>
-        <span style={{ marginLeft: 16, color: 'var(--text-muted)' }}>window ±</span>
+        {/* Prev / next moved to the overlay viewer's header —
+            they drive BOTH panels (zoomed spike + phase loop),
+            so it made more sense to co-locate them with the
+            primary viewer rather than embed them here. */}
+        <span style={{ marginRight: 4, color: 'var(--text-muted)' }}>window ±</span>
         <NumInput value={windowMs} step={1} min={1}
           onChange={(v) => setWindowMs(Math.max(1, v))} style={{ width: 56 }} />
         <span style={{ color: 'var(--text-muted)' }}>ms</span>
@@ -2350,11 +2507,36 @@ function ParamRow({
   max?: number
   onChange: (v: number) => void
 }) {
+  // Explicit narrow width for the left-column layout — without it
+  // NumInput stretches to fill the full column (~300 px in a
+  // single-column grid), which wastes horizontal space when the
+  // actual typed values are 3–4 digits.
   return (
     <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
       <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
-      <NumInput value={value} step={step} min={min} max={max} onChange={onChange} />
+      <NumInput value={value} step={step} min={min} max={max} onChange={onChange}
+        style={{ width: 110 }} />
     </label>
+  )
+}
+
+/** Thin section divider inside a two-column param grid. Spans the
+ *  full grid width via gridColumn. Small uppercase label + a hairline
+ *  top border gives the panel a scannable structure without stealing
+ *  vertical space. */
+function SubHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      gridColumn: '1 / -1',
+      fontSize: 'var(--font-size-xs)',
+      color: 'var(--text-muted)',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+      paddingTop: 4,
+      borderTop: '1px solid var(--border)',
+      marginTop: 4,
+    }}>{children}</div>
   )
 }
 
@@ -2390,7 +2572,7 @@ const OVERLAY_PALETTE = [
 function APSpikesOverlayViewer({
   backendUrl, entry, group, series, trace,
   selectedSpikeIndices, hideMarkers, onHideMarkersChange,
-  onSelectAll, onClearSelection,
+  onSelectAll, onClearSelection, onSelectSpike,
   filter, zeroOffset,
   visibilitySignal, heightSignal,
 }: {
@@ -2402,6 +2584,10 @@ function APSpikesOverlayViewer({
   onHideMarkersChange: (v: boolean) => void
   onSelectAll: () => void
   onClearSelection: () => void
+  /** Spike-navigation setter — moves the table-active spike index.
+   *  Lives here (instead of in the phase-plot header) because this
+   *  viewer is the primary one; prev/next affect both panels. */
+  onSelectSpike: (idx: number) => void
   /** Echo the AP detection filter so the displayed slice matches the
    *  signal the detector ran on (mirrors what FPsp does). null = off. */
   filter: { type: 'lowpass' | 'highpass' | 'bandpass'; low: number; high: number; order: number } | null
@@ -2434,6 +2620,11 @@ function APSpikesOverlayViewer({
   // Per-spike fetched slice. Keyed on `${sweep}:${peakT}` so the same
   // selection (or selection subset) doesn't re-fetch.
   const [slices, setSlices] = useState<Record<string, { time: number[]; values: number[] } | null>>({})
+  // Mirror slices into a ref so drawMarkerOverlay — which is called
+  // from the uPlot draw hook without state access — can look up the
+  // per-spike trace data to compute FWHM crossings on the fly.
+  const slicesRef = useRef(slices)
+  slicesRef.current = slices
 
   useEffect(() => {
     if (!backendUrl || spikesToShow.length === 0) { setSlices({}); return }
@@ -2525,10 +2716,49 @@ function APSpikesOverlayViewer({
       if (sp.mahpT != null && sp.mahpVm != null) {
         dotAt(sp.mahpT - sp.peakT, sp.mahpVm, '#ff7043')        // mAHP
       }
-      // FWHM crossings — find them on the slice if available; same
-      // walk-the-trace logic as the sweep viewer's drawOverlays.
-      // Skipped for performance when overlaying many spikes — the
-      // marker would be ambiguous anyway.
+      // FWHM crossings — walk the per-spike slice to find the two
+      // times the trace actually crosses (threshold + amp/2). Dots
+      // land on the trace, not on an approximation.
+      if (sp.halfWidthS != null && sp.amplitudeMv > 0) {
+        const slice = slicesRef.current[`${sp.sweep}:${sp.peakT}`]
+        if (slice && slice.time.length > 1) {
+          const halfV = sp.thresholdVm + sp.amplitudeMv / 2
+          // Bound the search to threshold → peak (rising) and
+          // peak → peak+halfWidth+slop (falling), in absolute time.
+          const tLo = sp.thresholdT
+          const tHi = sp.peakT + sp.halfWidthS + 0.005
+          const findCross = (t0: number, t1: number, ascending: boolean): number | null => {
+            let prevT = -Infinity, prevV = NaN
+            for (let i = 0; i < slice.time.length; i++) {
+              const t = slice.time[i]
+              if (t < t0) { prevT = t; prevV = slice.values[i]; continue }
+              if (t > t1) break
+              const v = slice.values[i]
+              if (isFinite(prevV)) {
+                const above = v >= halfV
+                const wasAbove = prevV >= halfV
+                if (ascending && !wasAbove && above) {
+                  const frac = (halfV - prevV) / (v - prevV)
+                  return prevT + frac * (t - prevT)
+                }
+                if (!ascending && wasAbove && !above) {
+                  const frac = (halfV - prevV) / (v - prevV)
+                  return prevT + frac * (t - prevT)
+                }
+              }
+              prevT = t; prevV = v
+            }
+            return null
+          }
+          const tLeft = findCross(tLo, sp.peakT, true)
+          const tRight = findCross(sp.peakT, tHi, false)
+          if (tLeft != null && tRight != null) {
+            // Rel-to-peak x for the overlay's time-aligned axis.
+            dotAt(tLeft - sp.peakT, halfV, '#ffeb3b')
+            dotAt(tRight - sp.peakT, halfV, '#ffeb3b')
+          }
+        }
+      }
     })
   }
 
@@ -2740,7 +2970,32 @@ function APSpikesOverlayViewer({
         borderBottom: '1px solid var(--border)',
         display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center',
       }}>
-        <span>{spikesToShow.length} spike{spikesToShow.length === 1 ? '' : 's'} shown</span>
+        {(() => {
+          // Prev/next spike navigation — affects this viewer AND
+          // the phase plot (both read from entry.selectedSpikeIdx).
+          // Lives here since this viewer is the primary one.
+          const total = entry?.perSpike.length ?? 0
+          const active = entry?.selectedSpikeIdx ?? 0
+          return (
+            <>
+              <button className="btn"
+                onClick={() => onSelectSpike(Math.max(0, active - 1))}
+                disabled={total === 0 || active <= 0}
+                style={{ padding: '1px 8px' }}
+                title="Previous spike (also drives the phase plot)">← prev</button>
+              <span>
+                spike {total > 0 ? active + 1 : '—'} / {total || '—'}
+              </span>
+              <button className="btn"
+                onClick={() => onSelectSpike(Math.min(total - 1, active + 1))}
+                disabled={total === 0 || active >= total - 1}
+                style={{ padding: '1px 8px' }}
+                title="Next spike (also drives the phase plot)">next →</button>
+              <span style={{ color: 'var(--text-muted)' }}>·</span>
+            </>
+          )
+        })()}
+        <span>{spikesToShow.length} shown</span>
         <span style={{ color: 'var(--text-muted)' }}>· window ±</span>
         <NumInput value={windowMs} step={1} min={1}
           onChange={(v) => setWindowMs(Math.max(1, v))} style={{ width: 56 }} />

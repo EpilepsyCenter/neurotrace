@@ -336,19 +336,74 @@ export function FPspWindow({
   const theme = useThemeStore((s) => s.theme)
   const fontSize = useThemeStore((s) => s.fontSize)
 
-  // Splitters.
+  // Splitters. Both persist to Electron prefs under fpspWindowUI so
+  // the layout survives window reopens — same recipe APWindow uses.
+  // We hydrate on mount and write only on mouseup (one write per drag,
+  // not per pixel) to avoid hammering the prefs store.
   const [topHeight, setTopHeight] = useState(300)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const ui = prefs?.fpspWindowUI
+        if (cancelled || !ui) return
+        if (typeof ui.leftPanelWidth === 'number'
+            && ui.leftPanelWidth >= 200 && ui.leftPanelWidth <= 500) {
+          setLeftPanelWidth(ui.leftPanelWidth)
+        }
+        if (typeof ui.topHeight === 'number'
+            && ui.topHeight >= 150 && ui.topHeight <= 800) {
+          setTopHeight(ui.topHeight)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const writeUIPref = useCallback(async (patch: Record<string, any>) => {
+    try {
+      const api = window.electronAPI
+      if (!api?.getPreferences || !api?.setPreferences) return
+      const prefs = (await api.getPreferences()) ?? {}
+      const next = { ...(prefs.fpspWindowUI ?? {}), ...patch }
+      await api.setPreferences({ ...prefs, fpspWindowUI: next })
+    } catch { /* ignore */ }
+  }, [])
   const onSplitMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
     const startY = e.clientY
     const startH = topHeight
+    let latest = startH
     const onMove = (ev: MouseEvent) => {
       const dy = ev.clientY - startY
-      setTopHeight(Math.max(150, Math.min(800, startH + dy)))
+      latest = Math.max(150, Math.min(800, startH + dy))
+      setTopHeight(latest)
     }
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      writeUIPref({ topHeight: latest })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = leftPanelWidth
+    let latest = startW
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      latest = Math.max(200, Math.min(500, startW + dx))
+      setLeftPanelWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeUIPref({ leftPanelWidth: latest })
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -574,8 +629,17 @@ export function FPspWindow({
       gap: 10,
       minHeight: 0,
     }}>
-      {/* Selectors */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* Selectors — thin top row, always visible. Wrapped in the
+          bg-secondary "chrome" tone so the window's top row + left
+          panel read as one cohesive region, matching the main
+          window's tree sidebar. */}
+      <div style={{
+        display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flexShrink: 0,
+        background: 'var(--bg-secondary)',
+        padding: '6px 10px',
+        borderRadius: 4,
+        border: '1px solid var(--border)',
+      }}>
         <Field label="Group">
           <select value={group} onChange={(e) => setGroup(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
@@ -653,13 +717,14 @@ export function FPspWindow({
         </Field>
       </div>
 
-      {/* Tab bar — I-O · PPR · LTP. All three tabs share the
-          selectors above and the mini-viewer / table chrome below;
-          the params + measurement logic differ per tab. Order matches
-          the experimental workflow most users follow. */}
+      {/* Tab bar — I-O · PPR · LTP. Spans the full window width above
+          the two-column body so the choice visibly scopes both the
+          LEFT params column and the RIGHT results panel. Same
+          prominent style as APWindow (3px underline, 14px font) for
+          cross-window consistency. */}
       <div style={{
         display: 'flex', gap: 2, borderBottom: '1px solid var(--border)',
-        alignItems: 'flex-end',
+        alignItems: 'flex-end', flexShrink: 0,
       }}>
         {(['io', 'ppr', 'ltp'] as FPspMode[]).map((m) => {
           const label = m === 'io' ? 'I-O curve'
@@ -672,15 +737,16 @@ export function FPspWindow({
               className="btn"
               onClick={() => setMode(m)}
               style={{
-                padding: '4px 14px',
+                padding: '8px 22px',
                 borderBottomLeftRadius: 0,
                 borderBottomRightRadius: 0,
-                borderBottom: active ? '2px solid var(--accent, #4a90e2)' : '2px solid transparent',
+                borderBottom: active ? '3px solid var(--accent, #4a90e2)' : '3px solid transparent',
                 marginBottom: -1,
                 background: active ? 'var(--bg-primary)' : 'transparent',
-                color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                fontWeight: active ? 600 : 400,
-                fontSize: 'var(--font-size-label)',
+                color: active ? 'var(--accent, #4a90e2)' : 'var(--text-muted)',
+                fontWeight: active ? 700 : 500,
+                fontSize: 'var(--font-size-sm)',
+                fontFamily: 'var(--font-ui)',
               }}
               title={
                 m === 'io' ? 'Stimulus intensity vs fEPSP slope/amplitude'
@@ -692,515 +758,555 @@ export function FPspWindow({
         })}
       </div>
 
-      {/* LTP + I-O + PPR share almost all chrome (cursor readout,
-          filter, params shell, run controls, mini-viewer). The lower
-          results panel and some mode-specific param fields differ. */}
-      {(mode === 'ltp' || mode === 'io' || mode === 'ppr') && (
-        <>
-      {/* Cursor readout + Auto-place */}
+      {/* Main body: two-column flex. LEFT = params column (scrollable
+          with Run controls pinned to its bottom); RIGHT = summary +
+          viewers + results. Same layout as APWindow for cross-window
+          consistency. */}
       <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 10,
-        alignItems: 'center',
-        padding: 8,
-        border: '1px solid var(--border)',
-        borderRadius: 4,
-        background: 'var(--bg-primary)',
-        fontSize: 'var(--font-size-label)',
-        fontFamily: 'var(--font-mono)',
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
       }}>
-        <span style={{ color: MARKER.baseline, fontWeight: 600 }}>Baseline:</span>
-        <span>{cursors.baselineStart.toFixed(4)}→{cursors.baselineEnd.toFixed(4)}s</span>
-        <span style={{ color: MARKER.volley, fontWeight: 600 }}>
-          {mode === 'ppr' ? 'V1:' : 'Volley:'}
-        </span>
-        <span>{cursors.fitStart.toFixed(4)}→{cursors.fitEnd.toFixed(4)}s</span>
-        <span style={{ color: MARKER.fepsp, fontWeight: 600 }}>
-          {mode === 'ppr' ? 'F1:' : 'fEPSP:'}
-        </span>
-        <span>{cursors.peakStart.toFixed(4)}→{cursors.peakEnd.toFixed(4)}s</span>
-        {mode === 'ppr' && (
-          <>
-            <span style={{ color: MARKER.volley, fontWeight: 600 }}>V2:</span>
-            <span>{volley2Start.toFixed(4)}→{volley2End.toFixed(4)}s</span>
-            <span style={{ color: MARKER.fepsp, fontWeight: 600 }}>F2:</span>
-            <span>{fepsp2Start.toFixed(4)}→{fepsp2End.toFixed(4)}s</span>
-          </>
-        )}
-        <button
-          className="btn"
-          onClick={onAutoPlace}
-          disabled={!backendUrl || !fileInfo}
-          style={{ marginLeft: 'auto' }}
-          title="Detect stim onset from the .pgf channel and place baseline / volley / fEPSP cursors at sensible defaults"
-        >
-          Auto-place cursors
-        </button>
-      </div>
-
-      {/* Pre-detection filter (optional) */}
-      <div style={{
-        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
-        padding: 8, border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-label)' }}>
-          <input type="checkbox" checked={filterEnabled}
-            onChange={(e) => setFilterEnabled(e.target.checked)} />
-          <span style={{ fontWeight: 600 }}>Pre-detection filter</span>
-        </label>
-        {filterEnabled && (
-          <>
-            <select value={filterType}
-              onChange={(e) => setFilterType(e.target.value as 'lowpass' | 'highpass' | 'bandpass')}
-              style={{ fontSize: 'var(--font-size-label)' }}>
-              <option value="lowpass">Lowpass</option>
-              <option value="highpass">Highpass</option>
-              <option value="bandpass">Bandpass</option>
-            </select>
-            {(filterType === 'highpass' || filterType === 'bandpass') && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-                <span style={{ color: 'var(--text-muted)' }}>low</span>
-                <NumInput value={filterLow} step={0.1} min={0}
-                  onChange={setFilterLow} style={{ width: 64 }} />
-                <span style={{ color: 'var(--text-muted)' }}>Hz</span>
-              </label>
-            )}
-            {(filterType === 'lowpass' || filterType === 'bandpass') && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-                <span style={{ color: 'var(--text-muted)' }}>high</span>
-                <NumInput value={filterHigh} step={10} min={1}
-                  onChange={setFilterHigh} style={{ width: 70 }} />
-                <span style={{ color: 'var(--text-muted)' }}>Hz</span>
-              </label>
-            )}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-              <span style={{ color: 'var(--text-muted)' }}>order</span>
-              <NumInput value={filterOrder} step={1} min={1} max={8}
-                onChange={(v) => setFilterOrder(Math.max(1, Math.min(8, Math.round(v))))}
-                style={{ width: 42 }} />
-            </label>
-          </>
-        )}
-        {!filterEnabled && (
-          <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)', fontStyle: 'italic' }}>
-            off (default) — applied per-sweep before averaging; try 2 kHz lowpass order 1 to clean HF noise without inflating the volley
-          </span>
-        )}
-      </div>
-
-      {/* Params */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-        gap: 8,
-        padding: 8,
-        border: '1px solid var(--border)',
-        borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
-        <Field label="Measurement">
-          <select value={method} onChange={(e) => setMethod(e.target.value as FPspMeasurementMethod)}>
-            <option value="amplitude">Amplitude (peak)</option>
-            <option value="full_slope">Slope (10%→peak)</option>
-            <option value="range_slope">Slope (low%→high%)</option>
-          </select>
-        </Field>
-        {method === 'range_slope' && (
-          <>
-            <ParamRow label="Low %" value={slopeLow} step={5} min={0} max={100}
-              onChange={(v) => setSlopeLow(Math.max(0, Math.min(100, v)))} />
-            <ParamRow label="High %" value={slopeHigh} step={5} min={0} max={100}
-              onChange={(v) => setSlopeHigh(Math.max(0, Math.min(100, v)))} />
-          </>
-        )}
-        <Field label="Peak direction">
-          <select value={peakDir} onChange={(e) => setPeakDir(e.target.value as FPspPeakDirection)}>
-            <option value="auto">Auto (|max dev|)</option>
-            <option value="negative">Negative</option>
-            <option value="positive">Positive</option>
-          </select>
-        </Field>
-        {(mode === 'ltp' || mode === 'ppr') && (
-          <ParamRow label="Average N sweeps" value={avgN} step={1} min={1}
-            onChange={(v) => setAvgN(Math.max(1, Math.round(v)))} />
-        )}
-        {/* I-O specific: stimulus intensity ramp. Each sweep gets
-            `initial + sweepIndex * step` assigned to the x-axis of
-            the scatter plot below. Excluded sweeps are skipped on run
-            but do not shift intensity — the sweep index is preserved. */}
-        {mode === 'io' && (
-          <>
-            <ParamRow label={`Initial intensity (${ioUnit})`}
-              value={ioInitialIntensity} step={10} min={0}
-              onChange={setIoInitialIntensity} />
-            <ParamRow label={`Step (${ioUnit})`}
-              value={ioIntensityStep} step={10} min={0}
-              onChange={setIoIntensityStep} />
-          </>
-        )}
-        {/* PPR specific: ISI input + "Place V2/F2 from ISI" helper.
-            Copies V1/F1 offsets forward by ISI ms so the user doesn't
-            have to drag both pairs manually on every sweep. */}
-        {mode === 'ppr' && (
-          <>
-            <ParamRow label="ISI (ms)"
-              value={pprIsiMs} step={5} min={1}
-              onChange={setPprIsiMs} />
+        {/* LEFT PANEL */}
+        <div style={{
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid var(--border)',
+        }}>
+          {/* Scrollable param sections. Run controls + error banner
+              sit outside this scrollable so they're always visible. */}
+          <div style={{
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,
+          }}>
+            {/* Cursor readout + Auto-place */}
             <div style={{
-              display: 'flex', alignItems: 'flex-end',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 6,
+              alignItems: 'center',
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+              fontSize: 'var(--font-size-label)',
+              fontFamily: 'var(--font-mono)',
             }}>
+              <span style={{ color: MARKER.baseline, fontWeight: 600 }}>Baseline:</span>
+              <span>{cursors.baselineStart.toFixed(4)}→{cursors.baselineEnd.toFixed(4)}s</span>
+              <span style={{ color: MARKER.volley, fontWeight: 600, width: '100%' }}>
+                {mode === 'ppr' ? 'V1:' : 'Volley:'}
+              </span>
+              <span>{cursors.fitStart.toFixed(4)}→{cursors.fitEnd.toFixed(4)}s</span>
+              <span style={{ color: MARKER.fepsp, fontWeight: 600, width: '100%' }}>
+                {mode === 'ppr' ? 'F1:' : 'fEPSP:'}
+              </span>
+              <span>{cursors.peakStart.toFixed(4)}→{cursors.peakEnd.toFixed(4)}s</span>
+              {mode === 'ppr' && (
+                <>
+                  <span style={{ color: MARKER.volley, fontWeight: 600, width: '100%' }}>V2:</span>
+                  <span>{volley2Start.toFixed(4)}→{volley2End.toFixed(4)}s</span>
+                  <span style={{ color: MARKER.fepsp, fontWeight: 600, width: '100%' }}>F2:</span>
+                  <span>{fepsp2Start.toFixed(4)}→{fepsp2End.toFixed(4)}s</span>
+                </>
+              )}
               <button
                 className="btn"
-                onClick={() => {
-                  const dt = pprIsiMs / 1000
-                  setVolley2Start(cursors.fitStart + dt)
-                  setVolley2End(cursors.fitEnd + dt)
-                  setFepsp2Start(cursors.peakStart + dt)
-                  setFepsp2End(cursors.peakEnd + dt)
-                }}
-                title="Place the 2nd-response volley + fEPSP cursors at the V1/F1 positions shifted forward by ISI milliseconds."
-                style={{ width: '100%' }}
+                onClick={onAutoPlace}
+                disabled={!backendUrl || !fileInfo}
+                style={{ width: '100%', marginTop: 4 }}
+                title="Detect stim onset from the .pgf channel and place baseline / volley / fEPSP cursors at sensible defaults"
               >
-                Place V2/F2 from ISI
+                Auto-place cursors
               </button>
             </div>
-          </>
-        )}
-      </div>
 
-      {/* Run controls */}
-      <div style={{
-        display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
-        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>Run on:</span>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="fpsp-run-mode" checked={runMode === 'all'}
-            onChange={() => setRunMode('all')} />
-          all sweeps
-        </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="fpsp-run-mode" checked={runMode === 'range'}
-            onChange={() => setRunMode('range')} />
-          range
-        </label>
-        {runMode === 'range' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>–</span>
-            <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-            </span>
-          </span>
-        )}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="fpsp-run-mode" checked={runMode === 'one'}
-            onChange={() => setRunMode('one')} />
-          single sweep
-        </label>
-        {runMode === 'one' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'} · appends
-            </span>
-          </span>
-        )}
-        <button className="btn btn-primary" onClick={onRun} disabled={loading || !fileInfo}
-          style={{ marginLeft: 8 }}>
-          {loading ? 'Running…' : 'Run'}
-        </button>
-        <button className="btn" onClick={() => clearFPsp(mode, group, series)} disabled={!entry}>
-          Clear
-        </button>
-        <button className="btn" onClick={() => exportFPspCSV()}
-          disabled={Object.keys(fpspCurves).length === 0}
-          style={{ marginLeft: 'auto' }}>
-          Export CSV
-        </button>
-      </div>
+            {/* Pre-detection filter (optional) */}
+            <div style={{
+              display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
+              padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-primary)',
+            }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-label)', width: '100%' }}>
+                <input type="checkbox" checked={filterEnabled}
+                  onChange={(e) => setFilterEnabled(e.target.checked)} />
+                <span style={{ fontWeight: 600 }}>Pre-detection filter</span>
+              </label>
+              {filterEnabled && (
+                <>
+                  <select value={filterType}
+                    onChange={(e) => setFilterType(e.target.value as 'lowpass' | 'highpass' | 'bandpass')}
+                    style={{ fontSize: 'var(--font-size-label)', width: '100%' }}>
+                    <option value="lowpass">Lowpass</option>
+                    <option value="highpass">Highpass</option>
+                    <option value="bandpass">Bandpass</option>
+                  </select>
+                  {(filterType === 'highpass' || filterType === 'bandpass') && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>low</span>
+                      <NumInput value={filterLow} step={0.1} min={0}
+                        onChange={setFilterLow} style={{ width: 64 }} />
+                      <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+                    </label>
+                  )}
+                  {(filterType === 'lowpass' || filterType === 'bandpass') && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>high</span>
+                      <NumInput value={filterHigh} step={10} min={1}
+                        onChange={setFilterHigh} style={{ width: 70 }} />
+                      <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+                    </label>
+                  )}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>order</span>
+                    <NumInput value={filterOrder} step={1} min={1} max={8}
+                      onChange={(v) => setFilterOrder(Math.max(1, Math.min(8, Math.round(v))))}
+                      style={{ width: 42 }} />
+                  </label>
+                </>
+              )}
+              {!filterEnabled && (
+                <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)', fontStyle: 'italic' }}>
+                  off — try 2 kHz lowpass order 1 to clean HF noise
+                </span>
+              )}
+            </div>
 
-      {error && (
-        <div style={{
-          padding: '6px 10px',
-          background: 'var(--bg-error, #5c1b1b)',
-          color: '#fff', borderRadius: 3,
-          display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 'var(--font-size-xs)',
-        }}>
-          <span style={{ flex: 1 }}>⚠ {error}</span>
-          <button className="btn" onClick={() => setError(null)}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
-        </div>
-      )}
+            {/* Params */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+              gap: 8,
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+            }}>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <Field label="Measurement">
+                  <select value={method} onChange={(e) => setMethod(e.target.value as FPspMeasurementMethod)} style={{ width: '100%' }}>
+                    <option value="amplitude">Amplitude (peak)</option>
+                    <option value="full_slope">Slope (10%→peak)</option>
+                    <option value="range_slope">Slope (low%→high%)</option>
+                  </select>
+                </Field>
+              </div>
+              {method === 'range_slope' && (
+                <>
+                  <ParamRow label="Low %" value={slopeLow} step={5} min={0} max={100}
+                    onChange={(v) => setSlopeLow(Math.max(0, Math.min(100, v)))} />
+                  <ParamRow label="High %" value={slopeHigh} step={5} min={0} max={100}
+                    onChange={(v) => setSlopeHigh(Math.max(0, Math.min(100, v)))} />
+                </>
+              )}
+              <div style={{ gridColumn: '1 / -1' }}>
+                <Field label="Peak direction">
+                  <select value={peakDir} onChange={(e) => setPeakDir(e.target.value as FPspPeakDirection)} style={{ width: '100%' }}>
+                    <option value="auto">Auto (|max dev|)</option>
+                    <option value="negative">Negative</option>
+                    <option value="positive">Positive</option>
+                  </select>
+                </Field>
+              </div>
+              {(mode === 'ltp' || mode === 'ppr') && (
+                <ParamRow label="Average N sweeps" value={avgN} step={1} min={1}
+                  onChange={(v) => setAvgN(Math.max(1, Math.round(v)))} />
+              )}
+              {/* I-O specific: stimulus intensity ramp. Each sweep gets
+                  `initial + sweepIndex * step` assigned to the x-axis of
+                  the scatter plot below. Excluded sweeps are skipped on run
+                  but do not shift intensity — the sweep index is preserved. */}
+              {mode === 'io' && (
+                <>
+                  <ParamRow label={`Initial (${ioUnit})`}
+                    value={ioInitialIntensity} step={10} min={0}
+                    onChange={setIoInitialIntensity} />
+                  <ParamRow label={`Step (${ioUnit})`}
+                    value={ioIntensityStep} step={10} min={0}
+                    onChange={setIoIntensityStep} />
+                </>
+              )}
+              {/* PPR specific: ISI input + "Place V2/F2 from ISI" helper.
+                  Copies V1/F1 offsets forward by ISI ms so the user doesn't
+                  have to drag both pairs manually on every sweep. */}
+              {mode === 'ppr' && (
+                <>
+                  <ParamRow label="ISI (ms)"
+                    value={pprIsiMs} step={5} min={1}
+                    onChange={setPprIsiMs} />
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        const dt = pprIsiMs / 1000
+                        setVolley2Start(cursors.fitStart + dt)
+                        setVolley2End(cursors.fitEnd + dt)
+                        setFepsp2Start(cursors.peakStart + dt)
+                        setFepsp2End(cursors.peakEnd + dt)
+                      }}
+                      title="Place the 2nd-response volley + fEPSP cursors at the V1/F1 positions shifted forward by ISI milliseconds."
+                      style={{ width: '100%' }}
+                    >
+                      Place V2/F2 from ISI
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
 
-      {/* Summary + graph-mode toggles (LTP-specific: the timestamp/
-          index toggle + normalize toggle only apply to over-time plots) */}
-      {mode === 'ltp' && entry && (
-        <div style={{
-          fontSize: 'var(--font-size-label)',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-          background: 'var(--bg-primary)',
-          padding: '4px 8px',
-          borderRadius: 3,
-          border: '1px solid var(--border)',
-          display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
-        }}>
-          <span>
-            <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> bins ·
-            stim onset {entry.stimOnsetS.toFixed(4)}s ·
-            unit {entry.responseUnit || '—'} ·
-            avg N {entry.avgN}
-          </span>
-          {flaggedCount > 0 && (
-            <span style={{ color: '#e57373' }}>
-              ⚠ {flaggedCount} with ratio {'<'} 3
-            </span>
-          )}
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="radio" checked={entry.timeAxis === 'timestamp'}
-                onChange={() => setFPspTimeAxis(mode, group, series, 'timestamp')} />
-              time
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="radio" checked={entry.timeAxis === 'index'}
-                onChange={() => setFPspTimeAxis(mode, group, series, 'index')} />
-              index
-            </label>
-            <span style={{ color: 'var(--border)' }}>|</span>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="checkbox" checked={entry.normalize}
-                onChange={(e) => setFPspNormalize(mode, group, series, e.target.checked)} />
-              normalize
-            </label>
-            {entry.normalize && (
-              <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                (% of mean across all baseline-series points)
-              </span>
-            )}
-          </span>
-        </div>
-      )}
-
-      {/* PPR summary: point count + metric toggle for the over-time
-          ratio scatter. Mean PPR is shown for at-a-glance QC. */}
-      {mode === 'ppr' && entry && (() => {
-        // Average pprAmp / pprSlope across non-null points for the
-        // summary strip. Cheap and runs only when the entry changes.
-        const amps: number[] = []
-        const slopes: number[] = []
-        for (const p of entry.points) {
-          if (p.pprAmp != null && isFinite(p.pprAmp)) amps.push(p.pprAmp)
-          if (p.pprSlope != null && isFinite(p.pprSlope)) slopes.push(p.pprSlope)
-        }
-        const meanAmp = amps.length ? amps.reduce((a, b) => a + b, 0) / amps.length : null
-        const meanSlope = slopes.length ? slopes.reduce((a, b) => a + b, 0) / slopes.length : null
-        return (
+          {/* Pinned footer: Run button (primary) + sweeps-scope
+              dropdown with progressive disclosure, then secondary
+              Clear / Export CSV below a separator. Same pattern as
+              APWindow — radios-on-one-row got cramped in the narrow
+              left column. */}
           <div style={{
-            fontSize: 'var(--font-size-label)',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-mono)',
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
             background: 'var(--bg-primary)',
-            padding: '4px 8px',
-            borderRadius: 3,
-            border: '1px solid var(--border)',
-            display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
           }}>
-            <span>
-              <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> sweeps ·
-              ISI {(entry.pprIsiMs ?? 0).toFixed(1)} ms ·
-              mean PPR-amp {meanAmp != null ? meanAmp.toFixed(3) : '—'} ·
-              mean PPR-slope {meanSlope != null ? meanSlope.toFixed(3) : '—'} ·
-              stim onset {entry.stimOnsetS.toFixed(4)}s ·
-              unit {entry.responseUnit || '—'}
-            </span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
-              <span style={{ color: 'var(--text-muted)' }}>over-time y:</span>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                <input type="radio" checked={pprMetric === 'amp'}
-                  onChange={() => setPprMetric('amp')} />
-                PPR (amp)
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                <input type="radio" checked={pprMetric === 'slope'}
-                  onChange={() => setPprMetric('slope')} />
-                PPR (slope)
-              </label>
-            </span>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={loading || !fileInfo}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {loading ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={runMode}
+                onChange={(e) => setRunMode(e.target.value as RunMode)}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="range">Range</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {runMode === 'range' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>from</span>
+                <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span>to</span>
+                <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'} · appends</span>
+              </div>
+            )}
+            {/* Secondary actions — smaller, visually subordinate. */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={() => clearFPsp(mode, group, series)} disabled={!entry}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn"
+                onClick={() => exportFPspCSV()}
+                disabled={Object.keys(fpspCurves).length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Export CSV
+              </button>
+            </div>
           </div>
-        )
-      })()}
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+            </div>
+          )}
+        </div>{/* close LEFT panel */}
 
-      {/* I-O summary: one line showing point count, intensity range
-          and the y-axis metric toggle for the scatter plot. */}
-      {mode === 'io' && entry && (
-        <div style={{
-          fontSize: 'var(--font-size-label)',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-          background: 'var(--bg-primary)',
-          padding: '4px 8px',
-          borderRadius: 3,
-          border: '1px solid var(--border)',
-          display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
-        }}>
-          <span>
-            <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> sweeps ·
-            intensity {(entry.ioInitialIntensity ?? 0).toFixed(1)}–
-            {((entry.ioInitialIntensity ?? 0)
-              + Math.max(0, entry.points.length - 1) * (entry.ioIntensityStep ?? 0)
-            ).toFixed(1)} {entry.ioUnit ?? 'µA'} ·
-            stim onset {entry.stimOnsetS.toFixed(4)}s ·
-            unit {entry.responseUnit || '—'}
-          </span>
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
-            <span style={{ color: 'var(--text-muted)' }}>y-axis:</span>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="radio" checked={ioMetric === 'slope'}
-                onChange={() => setIoMetric('slope')} />
-              slope
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <input type="radio" checked={ioMetric === 'amplitude'}
-                onChange={() => setIoMetric('amplitude')} />
-              amplitude
-            </label>
-          </span>
-        </div>
-      )}
-
-      {/* Top: sweep mini-viewer (LEFT) + selected-bin waveform (RIGHT) */}
-      <div style={{
-        flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0,
-      }}>
-        <div style={{
-          height: topHeight, minHeight: 180,
-          display: 'flex', gap: 6, flexShrink: 0,
-        }}>
-          {/* LEFT: sweep navigator with draggable Baseline / Volley /
-              fEPSP bands. Drives `cursors` in the main store, so the
-              main viewer's bands track in lockstep. */}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <FPspSweepViewer
-              traceTime={sweepTraceTime}
-              traceValues={sweepTraceValues}
-              traceUnits={sweepTraceUnits}
-              cursors={cursors}
-              updateCursors={updateCursors}
-              previewSweep={previewSweep}
-              totalSweeps={viewerSweepCount}
-              source={viewerSource}
-              isExcluded={isPreviewExcluded}
-              theme={theme}
-              fontSize={fontSize}
-              zeroOffset={zeroOffset}
-              onZeroOffsetChange={setZeroOffset}
-              zeroOffsetApplied={sweepZeroOffsetApplied}
-              markerPoint={markerPoint}
-              markerEntry={entry}
-              pprBands={mode === 'ppr' ? {
-                volleyStart: volley2Start,
-                volleyEnd: volley2End,
-                fepspStart: fepsp2Start,
-                fepspEnd: fepsp2End,
-              } : null}
-            />
-          </div>
-          {/* RIGHT: selected-bin averaged waveform.
-              - LTP: always shown.
-              - PPR: shown — averaged trace with R1 + R2 detection dots
-                and 5 cursor bands. This is the canonical view when
-                avgN > 1 (the LEFT viewer's per-sweep dots are
-                suppressed for averaged bins).
-              - I-O: hidden — each row is a single sweep, no averaging.
-              All cases stay mounted (display-toggle) so the inner
-              uPlot instance / zoom / scroll survive mode round-trips.
-              Each mode is fed its OWN entry so toggling tabs doesn't
-              flash the wrong data. */}
-          <div style={{
-            flex: 1, minWidth: 0,
-            display: (mode === 'ltp' || mode === 'ppr') ? 'block' : 'none',
-          }}>
-            <FPspMiniViewer
-              backendUrl={backendUrl}
-              entry={mode === 'ppr' ? pprEntry : ltpEntry}
-              group={group} series={series} channel={channel}
-              heightSignal={topHeight}
-            />
-          </div>
-        </div>
-
+        {/* Vertical splitter between LEFT and RIGHT. */}
         <div
-          onMouseDown={onSplitMouseDown}
-          style={{
-            height: 6, cursor: 'row-resize', background: 'var(--border)',
-            flexShrink: 0, position: 'relative',
-          }}
+          onMouseDown={onLeftSplitMouseDown}
           title="Drag to resize"
+          style={{
+            width: 3, flexShrink: 0, cursor: 'col-resize',
+            background: 'var(--border)',
+            position: 'relative',
+          }}
         >
           <div style={{
-            position: 'absolute', left: '50%', top: 1,
-            transform: 'translateX(-50%)',
-            width: 40, height: 4, background: 'var(--text-muted)',
-            borderRadius: 2, opacity: 0.5,
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
           }} />
         </div>
 
-        {/* Bottom: LTP gets tabs (Table | Over-time); I-O gets its
-            own table + intensity-vs-metric scatter. BOTH panels stay
-            mounted (display-toggle) across mode switches so internal
-            state (sub-tab, plot instance, zoom) survives. */}
+        {/* RIGHT PANEL: viewer + horizontal splitter + results. Same
+            flat structure as APWindow (no gap, no conditional siblings
+            in the column) so flex sizing propagates cleanly to the
+            plot containers — the earlier structure with three
+            conditional summary strips at the top interfered with
+            flex-height propagation, making the result plots snap to a
+            minimum size. The mode-specific summary strips now live
+            directly above each plot, inside the results panel (as
+            `plotHeader`), where they belong. */}
         <div style={{
-          display: mode === 'ltp' ? 'flex' : 'none',
-          flexDirection: 'column',
-          flex: 1, minHeight: 0,
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
         }}>
-          <FPspResultsTabs
-            entry={ltpEntry}
-            onSelectPoint={onSelectPoint}
-            visibilitySignal={ltpVisibilitySignal}
-          />
-        </div>
-        <div style={{
-          display: mode === 'io' ? 'flex' : 'none',
-          flex: 1, minHeight: 0,
-        }}>
-          <IOResultsPanel
-            entry={ioEntry}
-            metric={ioMetric}
-            onSelectPoint={onSelectPoint}
-            theme={theme}
-            fontSize={fontSize}
-            visibilitySignal={ioVisibilitySignal}
-          />
-        </div>
-        <div style={{
-          display: mode === 'ppr' ? 'flex' : 'none',
-          flex: 1, minHeight: 0,
-        }}>
-          <PPRResultsPanel
-            entry={pprEntry}
-            metric={pprMetric}
-            onSelectPoint={onSelectPoint}
-            visibilitySignal={pprVisibilitySignal}
-          />
-        </div>
-      </div>
-        </>
-      )}
+          {/* Viewers: top = sweep + optional mini, bottom = results. */}
+          <div style={{
+            flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0,
+          }}>
+            <div style={{
+              height: topHeight, minHeight: 180,
+              display: 'flex', gap: 6, flexShrink: 0,
+            }}>
+              {/* LEFT: sweep navigator with draggable bands. */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <FPspSweepViewer
+                  traceTime={sweepTraceTime}
+                  traceValues={sweepTraceValues}
+                  traceUnits={sweepTraceUnits}
+                  cursors={cursors}
+                  updateCursors={updateCursors}
+                  previewSweep={previewSweep}
+                  totalSweeps={viewerSweepCount}
+                  source={viewerSource}
+                  isExcluded={isPreviewExcluded}
+                  theme={theme}
+                  fontSize={fontSize}
+                  zeroOffset={zeroOffset}
+                  onZeroOffsetChange={setZeroOffset}
+                  zeroOffsetApplied={sweepZeroOffsetApplied}
+                  markerPoint={markerPoint}
+                  markerEntry={entry}
+                  pprBands={mode === 'ppr' ? {
+                    volleyStart: volley2Start,
+                    volleyEnd: volley2End,
+                    fepspStart: fepsp2Start,
+                    fepspEnd: fepsp2End,
+                  } : null}
+                />
+              </div>
+              {/* RIGHT: selected-bin averaged waveform (LTP/PPR only;
+                  I-O hidden via display-toggle so the uPlot instance
+                  survives mode round-trips). */}
+              <div style={{
+                flex: 1, minWidth: 0,
+                display: (mode === 'ltp' || mode === 'ppr') ? 'block' : 'none',
+              }}>
+                <FPspMiniViewer
+                  backendUrl={backendUrl}
+                  entry={mode === 'ppr' ? pprEntry : ltpEntry}
+                  group={group} series={series} channel={channel}
+                  heightSignal={topHeight}
+                />
+              </div>
+            </div>
+
+            {/* Horizontal splitter between viewer and results. Thin
+                (3px hit / 2px grip) to match APWindow. */}
+            <div
+              onMouseDown={onSplitMouseDown}
+              style={{
+                height: 3, cursor: 'row-resize', background: 'var(--border)',
+                flexShrink: 0, position: 'relative',
+              }}
+              title="Drag to resize"
+            >
+              <div style={{
+                position: 'absolute', left: '50%', top: 0,
+                transform: 'translateX(-50%)',
+                width: 40, height: 2, background: 'var(--text-muted)',
+                borderRadius: 1, opacity: 0.5,
+              }} />
+            </div>
+
+            {/* Bottom: mode-specific results. All three stay mounted
+                (display-toggle) so internal uPlot / sub-tab / zoom
+                state survives mode switches. The plot controls
+                (normalize / time / y-metric) live in a compact header
+                rendered inside each panel directly above its plot —
+                passed in as `plotHeader` so the controls are visually
+                adjacent to what they affect. */}
+            <div style={{
+              display: mode === 'ltp' ? 'flex' : 'none',
+              flexDirection: 'column',
+              flex: 1, minHeight: 0,
+            }}>
+              <FPspResultsTabs
+                entry={ltpEntry}
+                onSelectPoint={onSelectPoint}
+                visibilitySignal={ltpVisibilitySignal}
+                plotHeader={ltpEntry && (
+                  <div style={{
+                    flexShrink: 0,
+                    fontSize: 'var(--font-size-label)',
+                    color: 'var(--text-muted)',
+                    fontFamily: 'var(--font-mono)',
+                    background: 'var(--bg-primary)',
+                    padding: '4px 8px',
+                    borderRadius: 3,
+                    border: '1px solid var(--border)',
+                    display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+                  }}>
+                    <span>
+                      <strong style={{ color: 'var(--text-primary)' }}>{ltpEntry.points.length}</strong> bins ·
+                      avg N {ltpEntry.avgN} · unit {ltpEntry.responseUnit || '—'}
+                    </span>
+                    {flaggedCount > 0 && (
+                      <span style={{ color: '#e57373' }}>
+                        ⚠ {flaggedCount} ratio {'<'} 3
+                      </span>
+                    )}
+                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <input type="radio" checked={ltpEntry.timeAxis === 'timestamp'}
+                          onChange={() => setFPspTimeAxis('ltp', group, series, 'timestamp')} />
+                        time
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <input type="radio" checked={ltpEntry.timeAxis === 'index'}
+                          onChange={() => setFPspTimeAxis('ltp', group, series, 'index')} />
+                        index
+                      </label>
+                      <span style={{ color: 'var(--border)' }}>|</span>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <input type="checkbox" checked={ltpEntry.normalize}
+                          onChange={(e) => setFPspNormalize('ltp', group, series, e.target.checked)} />
+                        normalize
+                      </label>
+                    </span>
+                  </div>
+                )}
+              />
+            </div>
+            <div style={{
+              display: mode === 'io' ? 'flex' : 'none',
+              flex: 1, minHeight: 0,
+            }}>
+              <IOResultsPanel
+                entry={ioEntry}
+                metric={ioMetric}
+                onSelectPoint={onSelectPoint}
+                theme={theme}
+                fontSize={fontSize}
+                visibilitySignal={ioVisibilitySignal}
+                plotHeader={ioEntry && (
+                  <div style={{
+                    flexShrink: 0,
+                    fontSize: 'var(--font-size-label)',
+                    color: 'var(--text-muted)',
+                    fontFamily: 'var(--font-mono)',
+                    background: 'var(--bg-primary)',
+                    padding: '4px 8px',
+                    borderRadius: 3,
+                    border: '1px solid var(--border)',
+                    display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+                  }}>
+                    <span>
+                      <strong style={{ color: 'var(--text-primary)' }}>{ioEntry.points.length}</strong> sweeps ·
+                      {(ioEntry.ioInitialIntensity ?? 0).toFixed(0)}–
+                      {((ioEntry.ioInitialIntensity ?? 0)
+                        + Math.max(0, ioEntry.points.length - 1) * (ioEntry.ioIntensityStep ?? 0)
+                      ).toFixed(0)} {ioEntry.ioUnit ?? 'µA'}
+                    </span>
+                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>y-axis:</span>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <input type="radio" checked={ioMetric === 'slope'}
+                          onChange={() => setIoMetric('slope')} />
+                        slope
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <input type="radio" checked={ioMetric === 'amplitude'}
+                          onChange={() => setIoMetric('amplitude')} />
+                        amplitude
+                      </label>
+                    </span>
+                  </div>
+                )}
+              />
+            </div>
+            <div style={{
+              display: mode === 'ppr' ? 'flex' : 'none',
+              flex: 1, minHeight: 0,
+            }}>
+              <PPRResultsPanel
+                entry={pprEntry}
+                metric={pprMetric}
+                onSelectPoint={onSelectPoint}
+                visibilitySignal={pprVisibilitySignal}
+                plotHeader={pprEntry && (() => {
+                  const amps: number[] = []
+                  const slopes: number[] = []
+                  for (const p of pprEntry.points) {
+                    if (p.pprAmp != null && isFinite(p.pprAmp)) amps.push(p.pprAmp)
+                    if (p.pprSlope != null && isFinite(p.pprSlope)) slopes.push(p.pprSlope)
+                  }
+                  const meanAmp = amps.length ? amps.reduce((a, b) => a + b, 0) / amps.length : null
+                  const meanSlope = slopes.length ? slopes.reduce((a, b) => a + b, 0) / slopes.length : null
+                  return (
+                    <div style={{
+                      flexShrink: 0,
+                      fontSize: 'var(--font-size-label)',
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--font-mono)',
+                      background: 'var(--bg-primary)',
+                      padding: '4px 8px',
+                      borderRadius: 3,
+                      border: '1px solid var(--border)',
+                      display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+                    }}>
+                      <span>
+                        <strong style={{ color: 'var(--text-primary)' }}>{pprEntry.points.length}</strong> sweeps ·
+                        ISI {(pprEntry.pprIsiMs ?? 0).toFixed(1)} ms ·
+                        amp {meanAmp != null ? meanAmp.toFixed(2) : '—'} · slope {meanSlope != null ? meanSlope.toFixed(2) : '—'}
+                      </span>
+                      <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontFamily: 'var(--font-ui)' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>y:</span>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                          <input type="radio" checked={pprMetric === 'amp'}
+                            onChange={() => setPprMetric('amp')} />
+                          amp
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                          <input type="radio" checked={pprMetric === 'slope'}
+                            onChange={() => setPprMetric('slope')} />
+                          slope
+                        </label>
+                      </span>
+                    </div>
+                  )
+                })()}
+              />
+            </div>
+          </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }
@@ -1328,9 +1434,9 @@ function FPspMiniViewer({
 
     // Y-axis tuned range: the stim artifact dominates auto-scaling and
     // buries the actual volley/fEPSP deflections. Center y on the bin
-    // baseline + size to 2× the largest measured deflection (R2
+    // baseline + size to 1.5× the largest measured deflection (R2
     // included for PPR) so we zoom straight onto the event(s)
-    // regardless of artifact size.
+    // regardless of artifact size. Total range = 3× max amplitude.
     const sel = selected
     const maxAmp = Math.max(
       Math.abs(sel.volleyAmp),
@@ -1339,7 +1445,7 @@ function FPspMiniViewer({
       Math.abs(sel.fepspAmp2 ?? 0),
     )
     const tunedY: [number, number] | null = (maxAmp > 0)
-      ? [sel.baseline - 2 * maxAmp, sel.baseline + 2 * maxAmp]
+      ? [sel.baseline - 1.5 * maxAmp, sel.baseline + 1.5 * maxAmp]
       : null
     // X tuned range: 0 → 2 × furthest fEPSP end-cursor.
     const tunedX: [number, number] = [
@@ -2646,7 +2752,7 @@ function FPspSweepViewer({
 // ---------------------------------------------------------------------------
 
 function FPspResultsTabs({
-  entry, onSelectPoint, visibilitySignal,
+  entry, onSelectPoint, visibilitySignal, plotHeader,
 }: {
   entry: FPspData | undefined
   onSelectPoint: (idx: number) => void
@@ -2656,6 +2762,11 @@ function FPspResultsTabs({
    *  stuck at whatever 0-dim setSize the ResizeObserver applied while
    *  hidden). */
   visibilitySignal?: number
+  /** Optional control bar rendered directly above the over-time plot
+   *  (right column). Keeps the plot toggles (normalize / time / index)
+   *  visually adjacent to what they affect, instead of far away at
+   *  the top of the window. */
+  plotHeader?: React.ReactNode
 }) {
   // Side-by-side layout (table left, over-time graph right) to match
   // the I-O and PPR result panels. The earlier subtab layout had two
@@ -2669,12 +2780,18 @@ function FPspResultsTabs({
       <div style={{ flex: 1, minWidth: 0 }}>
         <FPspTable entry={entry} onSelect={onSelectPoint} />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <FPspOverTimeGraph
-          entry={entry}
-          onSelectIdx={onSelectPoint}
-          heightSignal={visibilitySignal ?? 0}
-        />
+      <div style={{
+        flex: 1, minWidth: 0, minHeight: 0,
+        display: 'flex', flexDirection: 'column', gap: 4,
+      }}>
+        {plotHeader}
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <FPspOverTimeGraph
+            entry={entry}
+            onSelectIdx={onSelectPoint}
+            heightSignal={visibilitySignal ?? 0}
+          />
+        </div>
       </div>
     </div>
   )
@@ -2691,7 +2808,7 @@ function FPspResultsTabs({
 // ---------------------------------------------------------------------------
 
 function IOResultsPanel({
-  entry, metric, onSelectPoint, theme, fontSize, visibilitySignal,
+  entry, metric, onSelectPoint, theme, fontSize, visibilitySignal, plotHeader,
 }: {
   entry: FPspData | undefined
   metric: 'slope' | 'amplitude'
@@ -2700,6 +2817,10 @@ function IOResultsPanel({
   fontSize: number
   /** Bumped by the parent every time the panel becomes visible. */
   visibilitySignal?: number
+  /** Optional control bar rendered directly above the scatter plot
+   *  (right column). Keeps the y-axis toggle visually next to what
+   *  it affects. */
+  plotHeader?: React.ReactNode
 }) {
   void theme; void fontSize  // captured via cssVar inside IOScatter
   return (
@@ -2709,13 +2830,19 @@ function IOResultsPanel({
       <div style={{ flex: 1, minWidth: 0 }}>
         <IOTable entry={entry} onSelect={onSelectPoint} />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <IOScatter
-          entry={entry}
-          metric={metric}
-          onSelectIdx={onSelectPoint}
-          visibilitySignal={visibilitySignal}
-        />
+      <div style={{
+        flex: 1, minWidth: 0, minHeight: 0,
+        display: 'flex', flexDirection: 'column', gap: 4,
+      }}>
+        {plotHeader}
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <IOScatter
+            entry={entry}
+            metric={metric}
+            onSelectIdx={onSelectPoint}
+            visibilitySignal={visibilitySignal}
+          />
+        </div>
       </div>
     </div>
   )
@@ -3013,12 +3140,15 @@ function IOScatter({
 // ---------------------------------------------------------------------------
 
 function PPRResultsPanel({
-  entry, metric, onSelectPoint, visibilitySignal,
+  entry, metric, onSelectPoint, visibilitySignal, plotHeader,
 }: {
   entry: FPspData | undefined
   metric: 'amp' | 'slope'
   onSelectPoint: (idx: number) => void
   visibilitySignal?: number
+  /** Optional control bar rendered directly above the ratio scatter
+   *  (right column). */
+  plotHeader?: React.ReactNode
 }) {
   return (
     <div style={{
@@ -3027,13 +3157,19 @@ function PPRResultsPanel({
       <div style={{ flex: 1, minWidth: 0 }}>
         <PPRTable entry={entry} onSelect={onSelectPoint} metric={metric} />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <PPRScatter
-          entry={entry}
-          metric={metric}
-          onSelectIdx={onSelectPoint}
-          visibilitySignal={visibilitySignal}
-        />
+      <div style={{
+        flex: 1, minWidth: 0, minHeight: 0,
+        display: 'flex', flexDirection: 'column', gap: 4,
+      }}>
+        {plotHeader}
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <PPRScatter
+            entry={entry}
+            metric={metric}
+            onSelectIdx={onSelectPoint}
+            visibilitySignal={visibilitySignal}
+          />
+        </div>
       </div>
     </div>
   )

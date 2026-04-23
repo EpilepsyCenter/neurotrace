@@ -53,6 +53,14 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Unified run-scope dropdown (all / range-averaged / single), same
+  // pattern as AP/FPsp/IV. "range" is uniquely "averaged over the
+  // range" for Resistance — the underlying action is runAveraged(from,
+  // to), distinct from running each sweep individually.
+  type RunMode = 'all' | 'range' | 'one'
+  const [runMode, setRunMode] = useState<RunMode>('all')
+  const [sweepOne, setSweepOne] = useState(1)
+
   const [measurements, setMeasurements] = useState<MeasurementRow[]>([])
 
   // Which sweep the embedded viewer is showing. Initialised from the main
@@ -71,6 +79,89 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
 
   const traceChartRef = useRef<HTMLDivElement>(null)
   const tracePlotRef = useRef<uPlot | null>(null)
+
+  // Splitters — both persist to Electron prefs under resistanceWindowUI
+  // so the layout survives window reopens. Same recipe as AP/FPsp/IV.
+  const [plotHeight, setPlotHeight] = useState(340)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const ui = prefs?.resistanceWindowUI
+        if (cancelled || !ui) return
+        if (typeof ui.leftPanelWidth === 'number'
+            && ui.leftPanelWidth >= 200 && ui.leftPanelWidth <= 500) {
+          setLeftPanelWidth(ui.leftPanelWidth)
+        }
+        if (typeof ui.plotHeight === 'number'
+            && ui.plotHeight >= 150 && ui.plotHeight <= 800) {
+          setPlotHeight(ui.plotHeight)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const writeUIPref = useCallback(async (patch: Record<string, any>) => {
+    try {
+      const api = window.electronAPI
+      if (!api?.getPreferences || !api?.setPreferences) return
+      const prefs = (await api.getPreferences()) ?? {}
+      const next = { ...(prefs.resistanceWindowUI ?? {}), ...patch }
+      await api.setPreferences({ ...prefs, resistanceWindowUI: next })
+    } catch { /* ignore */ }
+  }, [])
+  const onSplitterMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = plotHeight
+    let latest = startH
+    const onMove = (ev: MouseEvent) => {
+      const dy = ev.clientY - startY
+      latest = Math.max(150, Math.min(800, startH + dy))
+      setPlotHeight(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeUIPref({ plotHeight: latest })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = leftPanelWidth
+    let latest = startW
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      latest = Math.max(200, Math.min(500, startW + dx))
+      setLeftPanelWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeUIPref({ leftPanelWidth: latest })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+  // Unified Run button — picks the action based on runMode. Keeps the
+  // three existing action semantics (run one sweep / run averaged
+  // over a range / run each sweep in series) while matching the AP
+  // layout pattern.
+  const onRun = () => {
+    if (runMode === 'all') runAllSweeps()
+    else if (runMode === 'range') runAveraged()
+    else {
+      const idx = Math.max(0, Math.min(totalSweeps - 1, sweepOne - 1))
+      runSingle(idx)
+    }
+  }
 
   // Derived
   const groups = fileInfo?.groups || []
@@ -771,191 +862,369 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* ---- Settings ---- */}
-      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0, background: 'var(--bg-secondary)' }}>
-        {/* Series */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <label style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 45 }}>Series:</label>
-          <select
-            value={`${currentGroup}-${currentSeries}`}
-            onChange={(e) => { const [g, s] = e.target.value.split('-').map(Number); setCurrentGroup(g); setCurrentSeries(s); setFitTime(null); setFitValues(null) }}
-            style={{ flex: 1 }}
-          >
-            {groups.map((g: any) => g.series.map((s: any) => (
-              <option key={`${g.index}-${s.index}`} value={`${g.index}-${s.index}`}>
-                {g.label} / {s.label} ({s.sweepCount} sw)
-              </option>
-            )))}
-          </select>
-
-          {/* Sweep navigator — matches the top-row placement the other
-              analysis windows use. */}
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-            <button
-              className="btn" onClick={goPrev}
-              disabled={previewSweep <= 0 || totalSweeps === 0}
-              title="Previous sweep"
-              style={{ padding: '2px 8px' }}
-            >←</button>
-            <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 58, textAlign: 'center' }}>
-              {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
-            </span>
-            <button
-              className="btn" onClick={goNext}
-              disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
-              title="Next sweep"
-              style={{ padding: '2px 8px' }}
-            >→</button>
+    <div style={{
+      display: 'flex', flexDirection: 'column', height: '100%',
+      padding: 10, gap: 10, minHeight: 0,
+    }}>
+      {/* Selectors — thin top row, always visible. Wrapped in the
+          bg-secondary chrome tone so the window's top row + left
+          panel read as one cohesive region. */}
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+        flexShrink: 0,
+        background: 'var(--bg-secondary)',
+        padding: '6px 10px',
+        borderRadius: 4,
+        border: '1px solid var(--border)',
+      }}>
+        <label style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>Series:</label>
+        <select
+          value={`${currentGroup}-${currentSeries}`}
+          onChange={(e) => { const [g, s] = e.target.value.split('-').map(Number); setCurrentGroup(g); setCurrentSeries(s); setFitTime(null); setFitValues(null) }}
+          style={{ flex: 1, minWidth: 200 }}
+        >
+          {groups.map((g: any) => g.series.map((s: any) => (
+            <option key={`${g.index}-${s.index}`} value={`${g.index}-${s.index}`}>
+              {g.label} / {s.label} ({s.sweepCount} sw)
+            </option>
+          )))}
+        </select>
+        {/* Sweep navigator */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+          <button
+            className="btn" onClick={goPrev}
+            disabled={previewSweep <= 0 || totalSweeps === 0}
+            title="Previous sweep"
+            style={{ padding: '2px 8px' }}
+          >←</button>
+          <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 58, textAlign: 'center' }}>
+            {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
           </span>
-        </div>
-
-        {/* Params row */}
-        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div>
-            <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>
-              V<sub>step</sub> (mV) {stimulus && <span style={{ color: 'var(--accent)' }}>auto</span>}
-            </label>
-            <NumInput value={vStep} step={1} onChange={setVStep} style={{ width: 65 }} />
-          </div>
-          <div>
-            <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>Exp fit</label>
-            <select value={nExp} onChange={(e) => setNExp(Number(e.target.value))} style={{ width: 65 }}>
-              <option value={1}>Mono</option>
-              <option value={2}>Bi</option>
-            </select>
-          </div>
-          <div>
-            <label style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', display: 'block' }}>Fit (ms)</label>
-            <NumInput value={fitDurationMs} step={0.5} min={0.5} max={50} onChange={setFitDurationMs} style={{ width: 55 }} />
-          </div>
-          <div style={{
-            fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
-            fontFamily: 'var(--font-mono)', background: 'var(--bg-primary)',
-            padding: '3px 6px', borderRadius: 3, border: '1px solid var(--border)', lineHeight: 1.5,
-          }}>
-            <span style={{ color: cssVar(BASELINE_COLOR_VAR) || '#4caf50', fontWeight: 600 }}>BL</span>{' '}
-            {cursors.baselineStart.toFixed(3)}→{cursors.baselineEnd.toFixed(3)}s
-            <br/>
-            <span style={{ color: cssVar(PEAK_COLOR_VAR) || '#2196f3', fontWeight: 600 }}>PK</span>{' '}
-            {cursors.peakStart.toFixed(3)}→{cursors.peakEnd.toFixed(3)}s
-          </div>
-        </div>
-
-        {/* Run row — single-sweep + averaged + all. Sweep arrows now
-            live at the top next to the Series selector (consistent
-            with Cursor / I-V / FPsp). */}
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={() => runSingle(previewSweep)} disabled={loading || totalSweeps === 0}>
-            {loading ? 'Running…' : `Run sweep ${previewSweep + 1}`}
-          </button>
-          <NumInput value={avgFrom} min={1} max={totalSweeps} step={1} onChange={(v) => setAvgFrom(Math.max(1, Math.round(v)))} style={{ width: 42 }} />
-          <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>–</span>
-          <NumInput value={avgTo} min={1} max={totalSweeps} step={1} onChange={(v) => setAvgTo(Math.max(1, Math.round(v)))} style={{ width: 42 }} />
-          <button className="btn" onClick={runAveraged} disabled={loading || totalSweeps === 0}>Averaged</button>
-          <button className="btn" onClick={runAllSweeps} disabled={loading || totalSweeps === 0}>All sweeps</button>
-          {measurements.length > 0 && (
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
-              <button className="btn" onClick={exportCSV}>Copy CSV</button>
-              <button className="btn" onClick={clearResults}>Clear</button>
-            </div>
-          )}
-        </div>
-
-        {error && <div style={{ color: 'var(--error)', fontSize: 'var(--font-size-xs)' }}>{error}</div>}
+          <button
+            className="btn" onClick={goNext}
+            disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
+            title="Next sweep"
+            style={{ padding: '2px 8px' }}
+          >→</button>
+        </span>
       </div>
 
-      {/* ---- Content: trace + table side by side ---- */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Left: trace viewer */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', position: 'relative' }}>
+      {/* Main body: two-column flex. LEFT = params; RIGHT = viewer +
+          results. Same layout as APWindow/FPspWindow/IVCurveWindow. */}
+      <div style={{
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
+      }}>
+        {/* LEFT PANEL */}
+        <div style={{
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid var(--border)',
+        }}>
+          {/* Scrollable param sections. Run controls + error banner
+              sit outside the scrollable so they're always visible. */}
           <div style={{
-            padding: '3px 8px', fontSize: 'var(--font-size-xs)',
-            color: 'var(--text-muted)', background: 'var(--bg-secondary)',
-            flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8,
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,
           }}>
-            <span>{traceLabel || 'No trace'}</span>
-            {isPreviewExcluded && (
-              <span style={{
-                fontSize: 'var(--font-size-label)', fontWeight: 600,
-                color: '#fff', background: '#e65100',
-                padding: '1px 6px', borderRadius: 3,
+            {/* Cursor readout — read-only, drag bands on the main
+                trace or the viewer to change. */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 4,
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+              fontSize: 'var(--font-size-label)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              <span>
+                <span style={{ color: cssVar(BASELINE_COLOR_VAR) || '#4caf50', fontWeight: 600 }}>BL:</span>{' '}
+                {cursors.baselineStart.toFixed(3)} → {cursors.baselineEnd.toFixed(3)}s
+              </span>
+              <span>
+                <span style={{ color: cssVar(PEAK_COLOR_VAR) || '#2196f3', fontWeight: 600 }}>PK:</span>{' '}
+                {cursors.peakStart.toFixed(3)} → {cursors.peakEnd.toFixed(3)}s
+              </span>
+            </div>
+
+            {/* Fit params */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+              gap: 8,
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+            }}>
+              <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)', gap: 2 }}>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  V<sub>step</sub> (mV) {stimulus && <span style={{ color: 'var(--accent)' }}>auto</span>}
+                </span>
+                <NumInput value={vStep} step={1} onChange={setVStep} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)', gap: 2 }}>
+                <span style={{ color: 'var(--text-muted)' }}>Exp fit</span>
+                <select value={nExp} onChange={(e) => setNExp(Number(e.target.value))}>
+                  <option value={1}>Mono</option>
+                  <option value={2}>Bi</option>
+                </select>
+              </label>
+              <label style={{
+                gridColumn: '1 / -1',
+                display: 'flex', flexDirection: 'column',
+                fontSize: 'var(--font-size-label)', gap: 2,
               }}>
-                ⊘ Excluded
-              </span>
-            )}
-            <label style={{
-              display: 'flex', alignItems: 'center', gap: 3,
-              fontSize: 'var(--font-size-label)', marginLeft: 'auto',
-            }} title="Subtract a baseline computed from the first ~3 ms of each sweep">
-              <input type="checkbox" checked={zeroOffset}
-                onChange={(e) => setZeroOffset(e.target.checked)} />
-              Zero offset
-            </label>
-            {fitTime && (
-              <span style={{ color: cssVar(FIT_COLOR_VAR) || '#9c27b0' }}>
-                ● Fit ({nExp === 1 ? 'mono' : 'bi'}-exp, {fitDurationMs}ms)
-              </span>
-            )}
-            <button
-              className="btn"
-              onClick={resetCursorsInView}
-              style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-              title="Bring baseline + peak cursors into the current view"
-            >
-              Reset cursors
-            </button>
-            <button
-              className="btn"
-              onClick={resetZoom}
-              style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-              title="Reset zoom to full sweep"
-            >
-              Reset zoom
-            </button>
+                <span style={{ color: 'var(--text-muted)' }}>Fit duration (ms)</span>
+                <NumInput value={fitDurationMs} step={0.5} min={0.5} max={50}
+                  onChange={setFitDurationMs} />
+              </label>
+            </div>
           </div>
-          <div ref={traceChartRef} style={{ flex: 1, minHeight: 120 }} />
-          <div style={{
-            position: 'absolute', bottom: 4, left: 10, zIndex: 2,
-            fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
-            fontStyle: 'italic', pointerEvents: 'none',
-          }}>
-            scroll = zoom X · ⌥ scroll = zoom Y · drag empty = pan · drag band = move · drag edge = resize
-          </div>
-        </div>
 
-        {/* Right: results table */}
-        <div style={{ width: 480, minWidth: 400, overflow: 'auto' }}>
-          {measurements.length > 0 ? (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-xs)' }}>
-              <thead>
-                <tr>
-                  {['Series', 'Sweep', 'Rs (MΩ)', 'Rin (MΩ)', 'Cm (pF)', 'τ (ms)', 'R²'].map((h) => (
-                    <th key={h} style={{ padding: '3px 5px', textAlign: 'left', borderBottom: '1px solid var(--border)', color: 'var(--text-secondary)', fontWeight: 500, position: 'sticky', top: 0, background: 'var(--bg-primary)', whiteSpace: 'nowrap' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {measurements.map((row, i) => (
-                  <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)' }}>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.series}>{row.series}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{row.sweep}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.rs, 1, '')}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.rin, 1, '')}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.cm, 1, '')}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.tau, 2, '')}</td>
-                    <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{row.fit_r_squared != null ? row.fit_r_squared.toFixed(3) : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div style={{ padding: 12, color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 'var(--font-size-xs)' }}>
-              Results accumulate here as you run analyses.
+          {/* Pinned footer: Run + Sweeps dropdown + progressive
+              disclosure for Range/Single, then secondary Copy CSV /
+              Clear below a separator. The three run actions map to:
+                - "All sweeps"     → runAllSweeps()
+                - "Averaged range" → runAveraged() (uses from/to)
+                - "Single sweep"   → runSingle(sweepOne - 1)
+              NB: "range" here means averaged-over-range, not
+              per-sweep-in-range, because that's the action the
+              Resistance analysis naturally supports. */}
+          <div style={{
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }}>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={loading || totalSweeps === 0}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {loading ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={runMode}
+                onChange={(e) => setRunMode(e.target.value as RunMode)}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="range">Averaged range</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {runMode === 'range' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>from</span>
+                <NumInput value={avgFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setAvgFrom(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span>to</span>
+                <NumInput value={avgTo} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setAvgTo(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {/* Secondary actions — smaller, visually subordinate. */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={clearResults} disabled={measurements.length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn"
+                onClick={exportCSV} disabled={measurements.length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Copy CSV
+              </button>
+            </div>
+          </div>
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
             </div>
           )}
+        </div>{/* close LEFT panel */}
+
+        {/* Vertical splitter between LEFT and RIGHT. */}
+        <div
+          onMouseDown={onLeftSplitMouseDown}
+          title="Drag to resize"
+          style={{
+            width: 3, flexShrink: 0, cursor: 'col-resize',
+            background: 'var(--border)',
+            position: 'relative',
+          }}
+        >
+          <div style={{
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
+          }} />
         </div>
-      </div>
+
+        {/* RIGHT PANEL: viewer + horizontal splitter + results table. */}
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
+        }}>
+          {/* Viewer — trace label strip + chart + help caption. */}
+          <div style={{
+            height: plotHeight, minHeight: 160, flexShrink: 0,
+            display: 'flex', flexDirection: 'column',
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+            position: 'relative',
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              padding: '3px 8px', fontSize: 'var(--font-size-xs)',
+              color: 'var(--text-muted)', background: 'var(--bg-secondary)',
+              flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8,
+              borderBottom: '1px solid var(--border)',
+            }}>
+              <span>{traceLabel || 'No trace'}</span>
+              {isPreviewExcluded && (
+                <span style={{
+                  fontSize: 'var(--font-size-label)', fontWeight: 600,
+                  color: '#fff', background: '#e65100',
+                  padding: '1px 6px', borderRadius: 3,
+                }}>
+                  ⊘ Excluded
+                </span>
+              )}
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 3,
+                fontSize: 'var(--font-size-label)', marginLeft: 'auto',
+              }} title="Subtract a baseline computed from the first ~3 ms of each sweep">
+                <input type="checkbox" checked={zeroOffset}
+                  onChange={(e) => setZeroOffset(e.target.checked)} />
+                Zero offset
+              </label>
+              {fitTime && (
+                <span style={{ color: cssVar(FIT_COLOR_VAR) || '#9c27b0' }}>
+                  ● Fit ({nExp === 1 ? 'mono' : 'bi'}-exp, {fitDurationMs}ms)
+                </span>
+              )}
+              <button
+                className="btn"
+                onClick={resetCursorsInView}
+                style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+                title="Bring baseline + peak cursors into the current view"
+              >
+                Reset cursors
+              </button>
+              <button
+                className="btn"
+                onClick={resetZoom}
+                style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+                title="Reset zoom to full sweep"
+              >
+                Reset zoom
+              </button>
+            </div>
+            <div ref={traceChartRef} style={{ flex: 1, minHeight: 120 }} />
+            <div style={{
+              position: 'absolute', bottom: 4, left: 10, zIndex: 2,
+              fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
+              fontStyle: 'italic', pointerEvents: 'none',
+            }}>
+              scroll = zoom X · ⌥ scroll = zoom Y · drag empty = pan · drag band = move · drag edge = resize
+            </div>
+          </div>
+
+          {/* Horizontal splitter between viewer and results. Thin
+              (3px hit / 2px grip) to match AP/FPsp/IV. */}
+          <div
+            onMouseDown={onSplitterMouseDown}
+            style={{
+              height: 3,
+              cursor: 'row-resize',
+              background: 'var(--border)',
+              flexShrink: 0,
+              position: 'relative',
+            }}
+            title="Drag to resize"
+          >
+            <div style={{
+              position: 'absolute', left: '50%', top: 0,
+              transform: 'translateX(-50%)',
+              width: 40, height: 2,
+              background: 'var(--text-muted)',
+              borderRadius: 1, opacity: 0.5,
+            }} />
+          </div>
+
+          {/* Results table */}
+          <div style={{
+            flex: 1, minHeight: 0, overflow: 'auto',
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+            marginTop: 6,
+          }}>
+            {measurements.length > 0 ? (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-xs)' }}>
+                <thead>
+                  <tr>
+                    {['Series', 'Sweep', 'Rs (MΩ)', 'Rin (MΩ)', 'Cm (pF)', 'τ (ms)', 'R²'].map((h) => (
+                      <th key={h} style={{ padding: '3px 5px', textAlign: 'left', borderBottom: '1px solid var(--border)', color: 'var(--text-secondary)', fontWeight: 500, position: 'sticky', top: 0, background: 'var(--bg-primary)', whiteSpace: 'nowrap' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {measurements.map((row, i) => (
+                    <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)' }}>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.series}>{row.series}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{row.sweep}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.rs, 1, '')}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.rin, 1, '')}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.cm, 1, '')}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.tau, 2, '')}</td>
+                      <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{row.fit_r_squared != null ? row.fit_r_squared.toFixed(3) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ padding: 12, color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 'var(--font-size-xs)' }}>
+                Results accumulate here as you run analyses.
+              </div>
+            )}
+          </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }

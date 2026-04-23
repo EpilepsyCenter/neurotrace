@@ -901,6 +901,7 @@ export interface CursorAnalysisData {
 
 export interface CursorWindowUI {
   plotHeight: number
+  leftPanelWidth: number                  // left params column width, 200–500 px
   measurementColumns: string[]            // visible-column IDs for the Measurements tab
   fitColumns: string[]                    // visible-column IDs for the Fit tab
   activeTab: 'measurements' | 'fit'
@@ -1396,6 +1397,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cursorWindowUI: (() => {
     const defaults: CursorWindowUI = {
       plotHeight: 220,
+      leftPanelWidth: 340,
       measurementColumns: [
         'sweep', 'slot', 'baseline', 'peak', 'amplitude', 'peak_time',
         'rise_time_20_80', 'half_width', 'area',

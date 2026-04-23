@@ -526,7 +526,12 @@ export function CursorAnalysisWindow({
     triggerDownload(new Blob([csv], { type: 'text/csv' }), name)
   }
 
-  // ---- Splitter ------------------------------------------------------------
+  // ---- Splitters -----------------------------------------------------------
+  //
+  // Both splitter heights/widths live in `cursorWindowUI` (persisted
+  // through the existing `_persistCursorUI` subscriber) so the layout
+  // survives window reopens — same as the other analysis windows, but
+  // routed through the store instead of a standalone prefs helper.
 
   const onSplitterMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -534,6 +539,20 @@ export function CursorAnalysisWindow({
     const startH = ui.plotHeight
     const onMove = (ev: MouseEvent) => {
       setUI({ plotHeight: Math.max(120, Math.min(700, startH + (ev.clientY - startY))) })
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = ui.leftPanelWidth
+    const onMove = (ev: MouseEvent) => {
+      setUI({ leftPanelWidth: Math.max(260, Math.min(600, startW + (ev.clientX - startX))) })
     }
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
@@ -558,7 +577,13 @@ export function CursorAnalysisWindow({
       padding: 10, gap: 8, minHeight: 0,
     }}>
       {/* --- Selectors (group / series / channel / sweep navigator) ---- */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+      <div style={{
+        display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flexShrink: 0,
+        background: 'var(--bg-secondary)',
+        padding: '6px 10px',
+        borderRadius: 4,
+        border: '1px solid var(--border)',
+      }}>
         <Field label="Group">
           <select value={localData.group} onChange={(e) => patch({ group: Number(e.target.value) })} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
@@ -605,280 +630,345 @@ export function CursorAnalysisWindow({
         </Field>
       </div>
 
-      {/* --- Filter (seeded from main viewer, editable locally) + zero offset */}
-      <div style={{
-        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
-      }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
-          <input type="checkbox" checked={localFilter.enabled}
-            onChange={(e) => setLocalFilter((f) => ({ ...f, enabled: e.target.checked }))} />
-          Filter
-        </label>
-        <select value={localFilter.type} disabled={!localFilter.enabled}
-          onChange={(e) => setLocalFilter((f) => ({ ...f, type: e.target.value as any }))}>
-          <option value="lowpass">Lowpass</option>
-          <option value="highpass">Highpass</option>
-          <option value="bandpass">Bandpass</option>
-        </select>
-        {(localFilter.type === 'highpass' || localFilter.type === 'bandpass') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ color: 'var(--text-muted)' }}>Low</span>
-            <NumInput value={localFilter.lowCutoff} step={1} min={0.1}
-              onChange={(v) => setLocalFilter((f) => ({ ...f, lowCutoff: v }))}
-              style={{ width: 60 }} />
-            <span style={{ color: 'var(--text-muted)' }}>Hz</span>
-          </span>
-        )}
-        {(localFilter.type === 'lowpass' || localFilter.type === 'bandpass') && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ color: 'var(--text-muted)' }}>High</span>
-            <NumInput value={localFilter.highCutoff} step={100} min={1}
-              onChange={(v) => setLocalFilter((f) => ({ ...f, highCutoff: v }))}
-              style={{ width: 70 }} />
-            <span style={{ color: 'var(--text-muted)' }}>Hz</span>
-          </span>
-        )}
-        <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-          <span style={{ color: 'var(--text-muted)' }}>Order</span>
-          <NumInput value={localFilter.order} step={1} min={1} max={8}
-            onChange={(v) => setLocalFilter((f) => ({ ...f, order: Math.max(1, Math.min(8, Math.round(v))) }))}
-            style={{ width: 44 }} />
-        </span>
-        <button className="btn" title="Copy filter settings from the main viewer"
-          style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-          onClick={() => setLocalFilter({ ...mainFilter })}>
-          ← main
-        </button>
-        <span style={{ width: 1, height: 18, background: 'var(--border)' }} />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-          title="Subtract a baseline computed from the first ~3 ms of the sweep">
-          <input type="checkbox" checked={applyZero}
-            onChange={(e) => setApplyZero(e.target.checked)} />
-          Zero offset
-        </label>
-      </div>
+      {/* Main body: two-column flex. LEFT = params column (scrollable
+          with Run controls pinned to its bottom); RIGHT = viewer +
+          results. Same layout as APWindow/FPspWindow/IVCurveWindow/
+          ResistanceWindow/FieldBurstWindow.
 
+          Left-panel min/max is wider here (260–600) than the other
+          windows (200–500) because the slot table has 8 columns; a
+          super-narrow column would force horizontal scroll for values
+          the user edits frequently. */}
       <div style={{
-        display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
       }}>
-        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>Run on:</span>
-        {(['all', 'range', 'one'] as const).map((m) => (
-          <label key={m} style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-            <input type="radio" name="cursor-run-mode" value={m}
-              checked={localData.runMode === m} onChange={() => patch({ runMode: m })} />
-            {m === 'all' ? 'all sweeps' : m === 'range' ? 'range' : 'single sweep'}
-          </label>
-        ))}
-        {localData.runMode === 'range' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={localData.sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => patch({ sweepFrom: Math.max(1, Math.round(v)) })} style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>–</span>
-            <NumInput value={localData.sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => patch({ sweepTo: Math.max(1, Math.round(v)) })} style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-            </span>
-          </span>
-        )}
-        {localData.runMode === 'one' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={localData.sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => patch({ sweepOne: Math.max(1, Math.round(v)) })} style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-            </span>
-          </span>
-        )}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12, fontSize: 'var(--font-size-label)' }}>
-          <input type="checkbox" checked={localData.average}
-            onChange={(e) => patch({ average: e.target.checked })} />
-          Average selected sweeps first
-        </label>
-        <button className="btn btn-primary" onClick={onRun}
-          disabled={running || !fileInfo} style={{ marginLeft: 'auto' }}>
-          {running ? 'Running…' : 'Run'}
-        </button>
-        <button className="btn" onClick={onClear} disabled={localData.measurements.length === 0}>Clear</button>
-        <button className="btn" onClick={onExportCSV} disabled={localData.measurements.length === 0}>
-          Export CSV
-        </button>
-      </div>
-
-      {/* --- Baseline + slot count ------------------------------------ */}
-      <div style={{
-        display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
-      }}>
-        <span style={{ fontWeight: 600, color: 'var(--cursor-baseline)' }}>Baseline</span>
-        <NumInput value={localData.baseline.start} step={0.001}
-          onChange={(v) => patch({ baseline: { ...localData.baseline, start: v } })} style={{ width: 70 }} />
-        <span style={{ color: 'var(--text-muted)' }}>→</span>
-        <NumInput value={localData.baseline.end} step={0.001}
-          onChange={(v) => patch({ baseline: { ...localData.baseline, end: v } })} style={{ width: 70 }} />
-        <span style={{ color: 'var(--text-muted)' }}>s</span>
-        <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-          Method:
-          <select value={localData.baselineMethod}
-            onChange={(e) => patch({ baselineMethod: e.target.value as 'mean' | 'median' })}>
-            <option value="mean">mean</option>
-            <option value="median">median</option>
-          </select>
-        </label>
-        <span style={{ width: 1, height: 18, background: 'var(--border)' }} />
-        <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-          Cursor pairs:
-          <NumInput value={localData.slotCount} step={1} min={1} max={MAX_SLOTS}
-            onChange={(v) => patch({ slotCount: Math.max(1, Math.min(MAX_SLOTS, Math.round(v))) })}
-            style={{ width: 44 }} />
-        </label>
-      </div>
-
-      {/* --- Slot table (only the first slotCount rows) ---------------- */}
-      <div style={{
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)', padding: '4px 6px',
-        overflow: 'auto', flexShrink: 0,
-      }}>
-        <table style={{
-          width: '100%', borderCollapse: 'collapse',
-          fontSize: 'var(--font-size-label)', fontFamily: 'var(--font-mono)',
-        }}>
-          <thead>
-            <tr style={{ color: 'var(--text-muted)', textAlign: 'left' }}>
-              <Th>#</Th>
-              <Th>On</Th>
-              <Th>Peak start</Th>
-              <Th>Peak end</Th>
-              <Th>Fit start</Th>
-              <Th>Fit end</Th>
-              <Th>Fit function</Th>
-              <Th>Fit opts</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {localData.slots.slice(0, localData.slotCount).map((slot, i) => (
-              <SlotRow
-                key={i}
-                index={i}
-                slot={slot}
-                fitFunctions={fitFunctions}
-                cursors={cursors}
-                onChange={(p) => updateSlot(i, p)}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {error && (
+        {/* LEFT PANEL */}
         <div style={{
-          padding: '6px 10px',
-          background: 'var(--bg-error, #5c1b1b)',
-          color: '#fff',
-          borderRadius: 3,
-          display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 'var(--font-size-xs)',
+          width: ui.leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid var(--border)',
         }}>
-          <span style={{ flex: 1 }}>⚠ {error}</span>
-          <button className="btn" onClick={() => setError(null)}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
-        </div>
-      )}
-
-      {/* --- Viewer + tabs split --------------------------------------- */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <div style={{ height: ui.plotHeight, minHeight: 120, flexShrink: 0, position: 'relative' }}>
-          <MiniViewer
-            data={previewData}
-            heightSignal={ui.plotHeight}
-            baseline={localData.baseline}
-            slots={visibleSlots}
-            traceUnit={localData.traceUnit}
-            measurements={localData.measurements}
-            previewSweep={previewSweep}
-            displayYOffset={previewData?.zeroOffset ?? 0}
-            zeroOffset={applyZero}
-            onZeroOffsetChange={setApplyZero}
-            onBaselineChange={(b) => patch({ baseline: b })}
-            onSlotChange={updateSlot}
-            onResetCursorsInView={(xMin, xMax) => {
-              // Distribute Baseline (first 10 %) and each ENABLED slot's
-              // peak cursor across the remaining 20 %-95 % of the view.
-              // Fit cursors on slots that have them follow along with
-              // their peak (centred in the same slot bucket).
-              const span = xMax - xMin
-              const newBaseline = {
-                start: xMin + 0.02 * span,
-                end: xMin + 0.12 * span,
-              }
-              const enabledIdx: number[] = []
-              localData.slots.slice(0, localData.slotCount).forEach((s, i) => {
-                if (s.enabled) enabledIdx.push(i)
-              })
-              const n = enabledIdx.length
-              setLocalData((d) => {
-                const nextSlots = d.slots.slice()
-                if (n === 0) return { ...d, baseline: newBaseline }
-                const zoneStart = 0.20
-                const zoneEnd = 0.95
-                const zoneSpan = zoneEnd - zoneStart
-                const perSlot = zoneSpan / n
-                enabledIdx.forEach((slotIdx, k) => {
-                  const frac0 = zoneStart + k * perSlot + perSlot * 0.1
-                  const frac1 = zoneStart + (k + 1) * perSlot - perSlot * 0.1
-                  const pkStart = xMin + frac0 * span
-                  const pkEnd = xMin + frac1 * span
-                  const cur = nextSlots[slotIdx]
-                  const next: CursorSlotConfig = {
-                    ...cur,
-                    peak: { start: pkStart, end: pkEnd },
-                  }
-                  // If this slot had a fit cursor, keep it inside the
-                  // same bucket as the peak, one-third of the way in.
-                  if (cur.fit != null) {
-                    const mid = (pkStart + pkEnd) / 2
-                    next.fit = {
-                      start: pkStart + (mid - pkStart) * 0.3,
-                      end: pkEnd - (pkEnd - mid) * 0.3,
-                    }
-                  }
-                  nextSlots[slotIdx] = next
-                })
-                return { ...d, baseline: newBaseline, slots: nextSlots }
-              })
-            }}
-          />
-        </div>
-
-        <div onMouseDown={onSplitterMouseDown}
-          style={{ height: 6, cursor: 'row-resize', background: 'var(--border)', flexShrink: 0, position: 'relative' }}>
+          {/* Scrollable param sections. */}
           <div style={{
-            position: 'absolute', left: '50%', top: 1, transform: 'translateX(-50%)',
-            width: 40, height: 4, background: 'var(--text-muted)',
-            borderRadius: 2, opacity: 0.5,
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,
+          }}>
+            {/* Filter (seeded from main viewer, editable locally).
+                Compact vertical layout so it fits in the narrower
+                column. (Zero offset lives in the viewer header — same
+                place as every other window.) */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 6,
+              padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
+            }}>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+                  <input type="checkbox" checked={localFilter.enabled}
+                    onChange={(e) => setLocalFilter((f) => ({ ...f, enabled: e.target.checked }))} />
+                  Filter
+                </label>
+                <select value={localFilter.type} disabled={!localFilter.enabled}
+                  onChange={(e) => setLocalFilter((f) => ({ ...f, type: e.target.value as any }))}
+                  style={{ flex: 1 }}>
+                  <option value="lowpass">Lowpass</option>
+                  <option value="highpass">Highpass</option>
+                  <option value="bandpass">Bandpass</option>
+                </select>
+              </div>
+              {localFilter.enabled && (
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  {(localFilter.type === 'highpass' || localFilter.type === 'bandpass') && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>Low</span>
+                      <NumInput value={localFilter.lowCutoff} step={1} min={0.1}
+                        onChange={(v) => setLocalFilter((f) => ({ ...f, lowCutoff: v }))}
+                        style={{ width: 60 }} />
+                      <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+                    </span>
+                  )}
+                  {(localFilter.type === 'lowpass' || localFilter.type === 'bandpass') && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>High</span>
+                      <NumInput value={localFilter.highCutoff} step={100} min={1}
+                        onChange={(v) => setLocalFilter((f) => ({ ...f, highCutoff: v }))}
+                        style={{ width: 70 }} />
+                      <span style={{ color: 'var(--text-muted)' }}>Hz</span>
+                    </span>
+                  )}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Order</span>
+                    <NumInput value={localFilter.order} step={1} min={1} max={8}
+                      onChange={(v) => setLocalFilter((f) => ({ ...f, order: Math.max(1, Math.min(8, Math.round(v))) }))}
+                      style={{ width: 44 }} />
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Baseline + slot count */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 6,
+              padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-primary)', fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ fontWeight: 600, color: 'var(--cursor-baseline)' }}>Baseline</span>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                <NumInput value={localData.baseline.start} step={0.001}
+                  onChange={(v) => patch({ baseline: { ...localData.baseline, start: v } })} style={{ width: 70 }} />
+                <span style={{ color: 'var(--text-muted)' }}>→</span>
+                <NumInput value={localData.baseline.end} step={0.001}
+                  onChange={(v) => patch({ baseline: { ...localData.baseline, end: v } })} style={{ width: 70 }} />
+                <span style={{ color: 'var(--text-muted)' }}>s</span>
+              </div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                  Method:
+                  <select value={localData.baselineMethod}
+                    onChange={(e) => patch({ baselineMethod: e.target.value as 'mean' | 'median' })}>
+                    <option value="mean">mean</option>
+                    <option value="median">median</option>
+                  </select>
+                </label>
+                <label style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                  Cursor pairs:
+                  <NumInput value={localData.slotCount} step={1} min={1} max={MAX_SLOTS}
+                    onChange={(v) => patch({ slotCount: Math.max(1, Math.min(MAX_SLOTS, Math.round(v))) })}
+                    style={{ width: 44 }} />
+                </label>
+              </div>
+            </div>
+
+            {/* Slot cards — the heart of this window. Each slot is
+                its own compact card with vertical layout, so the form
+                fits the narrow left panel without horizontal scroll.
+                Values are editable here but the main interaction is
+                still dragging cursor bands directly on the viewer. */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 6,
+              flexShrink: 0,
+            }}>
+              {localData.slots.slice(0, localData.slotCount).map((slot, i) => (
+                <SlotRow
+                  key={i}
+                  index={i}
+                  slot={slot}
+                  fitFunctions={fitFunctions}
+                  cursors={cursors}
+                  onChange={(p) => updateSlot(i, p)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Pinned footer: Run + Sweeps dropdown (progressive
+              disclosure for Range/Single) + "Average selected sweeps
+              first" checkbox, then secondary Clear / Export CSV below
+              a separator. */}
+          <div style={{
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }}>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={running || !fileInfo}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {running ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={localData.runMode}
+                onChange={(e) => patch({ runMode: e.target.value as 'all' | 'range' | 'one' })}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="range">Range</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {localData.runMode === 'range' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>from</span>
+                <NumInput value={localData.sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => patch({ sweepFrom: Math.max(1, Math.round(v)) })} style={{ width: 60 }} />
+                <span>to</span>
+                <NumInput value={localData.sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => patch({ sweepTo: Math.max(1, Math.round(v)) })} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {localData.runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={localData.sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => patch({ sweepOne: Math.max(1, Math.round(v)) })} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-label)' }}>
+              <input type="checkbox" checked={localData.average}
+                onChange={(e) => patch({ average: e.target.checked })} />
+              Average selected sweeps first
+            </label>
+            {/* Secondary actions */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn" onClick={onClear}
+                disabled={localData.measurements.length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn" onClick={onExportCSV}
+                disabled={localData.measurements.length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Export CSV
+              </button>
+            </div>
+          </div>
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+            </div>
+          )}
+        </div>{/* close LEFT panel */}
+
+        {/* Vertical splitter between LEFT and RIGHT. */}
+        <div
+          onMouseDown={onLeftSplitMouseDown}
+          title="Drag to resize"
+          style={{
+            width: 3, flexShrink: 0, cursor: 'col-resize',
+            background: 'var(--border)',
+            position: 'relative',
+          }}
+        >
+          <div style={{
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
           }} />
         </div>
 
-        <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <ResultsTabs
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            measurements={localData.measurements}
-            traceUnit={localData.traceUnit}
-            fitFunctions={fitFunctions}
-            measurementColumns={ui.measurementColumns}
-            fitColumns={ui.fitColumns}
-            setMeasurementColumns={(c) => setUI({ measurementColumns: c })}
-            setFitColumns={(c) => setUI({ fitColumns: c })}
-          />
-        </div>
-      </div>
+        {/* RIGHT PANEL: viewer + horizontal splitter + ResultsTabs. */}
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
+        }}>
+          <div style={{ height: ui.plotHeight, minHeight: 120, flexShrink: 0, position: 'relative' }}>
+            <MiniViewer
+              data={previewData}
+              heightSignal={ui.plotHeight}
+              baseline={localData.baseline}
+              slots={visibleSlots}
+              traceUnit={localData.traceUnit}
+              measurements={localData.measurements}
+              previewSweep={previewSweep}
+              displayYOffset={previewData?.zeroOffset ?? 0}
+              zeroOffset={applyZero}
+              onZeroOffsetChange={setApplyZero}
+              onBaselineChange={(b) => patch({ baseline: b })}
+              onSlotChange={updateSlot}
+              onResetCursorsInView={(xMin, xMax) => {
+                // Distribute Baseline (first 10 %) and each ENABLED slot's
+                // peak cursor across the remaining 20 %-95 % of the view.
+                // Fit cursors on slots that have them follow along with
+                // their peak (centred in the same slot bucket).
+                const span = xMax - xMin
+                const newBaseline = {
+                  start: xMin + 0.02 * span,
+                  end: xMin + 0.12 * span,
+                }
+                const enabledIdx: number[] = []
+                localData.slots.slice(0, localData.slotCount).forEach((s, i) => {
+                  if (s.enabled) enabledIdx.push(i)
+                })
+                const n = enabledIdx.length
+                setLocalData((d) => {
+                  const nextSlots = d.slots.slice()
+                  if (n === 0) return { ...d, baseline: newBaseline }
+                  const zoneStart = 0.20
+                  const zoneEnd = 0.95
+                  const zoneSpan = zoneEnd - zoneStart
+                  const perSlot = zoneSpan / n
+                  enabledIdx.forEach((slotIdx, k) => {
+                    const frac0 = zoneStart + k * perSlot + perSlot * 0.1
+                    const frac1 = zoneStart + (k + 1) * perSlot - perSlot * 0.1
+                    const pkStart = xMin + frac0 * span
+                    const pkEnd = xMin + frac1 * span
+                    const cur = nextSlots[slotIdx]
+                    const next: CursorSlotConfig = {
+                      ...cur,
+                      peak: { start: pkStart, end: pkEnd },
+                    }
+                    // If this slot had a fit cursor, keep it inside the
+                    // same bucket as the peak, one-third of the way in.
+                    if (cur.fit != null) {
+                      const mid = (pkStart + pkEnd) / 2
+                      next.fit = {
+                        start: pkStart + (mid - pkStart) * 0.3,
+                        end: pkEnd - (pkEnd - mid) * 0.3,
+                      }
+                    }
+                    nextSlots[slotIdx] = next
+                  })
+                  return { ...d, baseline: newBaseline, slots: nextSlots }
+                })
+              }}
+            />
+          </div>
+
+          {/* Horizontal splitter — thin (3px / 2px) to match the
+              other analysis windows. */}
+          <div onMouseDown={onSplitterMouseDown}
+            style={{ height: 3, cursor: 'row-resize', background: 'var(--border)', flexShrink: 0, position: 'relative' }}
+            title="Drag to resize">
+            <div style={{
+              position: 'absolute', left: '50%', top: 0, transform: 'translateX(-50%)',
+              width: 40, height: 2, background: 'var(--text-muted)',
+              borderRadius: 1, opacity: 0.5,
+            }} />
+          </div>
+
+          <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column', marginTop: 6 }}>
+            <ResultsTabs
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              measurements={localData.measurements}
+              traceUnit={localData.traceUnit}
+              fitFunctions={fitFunctions}
+              measurementColumns={ui.measurementColumns}
+              fitColumns={ui.fitColumns}
+              setMeasurementColumns={(c) => setUI({ measurementColumns: c })}
+              setFitColumns={(c) => setUI({ fitColumns: c })}
+            />
+          </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }
@@ -896,7 +986,34 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-// ---- Slot row with per-slot fit-options popover ---------------------------
+// ---- Slot card with collapsible fit panel --------------------------------
+//
+// Each slot is a self-contained card with a vertical layout that fits
+// naturally in a narrow left panel. Structure:
+//
+//   ┌─ [■N] ☑ Enabled ──────────────┐
+//   │                               │
+//   │ Peak:  [start] → [end] s      │
+//   │                               │
+//   │ ☐ Fit   (or ▾ when enabled)   │
+//   │  ─── when fit enabled: ─────  │
+//   │  Fit:   [start] → [end] s     │
+//   │  Fn:    [dropdown]            │
+//   │  [▸ advanced fit options]     │
+//   │  ─── when advanced open: ───  │
+//   │  max iter: [____]             │
+//   │  ftol:     [____]             │
+//   │  xtol:     [____]             │
+//   │  Initial guesses (blank=auto):│
+//   │    param_a: [____]            │
+//   │    param_b: [____]            │
+//   │  [reset guesses]              │
+//   └───────────────────────────────┘
+//
+// The old 8-column table + popover layout was cramped when the left
+// panel is narrow — enabling a fit exploded the row into 6+ fields
+// laterally and the gear popover pushed more fields into the same
+// overflowing row. Vertical stacking reads top-to-bottom at any width.
 
 function SlotRow({
   index, slot, fitFunctions, cursors, onChange,
@@ -907,104 +1024,11 @@ function SlotRow({
   cursors: CursorPositions
   onChange: (patch: Partial<CursorSlotConfig>) => void
 }) {
+  void cursors  // reserved for future auto-seeding of slot windows
   const color = SLOT_COLORS[index % SLOT_COLORS.length]
   const fitEnabled = slot.fit != null
-  const [optsOpen, setOptsOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const activeFn = fitFunctions.find((f) => f.id === (slot.fitFunction ?? 'mono_exp'))
-
-  return (
-    <>
-      <tr style={{ borderTop: '1px solid var(--border)', opacity: slot.enabled ? 1 : 0.55 }}>
-        <Td>
-          <span style={{
-            display: 'inline-block', width: 16, height: 16, borderRadius: 3,
-            background: color, textAlign: 'center', color: '#000', fontWeight: 700,
-            fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: '16px',
-          }}>{index + 1}</span>
-        </Td>
-        <Td>
-          <input type="checkbox" checked={slot.enabled}
-            onChange={(e) => onChange({ enabled: e.target.checked })} />
-        </Td>
-        <Td>
-          <NumInput value={slot.peak.start} step={0.001}
-            onChange={(v) => onChange({ peak: { ...slot.peak, start: v } })} style={{ width: 65 }} />
-        </Td>
-        <Td>
-          <NumInput value={slot.peak.end} step={0.001}
-            onChange={(v) => onChange({ peak: { ...slot.peak, end: v } })} style={{ width: 65 }} />
-        </Td>
-        <Td>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <input type="checkbox" checked={fitEnabled}
-              onChange={(e) => onChange({
-                fit: e.target.checked ? { start: slot.peak.start, end: slot.peak.end } : null,
-                fitFunction: e.target.checked ? (slot.fitFunction ?? 'mono_exp') : null,
-              })} />
-            {fitEnabled && slot.fit && (
-              <NumInput value={slot.fit.start} step={0.001}
-                onChange={(v) => slot.fit && onChange({ fit: { ...slot.fit, start: v } })}
-                style={{ width: 65 }} />
-            )}
-          </label>
-        </Td>
-        <Td>
-          {fitEnabled && slot.fit && (
-            <NumInput value={slot.fit.end} step={0.001}
-              onChange={(v) => slot.fit && onChange({ fit: { ...slot.fit, end: v } })}
-              style={{ width: 65 }} />
-          )}
-        </Td>
-        <Td>
-          {fitEnabled && (
-            <select
-              value={slot.fitFunction ?? 'mono_exp'}
-              onChange={(e) => onChange({ fitFunction: e.target.value })}
-              style={{ minWidth: 180 }}
-            >
-              {fitFunctions.map((f) => (
-                <option key={f.id} value={f.id}>{f.label}</option>
-              ))}
-            </select>
-          )}
-        </Td>
-        <Td>
-          {fitEnabled && (
-            <button className="btn" onClick={() => setOptsOpen((v) => !v)}
-              style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-              title="Per-slot fit options (iterations, tolerances, initial guesses)">
-              {'\u2699'}
-            </button>
-          )}
-        </Td>
-      </tr>
-      {optsOpen && fitEnabled && activeFn && (
-        <tr>
-          <td colSpan={8} style={{
-            background: 'var(--bg-secondary)', padding: 8,
-            borderTop: '1px dashed var(--border)',
-          }}>
-            <FitOptionsPopover
-              slot={slot}
-              fn={activeFn}
-              onChange={onChange}
-              onClose={() => setOptsOpen(false)}
-            />
-          </td>
-        </tr>
-      )}
-    </>
-  )
-}
-
-function FitOptionsPopover({
-  slot, fn, onChange, onClose,
-}: {
-  slot: CursorSlotConfig
-  fn: FitFunction
-  onChange: (patch: Partial<CursorSlotConfig>) => void
-  onClose: () => void
-}) {
   const opts = slot.fitOptions ?? {}
   const setOpts = (p: Partial<NonNullable<CursorSlotConfig['fitOptions']>>) =>
     onChange({ fitOptions: { ...opts, ...p } })
@@ -1015,52 +1039,152 @@ function FitOptionsPopover({
     else next[param] = n
     setOpts({ initialGuess: next })
   }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 'var(--font-size-label)' }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Fit options · {fn.label}</span>
-        <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          max iterations
-          <NumInput value={opts.maxfev ?? 5000} step={500} min={100}
-            onChange={(v) => setOpts({ maxfev: Math.max(100, Math.round(v)) })} style={{ width: 60 }} />
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 6,
+      padding: 8,
+      border: '1px solid var(--border)', borderRadius: 4,
+      background: 'var(--bg-primary)',
+      fontSize: 'var(--font-size-label)',
+      opacity: slot.enabled ? 1 : 0.55,
+    }}>
+      {/* Header: slot badge + enable toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{
+          display: 'inline-block', width: 18, height: 18, borderRadius: 3,
+          background: color, textAlign: 'center', color: '#000', fontWeight: 700,
+          fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: '18px',
+        }}>{index + 1}</span>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+          <input type="checkbox" checked={slot.enabled}
+            onChange={(e) => onChange({ enabled: e.target.checked })} />
+          Slot {index + 1}
         </label>
-        <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          ftol
-          <NumInput value={opts.ftol ?? 1e-8}
-            onChange={(v) => setOpts({ ftol: v })} style={{ width: 72 }} />
-        </label>
-        <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          xtol
-          <NumInput value={opts.xtol ?? 1e-8}
-            onChange={(v) => setOpts({ xtol: v })} style={{ width: 72 }} />
-        </label>
-        <button className="btn" onClick={onClose} style={{ marginLeft: 'auto' }}>close</button>
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ color: 'var(--text-muted)' }}>Initial guess overrides (blank = auto):</span>
-        {fn.params.map((p) => {
-          const cur = opts.initialGuess?.[p]
-          return (
-            <label key={p} style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-              <span style={{ fontFamily: 'var(--font-mono)' }}>{p}</span>
-              <input
-                type="text" inputMode="decimal"
-                defaultValue={cur == null ? '' : String(cur)}
-                onBlur={(e) => setGuess(p, e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                placeholder="auto"
-                style={{ width: 70 }}
-              />
-            </label>
-          )
-        })}
-        {opts.initialGuess && Object.keys(opts.initialGuess).length > 0 && (
-          <button className="btn" onClick={() => setOpts({ initialGuess: {} })}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>
-            reset all
+
+      {/* Peak cursor pair */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+        <span style={{ color: 'var(--text-muted)', minWidth: 34 }}>Peak:</span>
+        <NumInput value={slot.peak.start} step={0.001}
+          onChange={(v) => onChange({ peak: { ...slot.peak, start: v } })} style={{ width: 70 }} />
+        <span style={{ color: 'var(--text-muted)' }}>→</span>
+        <NumInput value={slot.peak.end} step={0.001}
+          onChange={(v) => onChange({ peak: { ...slot.peak, end: v } })} style={{ width: 70 }} />
+        <span style={{ color: 'var(--text-muted)' }}>s</span>
+      </div>
+
+      {/* Fit toggle */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+        <input type="checkbox" checked={fitEnabled}
+          onChange={(e) => {
+            onChange({
+              fit: e.target.checked ? { start: slot.peak.start, end: slot.peak.end } : null,
+              fitFunction: e.target.checked ? (slot.fitFunction ?? 'mono_exp') : null,
+            })
+            if (!e.target.checked) setAdvancedOpen(false)
+          }} />
+        Fit
+      </label>
+
+      {/* Fit fields — only when fit is enabled */}
+      {fitEnabled && slot.fit && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+            <span style={{ color: 'var(--text-muted)', minWidth: 34 }}>Range:</span>
+            <NumInput value={slot.fit.start} step={0.001}
+              onChange={(v) => slot.fit && onChange({ fit: { ...slot.fit, start: v } })}
+              style={{ width: 70 }} />
+            <span style={{ color: 'var(--text-muted)' }}>→</span>
+            <NumInput value={slot.fit.end} step={0.001}
+              onChange={(v) => slot.fit && onChange({ fit: { ...slot.fit, end: v } })}
+              style={{ width: 70 }} />
+            <span style={{ color: 'var(--text-muted)' }}>s</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ color: 'var(--text-muted)', minWidth: 34 }}>Fn:</span>
+            <select
+              value={slot.fitFunction ?? 'mono_exp'}
+              onChange={(e) => onChange({ fitFunction: e.target.value })}
+              style={{ flex: 1 }}
+            >
+              {fitFunctions.map((f) => (
+                <option key={f.id} value={f.id}>{f.label}</option>
+              ))}
+            </select>
+          </div>
+          {/* Advanced fit options — collapsed by default. Mirrors the
+              "Fit opts" gear button in the old table layout. */}
+          <button className="btn"
+            onClick={() => setAdvancedOpen((v) => !v)}
+            style={{
+              padding: '2px 6px', fontSize: 'var(--font-size-label)',
+              alignSelf: 'flex-start',
+              color: 'var(--text-muted)',
+            }}
+            title="Per-slot fit options (iterations, tolerances, initial guesses)">
+            {advancedOpen ? '▾ advanced fit options' : '▸ advanced fit options'}
           </button>
-        )}
-      </div>
+          {advancedOpen && activeFn && (
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 4,
+              padding: 6,
+              border: '1px dashed var(--border)',
+              borderRadius: 3,
+              background: 'var(--bg-secondary)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: 'var(--text-muted)', minWidth: 54 }}>max iter</span>
+                <NumInput value={opts.maxfev ?? 5000} step={500} min={100}
+                  onChange={(v) => setOpts({ maxfev: Math.max(100, Math.round(v)) })} style={{ flex: 1 }} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: 'var(--text-muted)', minWidth: 54 }}>ftol</span>
+                <NumInput value={opts.ftol ?? 1e-8}
+                  onChange={(v) => setOpts({ ftol: v })} style={{ flex: 1 }} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: 'var(--text-muted)', minWidth: 54 }}>xtol</span>
+                <NumInput value={opts.xtol ?? 1e-8}
+                  onChange={(v) => setOpts({ xtol: v })} style={{ flex: 1 }} />
+              </div>
+              {activeFn.params.length > 0 && (
+                <>
+                  <span style={{ color: 'var(--text-muted)', marginTop: 2 }}>
+                    Initial guesses (blank = auto):
+                  </span>
+                  {activeFn.params.map((p) => {
+                    const cur = opts.initialGuess?.[p]
+                    return (
+                      <div key={p} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', minWidth: 54 }}>{p}</span>
+                        <input
+                          type="text" inputMode="decimal"
+                          defaultValue={cur == null ? '' : String(cur)}
+                          onBlur={(e) => setGuess(p, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                          placeholder="auto"
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    )
+                  })}
+                  {opts.initialGuess && Object.keys(opts.initialGuess).length > 0 && (
+                    <button className="btn"
+                      onClick={() => setOpts({ initialGuess: {} })}
+                      style={{
+                        padding: '1px 6px', fontSize: 'var(--font-size-label)',
+                        alignSelf: 'flex-start',
+                      }}>
+                      reset guesses
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }

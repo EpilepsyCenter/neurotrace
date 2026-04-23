@@ -157,19 +157,74 @@ export function IVCurveWindow({
   // Exclusion badge for the preview sweep.
   const isPreviewExcluded = useAppStore((s) => s.isSweepExcluded(group, series, previewSweep))
 
-  // Splitter between plot and table.
+  // Splitters. Both persist to Electron prefs under ivWindowUI so the
+  // layout survives window reopens — same recipe APWindow/FPspWindow
+  // use. Hydrate on mount, write only on mouseup (one write per drag,
+  // not per pixel).
   const [plotHeight, setPlotHeight] = useState(340)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const ui = prefs?.ivWindowUI
+        if (cancelled || !ui) return
+        if (typeof ui.leftPanelWidth === 'number'
+            && ui.leftPanelWidth >= 200 && ui.leftPanelWidth <= 500) {
+          setLeftPanelWidth(ui.leftPanelWidth)
+        }
+        if (typeof ui.plotHeight === 'number'
+            && ui.plotHeight >= 150 && ui.plotHeight <= 800) {
+          setPlotHeight(ui.plotHeight)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const writeUIPref = useCallback(async (patch: Record<string, any>) => {
+    try {
+      const api = window.electronAPI
+      if (!api?.getPreferences || !api?.setPreferences) return
+      const prefs = (await api.getPreferences()) ?? {}
+      const next = { ...(prefs.ivWindowUI ?? {}), ...patch }
+      await api.setPreferences({ ...prefs, ivWindowUI: next })
+    } catch { /* ignore */ }
+  }, [])
   const onSplitterMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
     const startY = e.clientY
     const startH = plotHeight
+    let latest = startH
     const onMove = (ev: MouseEvent) => {
       const dy = ev.clientY - startY
-      setPlotHeight(Math.max(150, Math.min(800, startH + dy)))
+      latest = Math.max(150, Math.min(800, startH + dy))
+      setPlotHeight(latest)
     }
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      writeUIPref({ plotHeight: latest })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+  const onLeftSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = leftPanelWidth
+    let latest = startW
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX
+      latest = Math.max(200, Math.min(500, startW + dx))
+      setLeftPanelWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      writeUIPref({ leftPanelWidth: latest })
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -291,8 +346,17 @@ export function IVCurveWindow({
       gap: 10,
       minHeight: 0,
     }}>
-      {/* Top bar: selectors */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* Selectors — thin top row, always visible. Wrapped in the
+          bg-secondary chrome tone so the window's top row + left
+          panel read as one cohesive region (matching the main
+          window's tree sidebar). */}
+      <div style={{
+        display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flexShrink: 0,
+        background: 'var(--bg-secondary)',
+        padding: '6px 10px',
+        borderRadius: 4,
+        border: '1px solid var(--border)',
+      }}>
         <Field label="Group">
           <select value={group} onChange={(e) => setGroup(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
@@ -334,299 +398,344 @@ export function IVCurveWindow({
         </Field>
       </div>
 
-      {/* Cursor windows (mirrored from the main viewer, read-only here) +
-          response-metric dropdown. Drag the cursor bands on the main
-          trace to change the measurement windows. */}
+      {/* Main body: two-column flex. LEFT = params column (scrollable
+          with Run controls pinned to its bottom); RIGHT = viewer +
+          results. Same layout as APWindow/FPspWindow. */}
       <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 12,
-        alignItems: 'center',
-        padding: 8,
-        border: '1px solid var(--border)',
-        borderRadius: 4,
-        background: 'var(--bg-primary)',
-        fontSize: 'var(--font-size-label)',
-        fontFamily: 'var(--font-mono)',
+        flex: 1, display: 'flex', minHeight: 0, gap: 0,
       }}>
-        <span style={{
-          color: 'var(--cursor-baseline)',
-          fontWeight: 600,
-        }}>
-          Baseline:
-        </span>
-        <span>{cursors.baselineStart.toFixed(4)}s → {cursors.baselineEnd.toFixed(4)}s</span>
-        <span style={{
-          color: 'var(--cursor-peak)',
-          fontWeight: 600,
-        }}>
-          Peak / SS:
-        </span>
-        <span>{cursors.peakStart.toFixed(4)}s → {cursors.peakEnd.toFixed(4)}s</span>
-        <label style={{
-          display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto',
-          fontFamily: 'var(--font-ui)',
-        }}>
-          <span style={{ color: 'var(--text-muted)' }}>Y metric:</span>
-          <select
-            value={metric}
-            onChange={(e) => onMetricChange(e.target.value as IVResponseMetric)}
-            disabled={!entry}
-            title="Steady-state = mean of the peak-cursor window. Transient peak = most-deviant sample within the peak-cursor window."
-          >
-            <option value="steady">Steady-state (mean)</option>
-            <option value="peak">Transient peak</option>
-          </select>
-        </label>
-      </div>
-
-      {/* Manual Im fallback — for recordings where the stimulus trace
-          wasn't saved. When enabled, bypasses the .pgf lookup and
-          reconstructs Im per sweep from start_pA + sweep_index * step_pA. */}
-      <div style={{
-        display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-        fontSize: 'var(--font-size-label)',
-      }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-          title="Use this when the stimulus channel wasn't recorded or the .pgf doesn't expose Im">
-          <input type="checkbox" checked={manualImEnabled}
-            onChange={(e) => setManualImEnabled(e.target.checked)} />
-          <span style={{ fontWeight: 600 }}>Manual Im</span>
-        </label>
-        {manualImEnabled ? (
-          <>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ color: 'var(--text-muted)' }}>start</span>
-              <NumInput value={manualImStartS} step={0.01}
-                onChange={setManualImStartS} style={{ width: 64 }} />
-              <span style={{ color: 'var(--text-muted)' }}>s</span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ color: 'var(--text-muted)' }}>end</span>
-              <NumInput value={manualImEndS} step={0.01}
-                onChange={setManualImEndS} style={{ width: 64 }} />
-              <span style={{ color: 'var(--text-muted)' }}>s</span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ color: 'var(--text-muted)' }}>start Im</span>
-              <NumInput value={manualImStartPA} step={1}
-                onChange={setManualImStartPA} style={{ width: 68 }} />
-              <span style={{ color: 'var(--text-muted)' }}>pA</span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ color: 'var(--text-muted)' }}>step</span>
-              <NumInput value={manualImStepPA} step={1}
-                onChange={setManualImStepPA} style={{ width: 60 }} />
-              <span style={{ color: 'var(--text-muted)' }}>pA</span>
-            </label>
-            <span style={{ color: 'var(--text-muted)', fontStyle: 'italic', marginLeft: 'auto' }}>
-              Im(sweep n) = startPA + n · stepPA
-            </span>
-          </>
-        ) : (
-          <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-            off — Im is read from the stimulus trace. Turn on if the stimulus isn't recorded.
-          </span>
-        )}
-      </div>
-
-      {/* Run controls */}
-      <div style={{
-        display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
-        padding: '6px 8px',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
-        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>Run on:</span>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="iv-run-mode" value="all"
-            checked={runMode === 'all'}
-            onChange={() => setRunMode('all')} />
-          all sweeps
-        </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="iv-run-mode" value="range"
-            checked={runMode === 'range'}
-            onChange={() => setRunMode('range')} />
-          range
-        </label>
-        {runMode === 'range' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>–</span>
-            <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-            </span>
-          </span>
-        )}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 'var(--font-size-label)' }}>
-          <input type="radio" name="iv-run-mode" value="one"
-            checked={runMode === 'one'}
-            onChange={() => setRunMode('one')} />
-          single sweep
-        </label>
-        {runMode === 'one' && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
-              onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))}
-              style={{ width: 48 }} />
-            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-label)' }}>
-              / {totalSweeps || '—'}
-              {' · appends to table'}
-            </span>
-          </span>
-        )}
-
-        <button
-          className="btn btn-primary"
-          onClick={onRun}
-          disabled={loading || !fileInfo}
-          style={{ marginLeft: 8 }}
-        >
-          {loading ? 'Running…' : 'Run'}
-        </button>
-        <button className="btn" onClick={() => clearIVCurve(group, series)} disabled={!entry}>
-          Clear
-        </button>
-        <button
-          className="btn"
-          onClick={() => exportIVCSV()}
-          disabled={Object.keys(ivCurves).length === 0}
-          style={{ marginLeft: 'auto' }}
-        >
-          Export CSV
-        </button>
-      </div>
-
-      {error && (
+        {/* LEFT PANEL */}
         <div style={{
-          padding: '6px 10px',
-          background: 'var(--bg-error, #5c1b1b)',
-          color: '#fff',
-          borderRadius: 3,
-          display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 'var(--font-size-xs)',
-        }}>
-          <span style={{ flex: 1 }}>⚠ {error}</span>
-          <button className="btn" onClick={() => setError(null)}
-            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
-        </div>
-      )}
-
-      {/* Summary — left: point count / pulse window / units; right: slope
-          of the linear fit to the I-V curve (input resistance). The fit
-          updates as points accumulate across Run invocations. */}
-      {entry && (
-        <div style={{
-          fontSize: 'var(--font-size-label)',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-          background: 'var(--bg-primary)',
-          padding: '4px 8px',
-          borderRadius: 3,
+          width: leftPanelWidth, flexShrink: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0, gap: 8,
+          background: 'var(--bg-secondary)',
+          padding: 8,
+          borderRadius: 4,
           border: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
         }}>
-          <span>
-            <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> points ·
-            windows BL {entry.baselineStartS.toFixed(3)}→{entry.baselineEndS.toFixed(3)}s ·
-            PK {entry.peakStartS.toFixed(3)}→{entry.peakEndS.toFixed(3)}s ·
-            stim {entry.stimUnit || '—'} · response {entry.responseUnit || '—'}
-          </span>
-          {fit && (
-            <span style={{
-              marginLeft: 'auto',
-              color: 'var(--text-primary)',
+          {/* Scrollable param sections. Run controls + error banner
+              sit outside the scrollable so they're always visible. */}
+          <div style={{
+            flex: 1, minHeight: 0, overflow: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            paddingRight: 4,
+          }}>
+            {/* Cursor windows (mirrored from the main viewer, read-only
+                here) + Y-metric dropdown. Drag the cursor bands on the
+                main trace (or the mini-viewer) to change the
+                measurement windows. */}
+            <div style={{
               display: 'flex',
-              gap: 12,
+              flexWrap: 'wrap',
+              gap: 6,
+              padding: 8,
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-primary)',
+              fontSize: 'var(--font-size-label)',
+              fontFamily: 'var(--font-mono)',
             }}>
-              <span title="Slope of the linear fit to the I-V points">
-                slope = {formatSlope(fit.slope, entry)} · R² = {fit.r2.toFixed(3)}
+              <span style={{ color: 'var(--cursor-baseline)', fontWeight: 600, width: '100%' }}>
+                Baseline:
               </span>
-              {fit.rInMOhm != null && (
-                <span
-                  style={{ color: 'var(--accent)', fontWeight: 600 }}
-                  title="Input resistance derived from the I-V slope"
+              <span>{cursors.baselineStart.toFixed(4)}s → {cursors.baselineEnd.toFixed(4)}s</span>
+              <span style={{ color: 'var(--cursor-peak)', fontWeight: 600, width: '100%' }}>
+                Peak / SS:
+              </span>
+              <span>{cursors.peakStart.toFixed(4)}s → {cursors.peakEnd.toFixed(4)}s</span>
+              <label style={{
+                display: 'flex', flexDirection: 'column', gap: 3,
+                width: '100%', marginTop: 4, fontFamily: 'var(--font-ui)',
+              }}>
+                <span style={{ color: 'var(--text-muted)' }}>Y metric:</span>
+                <select
+                  value={metric}
+                  onChange={(e) => onMetricChange(e.target.value as IVResponseMetric)}
+                  disabled={!entry}
+                  style={{ width: '100%' }}
+                  title="Steady-state = mean of the peak-cursor window. Transient peak = most-deviant sample within the peak-cursor window."
                 >
-                  Rin = {Math.abs(fit.rInMOhm).toFixed(1)} MΩ
+                  <option value="steady">Steady-state (mean)</option>
+                  <option value="peak">Transient peak</option>
+                </select>
+              </label>
+            </div>
+
+            {/* Manual Im fallback — for recordings where the stimulus
+                trace wasn't saved. When enabled, bypasses the .pgf
+                lookup and reconstructs Im per sweep from
+                start_pA + sweep_index * step_pA. */}
+            <div style={{
+              display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
+              padding: 8,
+              border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-primary)',
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, width: '100%' }}
+                title="Use this when the stimulus channel wasn't recorded or the .pgf doesn't expose Im">
+                <input type="checkbox" checked={manualImEnabled}
+                  onChange={(e) => setManualImEnabled(e.target.checked)} />
+                <span style={{ fontWeight: 600 }}>Manual Im</span>
+              </label>
+              {manualImEnabled ? (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                  gap: 6, width: '100%',
+                }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>start (s)</span>
+                    <NumInput value={manualImStartS} step={0.01}
+                      onChange={setManualImStartS} />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>end (s)</span>
+                    <NumInput value={manualImEndS} step={0.01}
+                      onChange={setManualImEndS} />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>start Im (pA)</span>
+                    <NumInput value={manualImStartPA} step={1}
+                      onChange={setManualImStartPA} />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>step (pA)</span>
+                    <NumInput value={manualImStepPA} step={1}
+                      onChange={setManualImStepPA} />
+                  </label>
+                  <span style={{
+                    gridColumn: '1 / -1',
+                    color: 'var(--text-muted)', fontStyle: 'italic',
+                  }}>
+                    Im(sweep n) = startPA + n · stepPA
+                  </span>
+                </div>
+              ) : (
+                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                  off — Im is read from the stimulus trace. Turn on if the stimulus isn't recorded.
                 </span>
               )}
-            </span>
+            </div>
+          </div>
+
+          {/* Pinned footer: Run + Sweeps dropdown + progressive
+              disclosure for Range/Single, then secondary Clear /
+              Export CSV below a separator. Same pattern as AP/FPsp. */}
+          <div style={{
+            flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6,
+            padding: 8,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }}>
+            <button className="btn btn-primary" onClick={onRun}
+              disabled={loading || !fileInfo}
+              style={{
+                width: '100%', padding: '8px 0',
+                fontSize: 'var(--font-size-sm)', fontWeight: 600,
+              }}>
+              {loading ? 'Running…' : 'Run'}
+            </button>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Sweeps:</span>
+              <select value={runMode}
+                onChange={(e) => setRunMode(e.target.value as typeof runMode)}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                <option value="all">All sweeps</option>
+                <option value="range">Range</option>
+                <option value="one">Single sweep</option>
+              </select>
+            </div>
+            {runMode === 'range' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>from</span>
+                <NumInput value={sweepFrom} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepFrom(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span>to</span>
+                <NumInput value={sweepTo} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepTo(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
+              </div>
+            )}
+            {runMode === 'one' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>
+                <span>sweep</span>
+                <NumInput value={sweepOne} step={1} min={1} max={Math.max(1, totalSweeps)}
+                  onChange={(v) => setSweepOne(Math.max(1, Math.round(v)))} style={{ width: 60 }} />
+                <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'} · appends</span>
+              </div>
+            )}
+            {/* Secondary actions — smaller, visually subordinate. */}
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={() => clearIVCurve(group, series)} disabled={!entry}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Clear
+              </button>
+              <button className="btn"
+                onClick={() => exportIVCSV()}
+                disabled={Object.keys(ivCurves).length === 0}
+                style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
+                Export CSV
+              </button>
+            </div>
+          </div>
+          {error && (
+            <div style={{
+              flexShrink: 0,
+              padding: '6px 10px',
+              background: 'var(--bg-error, #5c1b1b)',
+              color: '#fff', borderRadius: 3,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              <span style={{ flex: 1 }}>⚠ {error}</span>
+              <button className="btn" onClick={() => setError(null)}
+                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}>dismiss</button>
+            </div>
           )}
-        </div>
-      )}
+        </div>{/* close LEFT panel */}
 
-      {/* Mini-viewer + tabbed results split */}
-      <div style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
-      }}>
-        <div style={{ height: plotHeight, minHeight: 160, flexShrink: 0 }}>
-          <TraceMiniViewer
-            traceTime={traceTime}
-            traceValues={traceValues}
-            traceUnits={traceUnits}
-            cursors={cursors}
-            updateCursors={updateCursors}
-            previewSweep={previewSweep}
-            totalSweeps={totalSweeps}
-            isExcluded={isPreviewExcluded}
-            loading={loading}
-            theme={theme}
-            fontSize={fontSize}
-            zeroOffset={zeroOffset}
-            onZeroOffsetChange={setZeroOffset}
-            resetCursorsInView={(xMin, xMax) => {
-              const span = xMax - xMin
-              updateCursors({
-                baselineStart: xMin + 0.05 * span,
-                baselineEnd: xMin + 0.20 * span,
-                peakStart: xMin + 0.35 * span,
-                peakEnd: xMin + 0.65 * span,
-              })
-            }}
-          />
-        </div>
-
+        {/* Vertical splitter between LEFT and RIGHT. */}
         <div
-          onMouseDown={onSplitterMouseDown}
+          onMouseDown={onLeftSplitMouseDown}
+          title="Drag to resize"
           style={{
-            height: 6,
-            cursor: 'row-resize',
+            width: 3, flexShrink: 0, cursor: 'col-resize',
             background: 'var(--border)',
-            flexShrink: 0,
             position: 'relative',
           }}
-          title="Drag to resize"
         >
           <div style={{
-            position: 'absolute', left: '50%', top: 1,
-            transform: 'translateX(-50%)',
-            width: 40, height: 4,
-            background: 'var(--text-muted)',
-            borderRadius: 2, opacity: 0.5,
+            position: 'absolute', top: '50%', left: 0,
+            transform: 'translateY(-50%)',
+            width: 2, height: 40, background: 'var(--text-muted)',
+            borderRadius: 1, opacity: 0.5,
           }} />
         </div>
 
-        {/* Bottom tab strip: I-V curve / Table */}
-        <ResultsTabs
-          entry={entry}
-          fit={fit}
-          onSelectRow={onSelectRow}
-        />
-      </div>
+        {/* RIGHT PANEL: viewer + horizontal splitter + results. */}
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          paddingLeft: 8,
+        }}>
+          <div style={{ height: plotHeight, minHeight: 160, flexShrink: 0 }}>
+            <TraceMiniViewer
+              traceTime={traceTime}
+              traceValues={traceValues}
+              traceUnits={traceUnits}
+              cursors={cursors}
+              updateCursors={updateCursors}
+              previewSweep={previewSweep}
+              totalSweeps={totalSweeps}
+              isExcluded={isPreviewExcluded}
+              loading={loading}
+              theme={theme}
+              fontSize={fontSize}
+              zeroOffset={zeroOffset}
+              onZeroOffsetChange={setZeroOffset}
+              resetCursorsInView={(xMin, xMax) => {
+                const span = xMax - xMin
+                updateCursors({
+                  baselineStart: xMin + 0.05 * span,
+                  baselineEnd: xMin + 0.20 * span,
+                  peakStart: xMin + 0.35 * span,
+                  peakEnd: xMin + 0.65 * span,
+                })
+              }}
+            />
+          </div>
+
+          {/* Horizontal splitter between viewer and results. Thin
+              (3px hit / 2px grip) to match AP/FPsp. */}
+          <div
+            onMouseDown={onSplitterMouseDown}
+            style={{
+              height: 3,
+              cursor: 'row-resize',
+              background: 'var(--border)',
+              flexShrink: 0,
+              position: 'relative',
+            }}
+            title="Drag to resize"
+          >
+            <div style={{
+              position: 'absolute', left: '50%', top: 0,
+              transform: 'translateX(-50%)',
+              width: 40, height: 2,
+              background: 'var(--text-muted)',
+              borderRadius: 1, opacity: 0.5,
+            }} />
+          </div>
+
+          {/* Summary strip (point count / windows / units / fit + Rin)
+              sits just above the results area — physically adjacent
+              to the I-V curve plot it describes. */}
+          {entry && (
+            <div style={{
+              flexShrink: 0,
+              fontSize: 'var(--font-size-label)',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-primary)',
+              padding: '4px 8px',
+              borderRadius: 3,
+              border: '1px solid var(--border)',
+              marginTop: 6,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}>
+              <span>
+                <strong style={{ color: 'var(--text-primary)' }}>{entry.points.length}</strong> points ·
+                BL {entry.baselineStartS.toFixed(3)}→{entry.baselineEndS.toFixed(3)}s ·
+                PK {entry.peakStartS.toFixed(3)}→{entry.peakEndS.toFixed(3)}s ·
+                stim {entry.stimUnit || '—'} · response {entry.responseUnit || '—'}
+              </span>
+              {fit && (
+                <span style={{
+                  marginLeft: 'auto',
+                  color: 'var(--text-primary)',
+                  display: 'flex',
+                  gap: 12,
+                  flexWrap: 'wrap',
+                }}>
+                  <span title="Slope of the linear fit to the I-V points">
+                    slope = {formatSlope(fit.slope, entry)} · R² = {fit.r2.toFixed(3)}
+                  </span>
+                  {fit.rInMOhm != null && (
+                    <span
+                      style={{ color: 'var(--accent)', fontWeight: 600 }}
+                      title="Input resistance derived from the I-V slope"
+                    >
+                      Rin = {Math.abs(fit.rInMOhm).toFixed(1)} MΩ
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Bottom tab strip: I-V curve / Table */}
+          <div style={{ flex: 1, minHeight: 0, marginTop: 6, display: 'flex' }}>
+            <ResultsTabs
+              entry={entry}
+              fit={fit}
+              onSelectRow={onSelectRow}
+            />
+          </div>
+        </div>{/* close RIGHT panel */}
+      </div>{/* close two-column body */}
     </div>
   )
 }

@@ -12,6 +12,8 @@ import {
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
+import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 
 // FPsp cursor→band mapping: baseline cursor pair → Baseline,
 // fit cursor pair → Volley, peak cursor pair → fEPSP.
@@ -227,6 +229,24 @@ export function FPspWindow({
   useEffect(() => {
     if (channels.length > 0 && channel >= channels.length) setChannel(0)
   }, [channels, channel])
+
+  // Overlay channels — extra traces to display as stacked subplots
+  // beneath the primary viewer (usually the stimulus protocol so the
+  // user can verify that stim artifacts land inside the expected
+  // cursor windows). Analysis never runs on overlay channels; they
+  // are visual context only. Same pattern as AP/IV.
+  const [overlayChannels, setOverlayChannels] = useState<number[]>([])
+  useEffect(() => {
+    setOverlayChannels((prev) => prev.filter((idx) => {
+      if (idx === STIMULUS_OVERLAY_KEY) return true
+      return channels.some((c: any) => c.index === idx)
+    }))
+  }, [channels])
+  const hasStimulus = useMemo(() => {
+    const ser = fileInfo?.groups?.[group]?.series?.[series]
+    return Boolean(ser?.stimulus)
+  }, [fileInfo, group, series])
+  const [primaryXRange, setPrimaryXRange] = useState<[number, number] | null>(null)
 
   // Params local to the window — not persisted until Run commits them.
   const [method, setMethod] = useState<FPspMeasurementMethod>('range_slope')
@@ -674,13 +694,14 @@ export function FPspWindow({
             </select>
           </Field>
         )}
-        <Field label="Channel">
-          <select value={channel} onChange={(e) => setChannel(Number(e.target.value))} disabled={channels.length === 0}>
-            {channels.map((c: any) => (
-              <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
-            ))}
-          </select>
-        </Field>
+        <ChannelsOverlaySelect
+          channels={channels.map((c: any) => ({ index: c.index, label: c.label, units: c.units }))}
+          primary={channel}
+          onPrimaryChange={(i) => setChannel(i)}
+          overlay={overlayChannels}
+          onOverlayChange={setOverlayChannels}
+          hasStimulus={hasStimulus}
+        />
 
         {/* Sweep navigator + A/B source toggle. Sits at the top of
             every analysis window for consistency. */}
@@ -1084,32 +1105,74 @@ export function FPspWindow({
               height: topHeight, minHeight: 180,
               display: 'flex', gap: 6, flexShrink: 0,
             }}>
-              {/* LEFT: sweep navigator with draggable bands. */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <FPspSweepViewer
-                  traceTime={sweepTraceTime}
-                  traceValues={sweepTraceValues}
-                  traceUnits={sweepTraceUnits}
-                  cursors={cursors}
-                  updateCursors={updateCursors}
-                  previewSweep={previewSweep}
-                  totalSweeps={viewerSweepCount}
-                  source={viewerSource}
-                  isExcluded={isPreviewExcluded}
-                  theme={theme}
-                  fontSize={fontSize}
-                  zeroOffset={zeroOffset}
-                  onZeroOffsetChange={setZeroOffset}
-                  zeroOffsetApplied={sweepZeroOffsetApplied}
-                  markerPoint={markerPoint}
-                  markerEntry={entry}
-                  pprBands={mode === 'ppr' ? {
-                    volleyStart: volley2Start,
-                    volleyEnd: volley2End,
-                    fepspStart: fepsp2Start,
-                    fepspEnd: fepsp2End,
-                  } : null}
-                />
+              {/* LEFT: sweep navigator with draggable bands, plus
+                  optional stacked overlay subplots beneath for extra
+                  channels or the stimulus protocol. Overlay viewers
+                  are display-only and X-sync from the sweep viewer. */}
+              <div style={{
+                flex: 1, minWidth: 0,
+                display: 'flex', flexDirection: 'column', minHeight: 0,
+              }}>
+                <div style={{
+                  flex: overlayChannels.length > 0 ? 5 : 1,
+                  minHeight: 0,
+                }}>
+                  <FPspSweepViewer
+                    traceTime={sweepTraceTime}
+                    traceValues={sweepTraceValues}
+                    traceUnits={sweepTraceUnits}
+                    cursors={cursors}
+                    updateCursors={updateCursors}
+                    previewSweep={previewSweep}
+                    totalSweeps={viewerSweepCount}
+                    source={viewerSource}
+                    isExcluded={isPreviewExcluded}
+                    theme={theme}
+                    fontSize={fontSize}
+                    zeroOffset={zeroOffset}
+                    onZeroOffsetChange={setZeroOffset}
+                    zeroOffsetApplied={sweepZeroOffsetApplied}
+                    markerPoint={markerPoint}
+                    markerEntry={entry}
+                    pprBands={mode === 'ppr' ? {
+                      volleyStart: volley2Start,
+                      volleyEnd: volley2End,
+                      fepspStart: fepsp2Start,
+                      fepspEnd: fepsp2End,
+                    } : null}
+                    onXRangeChange={(xMin, xMax) => setPrimaryXRange([xMin, xMax])}
+                  />
+                </div>
+                {overlayChannels.map((ch) => {
+                  const label = ch === STIMULUS_OVERLAY_KEY
+                    ? 'Stimulus'
+                    : channels.find((c: any) => c.index === ch)?.label ?? `Ch ${ch}`
+                  const units = ch === STIMULUS_OVERLAY_KEY
+                    ? 'pA'
+                    : channels.find((c: any) => c.index === ch)?.units ?? ''
+                  const overlayConfig: OverlayChannel = ch === STIMULUS_OVERLAY_KEY
+                    ? { kind: 'stimulus', label, units }
+                    : { kind: 'channel', index: ch, label, units }
+                  return (
+                    <React.Fragment key={ch}>
+                      <div style={{
+                        height: 3, flexShrink: 0,
+                        background: 'var(--border)',
+                      }} />
+                      <div style={{ flex: 2, minHeight: 0 }}>
+                        <OverlayTraceViewer
+                          backendUrl={backendUrl}
+                          group={group}
+                          series={series}
+                          sweep={previewSweep}
+                          channel={overlayConfig}
+                          xRange={primaryXRange}
+                          heightSignal={topHeight}
+                        />
+                      </div>
+                    </React.Fragment>
+                  )
+                })}
               </div>
               {/* RIGHT: selected-bin averaged waveform (LTP/PPR only;
                   I-O hidden via display-toggle so the uPlot instance
@@ -2203,6 +2266,7 @@ function FPspSweepViewer({
   zeroOffset, onZeroOffsetChange, zeroOffsetApplied,
   markerPoint, markerEntry,
   pprBands,
+  onXRangeChange,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -2238,6 +2302,9 @@ function FPspSweepViewer({
     volleyStart: number; volleyEnd: number
     fepspStart: number; fepspEnd: number
   } | null
+  /** Fired on pan / wheel / reset / initial auto-fit so stacked
+   *  overlay viewers can mirror the x range. Same pattern as AP/IV. */
+  onXRangeChange?: (xMin: number, xMax: number) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -2252,6 +2319,14 @@ function FPspSweepViewer({
   zeroOffsetAppliedRef.current = zeroOffsetApplied ?? 0
   const pprBandsRef = useRef(pprBands)
   pprBandsRef.current = pprBands
+
+  // Stash the onXRangeChange callback in a ref so handlers wired once
+  // see the latest prop value without a remount.
+  const onXRangeChangeRef = useRef(onXRangeChange)
+  onXRangeChangeRef.current = onXRangeChange
+  const emitXRange = (xMin: number, xMax: number) => {
+    try { onXRangeChangeRef.current?.(xMin, xMax) } catch { /* ignore */ }
+  }
 
   const xRangeRef = useRef<[number, number] | null>(null)
   const yRangeRef = useRef<[number, number] | null>(null)
@@ -2278,7 +2353,10 @@ function FPspSweepViewer({
     const xmin = xs[0], xmax = xs[xs.length - 1]
     let ymin = Infinity, ymax = -Infinity
     for (const v of ys) { if (v < ymin) ymin = v; if (v > ymax) ymax = v }
-    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) u.setScale('x', { min: xmin, max: xmax })
+    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
+      u.setScale('x', { min: xmin, max: xmax })
+      emitXRange(xmin, xmax)
+    }
     if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
       const pad = (ymax - ymin) * 0.05
       u.setScale('y', { min: ymin - pad, max: ymax + pad })
@@ -2435,7 +2513,10 @@ function FPspSweepViewer({
               const lo = isFinite(dataMin) ? dataMin : 0
               const hi = isFinite(dataMax) && dataMax > lo ? dataMax : lo + 1
               const r: [number, number] = [lo, hi]
-              if (hasRealDataRef.current) xRangeRef.current = r
+              if (hasRealDataRef.current) {
+                xRangeRef.current = r
+                emitXRange(lo, hi)
+              }
               return r
             },
           },
@@ -2564,6 +2645,7 @@ function FPspSweepViewer({
           yRangeRef.current = [t.yMin - dy, t.yMax - dy]
           u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
           u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+          emitXRange(xRangeRef.current[0], xRangeRef.current[1])
           over.style.cursor = 'grabbing'
           return
         }
@@ -2635,6 +2717,7 @@ function FPspSweepViewer({
         }
         u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
         u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+        emitXRange(xRangeRef.current[0], xRangeRef.current[1])
       }
 
       if (over) {

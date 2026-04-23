@@ -841,9 +841,13 @@ export function APWindow({
             }}>
               {/* Primary subplot: APSweepViewer with all analysis
                   bands + spike markers. Cursor bands are drawn only
-                  here — overlay subplots below are display-only. */}
+                  here — overlay subplots below are display-only.
+                  5:2 primary-to-each-overlay ratio so one overlay
+                  takes ~29% of the viewer height (small enough to
+                  stay out of the way, tall enough to read off stim
+                  amplitude and timing). */}
               <div style={{
-                flex: overlayChannels.length > 0 ? 2 : 1,
+                flex: overlayChannels.length > 0 ? 5 : 1,
                 minHeight: 0,
               }}>
                 <APSweepViewer
@@ -870,9 +874,10 @@ export function APWindow({
                 />
               </div>
               {/* Overlay subplots — one per selected overlay channel.
-                  Thin divider between each, 2:1 primary-to-each ratio
-                  (user can still adjust the top splitter for overall
-                  viewer height). Display-only, X-synced from primary. */}
+                  Thin divider between each, 5:2 primary-to-each ratio
+                  (overlay ≈ 29% of the viewer height when there's
+                  one; halves from there if more are added). Display-
+                  only, X-synced from primary. */}
               {overlayChannels.map((ch) => {
                 const label = ch === STIMULUS_OVERLAY_KEY
                   ? 'Stimulus'
@@ -889,7 +894,7 @@ export function APWindow({
                       height: 3, flexShrink: 0,
                       background: 'var(--border)',
                     }} />
-                    <div style={{ flex: 1, minHeight: 0 }}>
+                    <div style={{ flex: 2, minHeight: 0 }}>
                       <OverlayTraceViewer
                         backendUrl={backendUrl}
                         group={group}

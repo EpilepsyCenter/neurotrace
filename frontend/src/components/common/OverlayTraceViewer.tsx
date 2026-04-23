@@ -55,6 +55,18 @@ export function OverlayTraceViewer({
   const [time, setTime] = React.useState<number[] | null>(null)
   const [values, setValues] = React.useState<number[] | null>(null)
 
+  // Stash the latest xRange in a ref so the uPlot `scale.range`
+  // callbacks — which uPlot re-invokes inside every setScale() — can
+  // read the current value instead of a stale closure captured at
+  // plot-build time. Without this, live wheel-zoom and Reset on the
+  // primary viewer failed to propagate: setScale would set the new
+  // range, then uPlot's internal re-evaluation overwrote it with the
+  // old closure value. Same trick the primary viewer uses for its
+  // own xRangeRef.
+  const xRangeRef = useRef<[number, number] | null>(xRange)
+  xRangeRef.current = xRange
+  const yRangeRef = useRef<[number, number] | null>(null)
+
   // Fetch trace data. Re-fires on sweep or channel change. Stimulus is
   // always fetched as step segments and rasterised to a uniform sample
   // array so uPlot can draw it like any other trace.
@@ -126,6 +138,7 @@ export function OverlayTraceViewer({
     const pad = (yMax - yMin) * 0.08
     return [yMin - pad, yMax + pad] as [number, number]
   }, [time, values, xRange])
+  yRangeRef.current = yRangeForView
 
   // Build/rebuild the uPlot instance when the trace data changes.
   useEffect(() => {
@@ -140,8 +153,11 @@ export function OverlayTraceViewer({
       height: Math.max(60, el.clientHeight || 100),
       legend: { show: false },
       scales: {
-        x: { time: false, range: () => xRange ?? [time[0], time[time.length - 1]] },
-        y: { range: () => yRangeForView ?? [0, 1] },
+        // Read the refs on every re-evaluate so setScale() calls
+        // triggered by prop changes below aren't overwritten by a
+        // stale closure of the initial xRange / yRangeForView.
+        x: { time: false, range: () => xRangeRef.current ?? [time[0], time[time.length - 1]] },
+        y: { range: () => yRangeRef.current ?? [0, 1] },
       },
       axes: [
         {

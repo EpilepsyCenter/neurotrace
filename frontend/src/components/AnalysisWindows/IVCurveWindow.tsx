@@ -5,6 +5,8 @@ import { useAppStore, IVCurveData, IVResponseMetric, CursorPositions } from '../
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { ImSourceCard } from '../common/ImSourceCard'
+import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
+import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 
 const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
@@ -75,6 +77,23 @@ export function IVCurveWindow({
   useEffect(() => {
     if (channels.length > 0 && channel >= channels.length) setChannel(0)
   }, [channels, channel])
+
+  // Overlay channels — extra traces to show as stacked subplots
+  // beneath the primary viewer (e.g. stimulus Im next to Vm).
+  // Analysis never runs on these; they're visual context only. Same
+  // pattern as AP. See ChannelsOverlaySelect + OverlayTraceViewer.
+  const [overlayChannels, setOverlayChannels] = useState<number[]>([])
+  useEffect(() => {
+    setOverlayChannels((prev) => prev.filter((idx) => {
+      if (idx === STIMULUS_OVERLAY_KEY) return true
+      return channels.some((c: any) => c.index === idx)
+    }))
+  }, [channels])
+  const hasStimulus = useMemo(() => {
+    const ser = fileInfo?.groups?.[group]?.series?.[series]
+    return Boolean(ser?.stimulus)
+  }, [fileInfo, group, series])
+  const [primaryXRange, setPrimaryXRange] = useState<[number, number] | null>(null)
 
   const key = `${group}:${series}`
   const entry = ivCurves[key]
@@ -372,13 +391,14 @@ export function IVCurveWindow({
             ))}
           </select>
         </Field>
-        <Field label="Channel">
-          <select value={channel} onChange={(e) => setChannel(Number(e.target.value))} disabled={channels.length === 0}>
-            {channels.map((c: any) => (
-              <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
-            ))}
-          </select>
-        </Field>
+        <ChannelsOverlaySelect
+          channels={channels.map((c: any) => ({ index: c.index, label: c.label, units: c.units }))}
+          primary={channel}
+          onPrimaryChange={(i) => setChannel(i)}
+          overlay={overlayChannels}
+          onOverlayChange={setOverlayChannels}
+          hasStimulus={hasStimulus}
+        />
 
         {/* Sweep navigator — kept at the top of every analysis window
             next to the selectors so users don't hunt for it. */}
@@ -594,31 +614,74 @@ export function IVCurveWindow({
           display: 'flex', flexDirection: 'column', minHeight: 0,
           paddingLeft: 8,
         }}>
-          <div style={{ height: plotHeight, minHeight: 160, flexShrink: 0 }}>
-            <TraceMiniViewer
-              traceTime={traceTime}
-              traceValues={traceValues}
-              traceUnits={traceUnits}
-              cursors={cursors}
-              updateCursors={updateCursors}
-              previewSweep={previewSweep}
-              totalSweeps={totalSweeps}
-              isExcluded={isPreviewExcluded}
-              loading={loading}
-              theme={theme}
-              fontSize={fontSize}
-              zeroOffset={zeroOffset}
-              onZeroOffsetChange={setZeroOffset}
-              resetCursorsInView={(xMin, xMax) => {
-                const span = xMax - xMin
-                updateCursors({
-                  baselineStart: xMin + 0.05 * span,
-                  baselineEnd: xMin + 0.20 * span,
-                  peakStart: xMin + 0.35 * span,
-                  peakEnd: xMin + 0.65 * span,
-                })
-              }}
-            />
+          {/* Viewer area: primary TraceMiniViewer, optionally with
+              stacked overlay subplots below. Primary : each overlay
+              = 5:2 so one overlay is ~29% of the viewer height. X
+              range is shared from primary via onXRangeChange. */}
+          <div style={{
+            height: plotHeight, minHeight: 160, flexShrink: 0,
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{
+              flex: overlayChannels.length > 0 ? 5 : 1,
+              minHeight: 0,
+            }}>
+              <TraceMiniViewer
+                traceTime={traceTime}
+                traceValues={traceValues}
+                traceUnits={traceUnits}
+                cursors={cursors}
+                updateCursors={updateCursors}
+                previewSweep={previewSweep}
+                totalSweeps={totalSweeps}
+                isExcluded={isPreviewExcluded}
+                loading={loading}
+                theme={theme}
+                fontSize={fontSize}
+                zeroOffset={zeroOffset}
+                onZeroOffsetChange={setZeroOffset}
+                resetCursorsInView={(xMin, xMax) => {
+                  const span = xMax - xMin
+                  updateCursors({
+                    baselineStart: xMin + 0.05 * span,
+                    baselineEnd: xMin + 0.20 * span,
+                    peakStart: xMin + 0.35 * span,
+                    peakEnd: xMin + 0.65 * span,
+                  })
+                }}
+                onXRangeChange={(xMin, xMax) => setPrimaryXRange([xMin, xMax])}
+              />
+            </div>
+            {overlayChannels.map((ch) => {
+              const label = ch === STIMULUS_OVERLAY_KEY
+                ? 'Stimulus'
+                : channels.find((c: any) => c.index === ch)?.label ?? `Ch ${ch}`
+              const units = ch === STIMULUS_OVERLAY_KEY
+                ? 'pA'
+                : channels.find((c: any) => c.index === ch)?.units ?? ''
+              const overlayConfig: OverlayChannel = ch === STIMULUS_OVERLAY_KEY
+                ? { kind: 'stimulus', label, units }
+                : { kind: 'channel', index: ch, label, units }
+              return (
+                <React.Fragment key={ch}>
+                  <div style={{
+                    height: 3, flexShrink: 0,
+                    background: 'var(--border)',
+                  }} />
+                  <div style={{ flex: 2, minHeight: 0 }}>
+                    <OverlayTraceViewer
+                      backendUrl={backendUrl}
+                      group={group}
+                      series={series}
+                      sweep={previewSweep}
+                      channel={overlayConfig}
+                      xRange={primaryXRange}
+                      heightSignal={plotHeight}
+                    />
+                  </div>
+                </React.Fragment>
+              )
+            })}
           </div>
 
           {/* Horizontal splitter between viewer and results. Thin
@@ -1020,6 +1083,7 @@ function TraceMiniViewer({
   theme, fontSize,
   zeroOffset, onZeroOffsetChange,
   resetCursorsInView,
+  onXRangeChange,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -1038,6 +1102,9 @@ function TraceMiniViewer({
    *  Called with the CURRENT visible X range so the parent can drop
    *  each cursor pair to a sensible position inside that window. */
   resetCursorsInView: (xMin: number, xMax: number) => void
+  /** Fired on pan / wheel / reset / initial auto-fit so stacked
+   *  overlay viewers mirror the x range. Same pattern as AP. */
+  onXRangeChange?: (xMin: number, xMax: number) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -1050,6 +1117,14 @@ function TraceMiniViewer({
   const xRangeRef = useRef<[number, number] | null>(null)
   const yRangeRef = useRef<[number, number] | null>(null)
   const hasRealDataRef = useRef(false)
+
+  // Stash the onXRangeChange callback in a ref so handlers wired once
+  // can see the latest prop without requiring a remount.
+  const onXRangeChangeRef = useRef(onXRangeChange)
+  onXRangeChangeRef.current = onXRangeChange
+  const emitXRange = (xMin: number, xMax: number) => {
+    try { onXRangeChangeRef.current?.(xMin, xMax) } catch { /* ignore */ }
+  }
 
   type DragTarget =
     | { kind: 'baseline-edge'; edge: 'start' | 'end' }
@@ -1070,7 +1145,10 @@ function TraceMiniViewer({
     const xmin = xs[0], xmax = xs[xs.length - 1]
     let ymin = Infinity, ymax = -Infinity
     for (const v of ys) { if (v < ymin) ymin = v; if (v > ymax) ymax = v }
-    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) u.setScale('x', { min: xmin, max: xmax })
+    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
+      u.setScale('x', { min: xmin, max: xmax })
+      emitXRange(xmin, xmax)
+    }
     if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
       const pad = (ymax - ymin) * 0.05
       u.setScale('y', { min: ymin - pad, max: ymax + pad })
@@ -1122,7 +1200,10 @@ function TraceMiniViewer({
               const lo = isFinite(dataMin) ? dataMin : 0
               const hi = isFinite(dataMax) && dataMax > lo ? dataMax : lo + 1
               const r: [number, number] = [lo, hi]
-              if (hasRealDataRef.current) xRangeRef.current = r
+              if (hasRealDataRef.current) {
+                xRangeRef.current = r
+                emitXRange(lo, hi)
+              }
               return r
             },
           },
@@ -1251,6 +1332,7 @@ function TraceMiniViewer({
           yRangeRef.current = [t.yMin - dy, t.yMax - dy]
           u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
           u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+          emitXRange(xRangeRef.current[0], xRangeRef.current[1])
           over.style.cursor = 'grabbing'
           return
         }
@@ -1313,6 +1395,7 @@ function TraceMiniViewer({
         }
         u.setScale('x', { min: xRangeRef.current[0], max: xRangeRef.current[1] })
         u.setScale('y', { min: yRangeRef.current[0], max: yRangeRef.current[1] })
+        emitXRange(xRangeRef.current[0], xRangeRef.current[1])
       }
 
       if (over) {

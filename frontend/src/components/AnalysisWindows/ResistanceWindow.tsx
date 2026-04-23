@@ -444,11 +444,11 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
 
       const series: uPlot.Series[] = [
         {},
-        { label: 'Trace', stroke: cssVar('--trace-color-1'), width: 1.5, scale: 'y' },
+        { stroke: cssVar('--trace-color-1'), width: 1.5, scale: 'y' },
       ]
       if (fitOverlayValues) {
         series.push({
-          label: 'Fit', stroke: cssVar(FIT_COLOR_VAR) || '#9c27b0',
+          stroke: cssVar(FIT_COLOR_VAR) || '#9c27b0',
           width: 2.5, scale: 'y', points: { show: false },
         })
       }
@@ -460,6 +460,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
 
       const opts: uPlot.Options = {
         width: w, height: h,
+        legend: { show: false },
         scales: {
           x: {
             time: false,

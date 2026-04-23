@@ -486,24 +486,6 @@ export interface OverlayEntry {
   color: string
 }
 
-export type ResistanceQuality = 'good' | 'warning' | 'poor' | 'unknown'
-
-export interface ResistanceMonitorData {
-  group: number
-  series: number
-  trace: number
-  sweepIndices: number[]
-  rs: (number | null)[]
-  rin: (number | null)[]
-  cm: (number | null)[]
-  quality: ResistanceQuality
-  maxRsChangePct: number
-  meanRs: number | null
-  meanRin: number | null
-  vStep: number
-  cursors: CursorPositions
-}
-
 /** One detected burst, flat shape suitable for the table + overlay.
  *  Amplitudes are computed against a LOCAL pre-burst baseline (mean of
  *  the ~100 ms preceding the burst onset) so they're meaningful regardless
@@ -1008,7 +990,6 @@ interface AppState {
 
   // Resistance analysis
   resistanceResult: ResistanceResult | null
-  resistanceMonitor: ResistanceMonitorData | null
 
   // Field-burst detection, keyed by `${group}:${series}` so markers can
   // persist across series switches.
@@ -1165,7 +1146,6 @@ interface AppState {
   // Resistance analysis actions
   runResistanceOnSweep: (vStep: number) => Promise<void>
   runResistanceOnAverage: (vStep: number, sweepIndices: number[] | null) => Promise<void>
-  loadResistanceMonitor: (vStep: number) => Promise<void>
   clearResistanceResult: () => void
 
   // Field-burst actions
@@ -1403,7 +1383,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   results: [],
   resistanceResult: null,
-  resistanceMonitor: null,
   fieldBursts: {},
   burstFormParams: {},
   ivCurves: {},
@@ -1737,7 +1716,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
-      resistanceMonitor: null,
     })
     try {
       const recording = await apiFetch(backendUrl, '/api/files/open', {
@@ -2342,44 +2320,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       set({
         resistanceResult: { ...m, source: sourceLabel },
-        loading: false,
-      })
-    } catch (err: any) {
-      set({ error: err.message, loading: false })
-    }
-  },
-
-  loadResistanceMonitor: async (vStep: number) => {
-    const { backendUrl, currentGroup, currentSeries, currentTrace, cursors } = get()
-    set({ loading: true, error: null })
-    try {
-      const params = new URLSearchParams({
-        group: String(currentGroup),
-        series: String(currentSeries),
-        trace: String(currentTrace),
-        v_step: String(vStep),
-        baseline_start: String(cursors.baselineStart),
-        baseline_end: String(cursors.baselineEnd),
-        peak_start: String(cursors.peakStart),
-        peak_end: String(cursors.peakEnd),
-      })
-      const data = await apiFetch(backendUrl, `/api/resistance/monitor?${params}`)
-      set({
-        resistanceMonitor: {
-          group: currentGroup,
-          series: currentSeries,
-          trace: currentTrace,
-          sweepIndices: data.sweep_indices,
-          rs: data.rs,
-          rin: data.rin,
-          cm: data.cm,
-          quality: data.quality,
-          maxRsChangePct: data.max_rs_change_pct,
-          meanRs: data.mean_rs,
-          meanRin: data.mean_rin,
-          vStep,
-          cursors: { ...cursors },
-        },
         loading: false,
       })
     } catch (err: any) {

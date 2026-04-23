@@ -1191,6 +1191,7 @@ function MiniViewer({
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
       height: Math.max(100, el.clientHeight || 180),
+      legend: { show: false },
       scales: {
         x: {
           time: false,
@@ -1240,7 +1241,6 @@ function MiniViewer({
       series: [
         {},
         {
-          label: 'trace',
           stroke: cssVar('--trace-color-1') || '#4a9ede',
           width: 1,
           points: { show: false },

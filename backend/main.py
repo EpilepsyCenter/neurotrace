@@ -12,7 +12,6 @@ from api.files import router as files_router
 from api.traces import router as traces_router
 from api.analysis import router as analysis_router
 from api.macros import router as macros_router
-from api.resistance import router as resistance_router
 from api.results import router as results_router
 from api.iv import router as iv_router
 from api.fpsp import router as fpsp_router
@@ -43,7 +42,6 @@ app.include_router(files_router, prefix="/api/files", tags=["files"])
 app.include_router(traces_router, prefix="/api/traces", tags=["traces"])
 app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(macros_router, prefix="/api/macros", tags=["macros"])
-app.include_router(resistance_router, prefix="/api/resistance", tags=["resistance"])
 app.include_router(results_router, prefix="/api/results", tags=["results"])
 app.include_router(iv_router, prefix="/api/iv", tags=["iv"])
 app.include_router(fpsp_router, prefix="/api/fpsp", tags=["fpsp"])

@@ -214,12 +214,26 @@ async def run_iv(
             # Shouldn't reach here — the manual/stim check above raises 400.
             stim_level, stim_unit = 0.0, ""
 
+        # Sag measurements. Defined per Ih convention for hyperpolarising
+        # steps but the user asked for both signs so we report them
+        # regardless of polarity and let the interpreter decide.
+        #   sag_amp   = transient_peak − steady_state (mV; same sign
+        #               as the step deflection; 0 when no sag)
+        #   sag_ratio = sag_amp / (transient_peak − baseline)
+        #               (dimensionless, typically 0..1; null when
+        #               the total deflection is ~0 so the ratio is
+        #               undefined).
+        sag_amp = transient_peak - steady_state
+        total_dev = transient_peak - baseline
+        sag_ratio = (sag_amp / total_dev) if abs(total_dev) > 1e-9 else None
         points.append({
             "sweep_index": sw_idx,
             "stim_level": stim_level,
             "baseline": baseline,
             "steady_state": steady_state,
             "transient_peak": transient_peak,
+            "sag_amp": sag_amp,
+            "sag_ratio": sag_ratio,
         })
 
     # Sort points by stim level so the plot is monotonic in x.

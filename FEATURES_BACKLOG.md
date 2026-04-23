@@ -43,6 +43,7 @@ Revisit / prune / promote to `ROADMAP.md` as we pick things up.
 - **M** — Save/load analysis templates: dump all params of the current analysis window to a named preset, reload on another file
 - **M** — Unify splitter persistence across all analysis windows. AP window already persists `topHeight` to electron prefs under `apWindowUI`; mirror the same pattern (own prefs key, mount-time hydrate, write on splitter `mouseup`) for FPsp / Burst / Cursor / IV / Resistance windows. Each gets its own `<window>WindowUI` slot so they track independently.
 - **M** — Multi-trace overlay in analysis-window mini-viewers — let the user toggle additional channels (most importantly the stimulus trace, but also e.g. an Im monitor) into the same mini-viewer the analysis runs against. Mirrors the main viewer's `Traces` dropdown but per-analysis-window. Useful in the AP window to see the current command alongside Vm without leaving the analysis context; also useful in Burst / FPsp for sanity-checking detection vs the stim line.
+- **S** — Linux AppImage polish: bake `--no-sandbox` into the launch args via `build.linux.args` in `package.json` so users don't have to remember the flag on Ubuntu. Partial: the `libz.so` symlink patch is already in the uncommitted `scripts/build-backend.sh` — ship both together in the next release (see also working-tree edits in that file + `package.json`/`backend/main.py` version bumps to 0.2.3).
 
 ## Data I/O
 

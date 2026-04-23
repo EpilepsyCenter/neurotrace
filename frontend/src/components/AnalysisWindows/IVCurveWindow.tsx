@@ -583,21 +583,6 @@ export function IVCurveWindow({
             previewSweep={previewSweep}
             totalSweeps={totalSweeps}
             isExcluded={isPreviewExcluded}
-            onRunPreview={() => {
-              runIVCurve(group, series, channel, {
-                baselineStartS: cursors.baselineStart,
-                baselineEndS: cursors.baselineEnd,
-                peakStartS: cursors.peakStart,
-                peakEndS: cursors.peakEnd,
-                sweepIndices: [previewSweep],
-                appendToExisting: true,
-                manualImEnabled,
-                manualImStartS,
-                manualImEndS,
-                manualImStartPA,
-                manualImStepPA,
-              })
-            }}
             loading={loading}
             theme={theme}
             fontSize={fontSize}
@@ -716,6 +701,7 @@ function IVPlot({
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
       height: Math.max(120, el.clientHeight || 180),
+      legend: { show: false },
       scales: {
         x: { time: false },
         y: {
@@ -750,13 +736,11 @@ function IVPlot({
       series: [
         {},
         {
-          label: 'I-V',
           stroke: cssVar('--trace-color-1'),
           width: 1.5,
           points: { size: 6, stroke: cssVar('--trace-color-1'), fill: cssVar('--bg-surface') },
         },
         {
-          label: 'fit',
           stroke: cssVar('--accent'),
           width: 1,
           dash: [4, 4],
@@ -904,6 +888,8 @@ function IVTable({
             <Th>Baseline ({respUnit})</Th>
             <Th>Steady-state ({respUnit})</Th>
             <Th>Transient peak ({respUnit})</Th>
+            <Th>Sag amp ({respUnit})</Th>
+            <Th>Sag ratio</Th>
             <Th>Response ({respUnit})</Th>
           </tr>
         </thead>
@@ -926,6 +912,8 @@ function IVTable({
                 <Td>{p.baseline.toFixed(3)}</Td>
                 <Td>{p.steadyState.toFixed(3)}</Td>
                 <Td>{p.transientPeak.toFixed(3)}</Td>
+                <Td>{p.sagAmp.toFixed(3)}</Td>
+                <Td>{p.sagRatio != null ? p.sagRatio.toFixed(3) : '—'}</Td>
                 <Td><strong>{resp.toFixed(3)}</strong></Td>
               </tr>
             )
@@ -953,7 +941,7 @@ function TraceMiniViewer({
   traceTime, traceValues, traceUnits,
   cursors, updateCursors,
   previewSweep, totalSweeps, isExcluded,
-  onRunPreview, loading,
+  loading,
   theme, fontSize,
   zeroOffset, onZeroOffsetChange,
   resetCursorsInView,
@@ -966,7 +954,6 @@ function TraceMiniViewer({
   previewSweep: number
   totalSweeps: number
   isExcluded: boolean
-  onRunPreview: () => void
   loading: boolean
   theme: string
   fontSize: number
@@ -1051,6 +1038,7 @@ function TraceMiniViewer({
       hasRealDataRef.current = true
       const opts: uPlot.Options = {
         width: w, height: h,
+        legend: { show: false },
         scales: {
           x: {
             time: false,
@@ -1092,7 +1080,7 @@ function TraceMiniViewer({
         cursor: { drag: { x: false, y: false } },
         series: [
           {},
-          { label: 'Trace', stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
+          { stroke: cssVar('--trace-color-1'), width: 1.25, points: { show: false } },
         ],
         hooks: { draw: [(u) => drawOverlays(u)] },
       }
@@ -1307,17 +1295,14 @@ function TraceMiniViewer({
         display: 'flex', alignItems: 'center', gap: 6,
         borderBottom: '1px solid var(--border)', flexShrink: 0,
       }}>
-        {/* Sweep arrows moved to the top-of-window selector row. Only
-            the single-sweep Run button stays in the viewer header. */}
+        {/* Sweep arrows live in the top-of-window selector row.
+            Single-sweep runs go through the "single sweep" toggle in
+            the Run controls — the dedicated "Run sweep N" button
+            here was redundant with that toggle + the Run button, so
+            it's been removed to match the other analysis windows. */}
         <span style={{ minWidth: 58, textAlign: 'center' }}>
           Sweep {totalSweeps > 0 ? previewSweep + 1 : '—'}
         </span>
-        <button className="btn btn-primary"
-          onClick={onRunPreview} disabled={loading || totalSweeps === 0}
-          style={{ marginLeft: 6 }}
-          title="Run I-V on this sweep and append the point to the table">
-          Run sweep {previewSweep + 1}
-        </button>
         {isExcluded && (
           <span style={{
             fontSize: 'var(--font-size-label)', fontWeight: 600,

@@ -557,6 +557,15 @@ export interface IVPoint {
   baseline: number           // mean of first baseline_window_ms of the sweep
   steadyState: number        // mean of last peak_window_ms of the pulse
   transientPeak: number      // extreme during pulse window
+  /** Sag amplitude (mV for VC / pA for CC): transientPeak − steadyState.
+   *  Typically of interest only for hyperpolarising steps (Ih-mediated
+   *  sag-back), but reported for every sweep regardless of polarity so
+   *  the user can interpret in context. */
+  sagAmp: number
+  /** Sag as a fraction of the total deflection: sagAmp / (transientPeak
+   *  − baseline). Dimensionless, usually 0..1 when there's genuine sag.
+   *  null when the total deflection is near zero (ratio undefined). */
+  sagRatio: number | null
 }
 
 /** Which column of the I-V point is plotted on the y-axis. */
@@ -2687,6 +2696,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         baseline: Number(p.baseline ?? 0),
         steadyState: Number(p.steady_state ?? 0),
         transientPeak: Number(p.transient_peak ?? 0),
+        sagAmp: Number(p.sag_amp ?? 0),
+        sagRatio: p.sag_ratio != null ? Number(p.sag_ratio) : null,
       }))
       // Merge into existing table vs replace — driven by the run mode.
       // "append" (single sweep) keeps older rows from other sweeps and
@@ -2770,6 +2781,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       'file', 'group', 'series', 'sweep_index',
       'stim_level', 'stim_unit',
       'baseline', 'steady_state', 'transient_peak',
+      'sag_amp', 'sag_ratio',
       'response_metric', 'response', 'response_unit',
     ]
     const rows: string[] = [header.join(',')]
@@ -2788,6 +2800,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           p.baseline.toFixed(4),
           p.steadyState.toFixed(4),
           p.transientPeak.toFixed(4),
+          p.sagAmp.toFixed(4),
+          p.sagRatio != null ? p.sagRatio.toFixed(4) : '',
           entry.responseMetric,
           resp.toFixed(4),
           JSON.stringify(entry.responseUnit),

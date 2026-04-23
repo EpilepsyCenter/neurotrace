@@ -26,6 +26,27 @@ mv build/pyi-dist/backend-dist backend-dist
 SIZE=$(du -sh backend-dist | awk '{print $1}')
 echo "==> Backend frozen to $PROJECT_DIR/backend-dist/ ($SIZE)"
 
+# Linux: some transitively-bundled native libs (inside numpy / scipy
+# etc.) have DT_NEEDED against the *unversioned* `libz.so` name.
+# PyInstaller ships only `libz.so.1`, so the runtime linker can't
+# resolve it on hosts without `zlib1g-dev` (= the dev package that
+# creates the unversioned symlink). Create it ourselves so the
+# AppImage is self-sufficient. Same pattern for other common
+# unversioned-name leaks (libssl, libcrypto) as a defensive measure.
+if [ "$(uname)" = "Linux" ]; then
+  echo "==> Linux: patching bundled .so symlinks"
+  cd backend-dist
+  for libbase in libz libssl libcrypto libstdc++; do
+    # Find the first matching versioned file (e.g. libz.so.1, libz.so.1.2.13).
+    first_ver=$(ls "${libbase}.so."* 2>/dev/null | head -n 1 || true)
+    if [ -n "$first_ver" ] && [ ! -e "${libbase}.so" ]; then
+      ln -s "$first_ver" "${libbase}.so"
+      echo "    linked ${libbase}.so -> $first_ver"
+    fi
+  done
+  cd ..
+fi
+
 echo "==> Smoke test: starting bundled backend on port 18765"
 ./backend-dist/main --port 18765 >/tmp/nt-backend-smoke.log 2>&1 &
 PID=$!

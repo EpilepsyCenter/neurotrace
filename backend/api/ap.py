@@ -42,15 +42,19 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 class APRunRequest(BaseModel):
-    """All inputs for one /api/ap/run call."""
+    """All inputs for one /api/ap/run call.
+
+    Im source model (matches IV): when ``manual_im_enabled`` is False
+    (default), the backend reconstructs Im from the recording's
+    stimulus protocol — the same logic the AP window used to trigger
+    via ``im_trace=-1``. When True, Im for each sweep is computed
+    from ``start_pa + sweep_index * step_pa`` over the window
+    [start_s, end_s]. Either way the response reports back what got
+    used via the ``im_source`` field so the UI can surface it.
+    """
     group: int
     series: int
     trace: int
-    im_trace: Optional[int] = None
-    # When the Im channel lives on a different series than Vm (a
-    # common HEKA pattern — separate "current-monitoring" series),
-    # this points at that series. Defaults to the same series as Vm.
-    im_series: Optional[int] = None
     sweeps: Optional[list[int]] = None
     detection: dict = {}
     kinetics: dict = {}
@@ -58,6 +62,13 @@ class APRunRequest(BaseModel):
     ramp_params: Optional[dict] = None
     manual_edits: Optional[dict] = None
     measure_kinetics: bool = True
+    # Manual Im override — same field names as IV so the two windows
+    # pass the same shape through to the backend.
+    manual_im_enabled: bool = False
+    manual_im_start_s: float = 0.0
+    manual_im_end_s: float = 0.0
+    manual_im_start_pa: float = 0.0
+    manual_im_step_pa: float = 0.0
 
 
 @router.post("/run")
@@ -78,38 +89,34 @@ async def ap_run(req: APRunRequest):
     if not sweep_indices:
         raise HTTPException(status_code=400, detail="No valid sweeps requested")
 
-    # Im source. Three layouts the AP window supports:
+    # Im source: two modes.
     #
-    # 1. Recorded Im on the same series as Vm (im_series=None, im_trace>=0).
-    # 2. Recorded Im on a parallel series (im_series=N, im_trace>=0).
-    # 3. *Synthesised* Im from the .pgf stimulus protocol when no
-    #    real Im was recorded (im_trace=-1). For current-clamp this
-    #    is what the user sees as "the current step / ramp" in the
-    #    main viewer. We rebuild the DA waveform per sweep using the
-    #    pgf channel's `reconstruct_sweep`.
-    SYNTHESISE_IM = -1
-    use_synth = req.im_trace == SYNTHESISE_IM
-    im_ser = None
-    if req.im_trace is not None and not use_synth:
-        try:
-            im_ser = grp.series_list[req.im_series if req.im_series is not None else req.series]
-        except IndexError:
-            raise HTTPException(status_code=400, detail="Invalid im_series index")
-
-    # Pull Vm + (optionally) Im traces. We assume every sweep has the
-    # same channel layout — if not, the affected sweeps just produce
-    # empty arrays and the analysis silently skips them. Sampling rate
-    # is taken from the primary trace of the first valid sweep.
+    # 1. Auto (default): reconstruct Im from the stimulus protocol.
+    #    For current-clamp this is the actual current step / ramp
+    #    commanded at the DAC. We rebuild the DA waveform per sweep
+    #    via the protocol channel's ``reconstruct_sweep``.
+    # 2. Manual: the user provides start / step / window. Per sweep
+    #    Im = start_pa + sweep_index * step_pa over [start_s, end_s],
+    #    padded with zeros outside. Used when the recording has no
+    #    stimulus protocol, or the protocol doesn't expose Im.
+    #
+    # The response's ``im_source`` field reports which path was taken
+    # (and which channel the protocol picked) so the UI can surface
+    # it in the ImSourceCard info line.
+    use_manual = bool(req.manual_im_enabled)
     sweeps_vm: list[np.ndarray] = []
-    sweeps_im: Optional[list[np.ndarray]] = [] if req.im_trace is not None else None
+    # Im is always fetched — we need it for F-I curves, rheobase, and
+    # latency-to-first-spike. Manual fills from the formula; auto fills
+    # from the protocol (or zeros if reconstruction fails).
+    sweeps_im: list[np.ndarray] = []
     sr: float = 0.0
 
-    # Lazily look up the .pgf channel for synthesis mode. Picked once,
-    # reused per sweep. Falls back to a noop if no .pgf data is
-    # present (older Patchmaster versions don't write one).
+    # Protocol-based Im reconstruction (auto mode). Picked once, reused
+    # per sweep. Falls back to noop if no protocol data is present
+    # (older Patchmaster versions don't write one; other file formats
+    # may not either once we add them).
     synth_channel = None
-    synth_value_factor = 1.0  # multiplier from raw channel values → pA
-    if use_synth:
+    if not use_manual:
         target = _stim_for_series(rec, req.group, req.series)
         if target is not None:
             # Layered current-channel pick:
@@ -180,33 +187,35 @@ async def ap_run(req: APRunRequest):
         sw = ser.sweeps[si]
         if req.trace < 0 or req.trace >= sw.trace_count:
             sweeps_vm.append(np.zeros(0))
-            if sweeps_im is not None:
-                sweeps_im.append(np.zeros(0))
+            sweeps_im.append(np.zeros(0))
             continue
         tr = sw.traces[req.trace]
         sweeps_vm.append(np.asarray(tr.data, dtype=float))
         if sr <= 0 and tr.sampling_rate > 0:
             sr = float(tr.sampling_rate)
-        if sweeps_im is not None:
-            if use_synth and synth_channel is not None and tr.sampling_rate > 0:
-                # PgfSegment values are stored in nA (not SI A as the
-                # dataclass docstring claims). Convert nA → pA = ×1000.
-                # api/traces.py uses the same factor for stim overlay.
-                wave = synth_channel.reconstruct_sweep(si, 1.0 / float(tr.sampling_rate))
-                sweeps_im.append(np.asarray(wave, dtype=float) * 1000.0)
-            elif im_ser is not None:
-                # Pull the corresponding sweep from the Im series. If
-                # the Im series has fewer sweeps than Vm's selection,
-                # or the trace index is out of range, pad with empty
-                # so rheobase / F-I just skip that sweep.
-                if si < im_ser.sweep_count and 0 <= (req.im_trace or 0) < im_ser.sweeps[si].trace_count:
-                    im_sw = im_ser.sweeps[si]
-                    im_tr = im_sw.traces[req.im_trace]  # type: ignore[index]
-                    sweeps_im.append(np.asarray(im_tr.data, dtype=float))
-                else:
-                    sweeps_im.append(np.zeros(0))
-            else:
-                sweeps_im.append(np.zeros(0))
+
+        if use_manual:
+            # Build a per-sweep Im trace from the manual formula. Matches
+            # the IV window's Manual Im semantics: constant current
+            # inside [start_s, end_s], zero outside.
+            n = tr.data.size
+            sr_tr = float(tr.sampling_rate) if tr.sampling_rate > 0 else 0.0
+            im_arr = np.zeros(n, dtype=float)
+            if sr_tr > 0 and req.manual_im_end_s > req.manual_im_start_s:
+                i0 = max(0, int(round(req.manual_im_start_s * sr_tr)))
+                i1 = min(n, int(round(req.manual_im_end_s * sr_tr)))
+                if i1 > i0:
+                    level = req.manual_im_start_pa + si * req.manual_im_step_pa
+                    im_arr[i0:i1] = level
+            sweeps_im.append(im_arr)
+        elif synth_channel is not None and tr.sampling_rate > 0:
+            # PgfSegment values are stored in nA (not SI A as the
+            # dataclass docstring claims). Convert nA → pA = ×1000.
+            # api/traces.py uses the same factor for stim overlay.
+            wave = synth_channel.reconstruct_sweep(si, 1.0 / float(tr.sampling_rate))
+            sweeps_im.append(np.asarray(wave, dtype=float) * 1000.0)
+        else:
+            sweeps_im.append(np.zeros(0))
 
     if sr <= 0:
         raise HTTPException(status_code=400, detail="No valid sweeps in selection")
@@ -241,14 +250,16 @@ async def ap_run(req: APRunRequest):
         measure_kinetics=req.measure_kinetics,
     )
 
-    # Synth-Im patch: for step protocols the per-sweep Im mean over
-    # [bounds_start_s, bounds_end_s] (typically the full sweep) is
-    # diluted by long stretches at holding (0 pA) and collapses
+    # Auto/protocol Im patch: for step protocols the per-sweep Im mean
+    # over [bounds_start_s, bounds_end_s] (typically the full sweep)
+    # is diluted by long stretches at holding (0 pA) and collapses
     # toward zero. F-I points then all stack at x ≈ 0. Recompute
     # im_mean from the most-active stim segment for each sweep, and
     # rebuild the F-I curve from those step-level values. Spike
-    # counts/rates are not changed.
-    if use_synth and synth_channel is not None and sweeps_im is not None:
+    # counts/rates are not changed. (Manual mode doesn't need this —
+    # the user's start_s/end_s already bracket the step and the formula
+    # returns a single level per sweep.)
+    if (not use_manual) and synth_channel is not None:
         new_fi_im: list[float] = []
         new_fi_rate: list[float] = []
         new_fi_sweep: list[int] = []
@@ -284,8 +295,20 @@ async def ap_run(req: APRunRequest):
         if new_fi_im:
             result["fi_curve"] = {"im": new_fi_im, "rate": new_fi_rate, "sweep": new_fi_sweep}
 
+    # Report back which Im source got used, so the UI's ImSourceCard
+    # info line can say "detected: X" or "manual values" rather than
+    # leaving the user guessing. Format matches IV for consistency.
+    if use_manual:
+        im_source = {"mode": "manual", "label": None}
+    elif synth_channel is not None:
+        unit = getattr(synth_channel, "stim_unit_label", None) or "pA"
+        im_source = {"mode": "protocol", "label": f"reconstructed ({unit})"}
+    else:
+        im_source = {"mode": "none", "label": None}
+
     result["sampling_rate"] = sr
     result["im_onset_s"] = im_onset_s
+    result["im_source"] = im_source
     return result
 
 

@@ -9,6 +9,9 @@ import {
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { ImSourceCard } from '../common/ImSourceCard'
+import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
+import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 
 /**
  * Action Potentials analysis window.
@@ -104,12 +107,17 @@ export function APWindow({
   const [group, setGroup] = useState(mainGroup ?? 0)
   const [series, setSeries] = useState(mainSeries ?? 0)
   const [trace, setTrace] = useState(mainTrace ?? 0)
-  const [imTrace, setImTrace] = useState<number | null>(null)
-  // Im source series — null means "same series as Vm" (the common
-  // single-series-per-cell layout). When the recording stores Vm and
-  // Im on parallel series instead (HEKA's "current monitoring"
-  // pattern), the user picks the Im-carrying series here.
-  const [imSeries, setImSeries] = useState<number | null>(null)
+  // Im source — matches IV's manual-Im fallback. Auto (default) means
+  // the backend reconstructs Im from the recording's stimulus protocol.
+  // Manual bypasses that with user-supplied start/step/window values.
+  // The old "Im series" + "Im channel" selectors are gone; users who
+  // need to override auto-detect use Manual instead. See ImSourceCard
+  // + /api/ap/run's manual_im_* params.
+  const [manualImEnabled, setManualImEnabled] = useState(false)
+  const [manualImStartS, setManualImStartS] = useState(0)
+  const [manualImEndS, setManualImEndS] = useState(0)
+  const [manualImStartPA, setManualImStartPA] = useState(0)
+  const [manualImStepPA, setManualImStepPA] = useState(0)
   const hasSyncedRef = useRef(false)
   useEffect(() => {
     if (hasSyncedRef.current) return
@@ -129,18 +137,28 @@ export function APWindow({
   useEffect(() => {
     if (channels.length > 0 && trace >= channels.length) setTrace(0)
   }, [channels, trace])
-  // Im-channels list: drawn from whichever series the user picked
-  // for Im (defaults to the Vm series). Shown in a separate selector
-  // so single-series and parallel-series layouts both work.
-  const imChannels = useMemo(
-    () => channelsForSeries(fileInfo, group, imSeries ?? series),
-    [fileInfo, group, imSeries, series],
-  )
+
+  // Overlay channels — extra channels / stimulus to display as
+  // stacked subplots under the primary viewer. Analysis never runs
+  // on overlay channels; they're for visual context only (e.g. see
+  // the stim step while placing analysis bounds on Vm).
+  const [overlayChannels, setOverlayChannels] = useState<number[]>([])
+  // Drop any overlay that stops existing after a series/channel change.
   useEffect(() => {
-    if (imTrace != null && imChannels.length > 0 && imTrace >= imChannels.length) {
-      setImTrace(null)
-    }
-  }, [imChannels, imTrace])
+    setOverlayChannels((prev) => prev.filter((idx) => {
+      if (idx === STIMULUS_OVERLAY_KEY) return true
+      return channels.some((c: any) => c.index === idx)
+    }))
+  }, [channels])
+  const hasStimulus = useMemo(() => {
+    const ser = fileInfo?.groups?.[group]?.series?.[series]
+    return Boolean(ser?.stimulus)
+  }, [fileInfo, group, series])
+  // Current X range from the primary viewer — drives all overlay
+  // subplots. null = auto-fit (each subplot falls back to its own data
+  // extents). React state rather than a ref so setter propagates a
+  // re-render to overlays.
+  const [primaryXRange, setPrimaryXRange] = useState<[number, number] | null>(null)
 
   // ---- Tab ----
   type APTab = 'counting' | 'kinetics'
@@ -400,8 +418,11 @@ export function APWindow({
     if (rehydratedKeyRef.current === key) return
     rehydratedKeyRef.current = key
     setTrace(entry.trace)
-    setImTrace(entry.imTrace)
-    setImSeries(entry.imSeries ?? null)
+    setManualImEnabled(entry.manualImEnabled ?? false)
+    setManualImStartS(entry.manualImStartS ?? 0)
+    setManualImEndS(entry.manualImEndS ?? 0)
+    setManualImStartPA(entry.manualImStartPA ?? 0)
+    setManualImStepPA(entry.manualImStepPA ?? 0)
     setDetection(entry.detection)
     setKinetics(entry.kinetics)
     setRheobaseMode(entry.rheobaseMode)
@@ -489,7 +510,15 @@ export function APWindow({
       sweepIndices = [Math.max(0, Math.min(sweepOne - 1, totalSweeps - 1))]
     }
     await runAP(
-      group, series, trace, imTrace, imSeries, sweepIndices,
+      group, series, trace,
+      {
+        manualEnabled: manualImEnabled,
+        manualStartS: manualImStartS,
+        manualEndS: manualImEndS,
+        manualStartPA: manualImStartPA,
+        manualStepPA: manualImStepPA,
+      },
+      sweepIndices,
       detection, kinetics,
       rheobaseMode,
       rheobaseMode === 'ramp' ? rampParams : null,
@@ -550,46 +579,21 @@ export function APWindow({
             ))}
           </select>
         </Field>
-        <Field label="Vm series">
+        <Field label="Series">
           <select value={series} onChange={(e) => onSeriesChange(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
               <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
             ))}
           </select>
         </Field>
-        <Field label="Vm channel">
-          <select value={trace} onChange={(e) => setTrace(Number(e.target.value))} disabled={channels.length === 0}>
-            {channels.map((c: any) => (
-              <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Im series">
-          <select value={imSeries ?? ''}
-            onChange={(e) => setImSeries(e.target.value === '' ? null : Number(e.target.value))}
-            disabled={!fileInfo}
-            title="Series the Im channel is read from. Defaults to the same series as Vm — pick a different series here if your recording stores Vm and Im on parallel series.">
-            <option value="">— same as Vm —</option>
-            {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
-              <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Im channel">
-          <select value={imTrace ?? ''}
-            onChange={(e) => setImTrace(e.target.value === '' ? null : Number(e.target.value))}
-            title="Recorded Im monitor channel. If the recording has no Im monitor (Vm-only recording), pick 'Stimulus (from .pgf)' to use the current command waveform from the protocol — works for both step and ramp protocols.">
-            <option value="">— none —</option>
-            {/* Synthesised-from-stimulus pseudo-option. Backend reconstructs
-                the current command per-sweep from the .pgf protocol, in pA.
-                Useful when there's no recorded Im channel — the most
-                common case for many CC protocols. */}
-            <option value={-1}>⚙ Stimulus (from .pgf, pA)</option>
-            {imChannels.map((c: any) => (
-              <option key={c.index} value={c.index}>{c.label} ({c.units})</option>
-            ))}
-          </select>
-        </Field>
+        <ChannelsOverlaySelect
+          channels={channels.map((c: any) => ({ index: c.index, label: c.label, units: c.units }))}
+          primary={trace}
+          onPrimaryChange={(i) => setTrace(i)}
+          overlay={overlayChannels}
+          onOverlayChange={setOverlayChannels}
+          hasStimulus={hasStimulus}
+        />
         <Field label="Sweep (preview)">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
             <button className="btn" style={{ padding: '2px 8px' }}
@@ -664,6 +668,26 @@ export function APWindow({
             display: 'flex', flexDirection: 'column', gap: 8,
             paddingRight: 4,  // room for the scrollbar
           }}>
+            {/* Im source — Auto reconstructs from the recording's
+                stimulus protocol; Manual falls back to start/step
+                values. Shared with the IV window via ImSourceCard. */}
+            <ImSourceCard
+              mode={manualImEnabled ? 'manual' : 'auto'}
+              onModeChange={(m) => setManualImEnabled(m === 'manual')}
+              manual={{
+                startS: manualImStartS,
+                endS: manualImEndS,
+                startPA: manualImStartPA,
+                stepPA: manualImStepPA,
+              }}
+              onManualChange={(p) => {
+                if (p.startS !== undefined) setManualImStartS(p.startS)
+                if (p.endS !== undefined) setManualImEndS(p.endS)
+                if (p.startPA !== undefined) setManualImStartPA(p.startPA)
+                if (p.stepPA !== undefined) setManualImStepPA(p.stepPA)
+              }}
+              detected={entry?.imSource ?? null}
+            />
             {/* Detection params (filter + method + bounds) live here. */}
             <APDetectionPanel detection={detection} setDetection={setDetection} />
             {/* Tab-specific params. */}
@@ -675,7 +699,6 @@ export function APWindow({
                 setRampParams={setRampParams}
                 backendUrl={backendUrl}
                 group={group} series={series}
-                imTrace={imTrace}
               />
             )}
             {tab === 'kinetics' && (
@@ -801,37 +824,85 @@ export function APWindow({
         }}>
 
       {/* Top: mode-dependent viewer area. Counting tab gets the full
-          sweep viewer (whole trace + spike markers + draggable bounds).
-          Kinetics tab swaps in [zoomed-spike (left) | phase-plot (right)]
-          so the user can verify detection markers up close AND see the
-          characteristic phase loop side-by-side. */}
+          sweep viewer (whole trace + spike markers + draggable bounds),
+          optionally with stacked overlay subplots beneath for extra
+          channels / the stimulus protocol. Kinetics tab swaps in
+          [zoomed-spike (left) | phase-plot (right)] so the user can
+          verify detection markers up close AND see the characteristic
+          phase loop side-by-side. */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{ height: topHeight, minHeight: 180, flexShrink: 0,
           display: 'flex', gap: 6,
         }}>
           {tab === 'counting' && (
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <APSweepViewer
-                traceTime={traceTime}
-                traceValues={traceValues}
-                traceUnits={traceUnits}
-                previewSweep={previewSweep}
-                totalSweeps={totalSweeps}
-                theme={theme}
-                fontSize={fontSize}
-                zeroOffset={zeroOffset}
-                onZeroOffsetChange={setZeroOffset}
-                zeroOffsetApplied={zeroOffsetApplied}
-                boundsStartS={detection.bounds_start_s}
-                boundsEndS={detection.bounds_end_s}
-                onBoundsChange={(start, end) => {
-                  setDetection((d) => ({ ...d, bounds_start_s: start, bounds_end_s: end }))
-                }}
-                previewSpikes={previewSpikes}
-                entry={entry}
-                heightSignal={topHeight}
-                zoomToSpikeRequest={zoomRequest}
-              />
+            <div style={{
+              flex: 1, minWidth: 0,
+              display: 'flex', flexDirection: 'column', minHeight: 0,
+            }}>
+              {/* Primary subplot: APSweepViewer with all analysis
+                  bands + spike markers. Cursor bands are drawn only
+                  here — overlay subplots below are display-only. */}
+              <div style={{
+                flex: overlayChannels.length > 0 ? 2 : 1,
+                minHeight: 0,
+              }}>
+                <APSweepViewer
+                  traceTime={traceTime}
+                  traceValues={traceValues}
+                  traceUnits={traceUnits}
+                  previewSweep={previewSweep}
+                  totalSweeps={totalSweeps}
+                  theme={theme}
+                  fontSize={fontSize}
+                  zeroOffset={zeroOffset}
+                  onZeroOffsetChange={setZeroOffset}
+                  zeroOffsetApplied={zeroOffsetApplied}
+                  boundsStartS={detection.bounds_start_s}
+                  boundsEndS={detection.bounds_end_s}
+                  onBoundsChange={(start, end) => {
+                    setDetection((d) => ({ ...d, bounds_start_s: start, bounds_end_s: end }))
+                  }}
+                  previewSpikes={previewSpikes}
+                  entry={entry}
+                  heightSignal={topHeight}
+                  zoomToSpikeRequest={zoomRequest}
+                  onXRangeChange={(xMin, xMax) => setPrimaryXRange([xMin, xMax])}
+                />
+              </div>
+              {/* Overlay subplots — one per selected overlay channel.
+                  Thin divider between each, 2:1 primary-to-each ratio
+                  (user can still adjust the top splitter for overall
+                  viewer height). Display-only, X-synced from primary. */}
+              {overlayChannels.map((ch) => {
+                const label = ch === STIMULUS_OVERLAY_KEY
+                  ? 'Stimulus'
+                  : channels.find((c: any) => c.index === ch)?.label ?? `Ch ${ch}`
+                const units = ch === STIMULUS_OVERLAY_KEY
+                  ? 'pA'
+                  : channels.find((c: any) => c.index === ch)?.units ?? ''
+                const overlayConfig: OverlayChannel = ch === STIMULUS_OVERLAY_KEY
+                  ? { kind: 'stimulus', label, units }
+                  : { kind: 'channel', index: ch, label, units }
+                return (
+                  <React.Fragment key={ch}>
+                    <div style={{
+                      height: 3, flexShrink: 0,
+                      background: 'var(--border)',
+                    }} />
+                    <div style={{ flex: 1, minHeight: 0 }}>
+                      <OverlayTraceViewer
+                        backendUrl={backendUrl}
+                        group={group}
+                        series={series}
+                        sweep={previewSweep}
+                        channel={overlayConfig}
+                        xRange={primaryXRange}
+                        heightSignal={topHeight}
+                      />
+                    </div>
+                  </React.Fragment>
+                )
+              })}
             </div>
           )}
           {tab === 'kinetics' && (
@@ -1162,7 +1233,7 @@ function APKineticsPanel({
 function APRheobasePanel({
   rheobaseMode, setRheobaseMode,
   rampParams, setRampParams,
-  backendUrl, group, series, imTrace,
+  backendUrl, group, series,
 }: {
   rheobaseMode: APRheobaseMode
   setRheobaseMode: (m: APRheobaseMode) => void
@@ -1171,7 +1242,6 @@ function APRheobasePanel({
   backendUrl: string
   group: number
   series: number
-  imTrace: number | null
 }) {
   const setRamp = <K extends keyof APRampParams>(k: K, v: APRampParams[K]) =>
     setRampParams((r) => ({ ...r, [k]: v }))
@@ -1216,9 +1286,8 @@ function APRheobasePanel({
       </label>
       <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
         <input type="radio" name="ap-rheobase-mode" checked={rheobaseMode === 'exact'}
-          disabled={imTrace == null}
           onChange={() => setRheobaseMode('exact')} />
-        Exact (Im at first AP sample) {imTrace == null && <span style={{ color: 'var(--text-muted)' }}>— needs Im channel</span>}
+        Exact (Im at first AP sample)
       </label>
       <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
         <input type="radio" name="ap-rheobase-mode" checked={rheobaseMode === 'ramp'}
@@ -1248,9 +1317,9 @@ function APRheobasePanel({
               onChange={(v) => setRamp('im_end_pa', v)} style={{ width: 70 }} />
           </label>
           <button className="btn" onClick={onAutoFill}
-            title="Try to fill from the .pgf stimulus protocol"
+            title="Try to fill from the stimulus protocol"
             style={{ padding: '1px 8px' }}>
-            Auto-fill from .pgf
+            Auto-fill from protocol
           </button>
         </span>
       )}
@@ -1977,6 +2046,7 @@ function APSweepViewer({
   entry,
   heightSignal,
   zoomToSpikeRequest,
+  onXRangeChange,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -2000,6 +2070,9 @@ function APSweepViewer({
   /** Bumped by the parent when a kinetics row is clicked: viewer
    *  zooms its x range to centre ± half-width-ms around the spike. */
   zoomToSpikeRequest?: { bump: number; centerT: number; halfMs: number } | null
+  /** Fired when the user pans / wheel-zooms / resets, so stacked
+   *  overlay viewers can mirror the x range. */
+  onXRangeChange?: (xMin: number, xMax: number) => void
 }) {
   void previewSweep; void totalSweeps; void traceUnits
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2016,6 +2089,14 @@ function APSweepViewer({
   offsetRef.current = zeroOffsetApplied
   const entryRef = useRef(entry)
   entryRef.current = entry
+  // Stash the X-range-change callback in a ref so the wheel/pan/reset
+  // handlers (which are wired once and never rebuilt) always see the
+  // latest prop value without forcing a remount.
+  const onXRangeChangeRef = useRef(onXRangeChange)
+  onXRangeChangeRef.current = onXRangeChange
+  const emitXRange = (xMin: number, xMax: number) => {
+    try { onXRangeChangeRef.current?.(xMin, xMax) } catch { /* ignore */ }
+  }
 
   const drawOverlays = (u: uPlot) => {
     const ctx = u.ctx
@@ -2197,7 +2278,10 @@ function APSweepViewer({
       const vv = v - zeroOffsetApplied
       if (vv < ymin) ymin = vv; if (vv > ymax) ymax = vv
     }
-    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) u.setScale('x', { min: xmin, max: xmax })
+    if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
+      u.setScale('x', { min: xmin, max: xmax })
+      emitXRange(xmin, xmax)
+    }
     if (isFinite(ymin) && isFinite(ymax) && ymin !== ymax) {
       const pad = (ymax - ymin) * 0.05
       u.setScale('y', { min: ymin - pad, max: ymax + pad })
@@ -2228,6 +2312,10 @@ function APSweepViewer({
               const hi = isFinite(dataMax) && dataMax > lo ? dataMax : lo + 1
               const r: [number, number] = [lo, hi]
               xRangeRef.current = r
+              // Notify overlay viewers of the initial auto-fit range
+              // on the very first draw, so they mirror it immediately
+              // rather than waiting for the user to interact.
+              emitXRange(lo, hi)
               return r
             },
           },
@@ -2349,6 +2437,7 @@ function APSweepViewer({
           yRangeRef.current = ny
           u.setScale('x', { min: nx[0], max: nx[1] })
           u.setScale('y', { min: ny[0], max: ny[1] })
+          emitXRange(nx[0], nx[1])
         }
       }
       const onPointerUp = (ev: PointerEvent) => {
@@ -2379,6 +2468,7 @@ function APSweepViewer({
           const newMax = xAtCur + (xMax - xAtCur) * factor
           xRangeRef.current = [newMin, newMax]
           u.setScale('x', { min: newMin, max: newMax })
+          emitXRange(newMin, newMax)
         }
       }
       over.addEventListener('pointerdown', onPointerDown)
@@ -2440,7 +2530,18 @@ function APSweepViewer({
     xRangeRef.current = [lo, hi]
     u.setScale('x', { min: lo, max: hi })
     u.redraw()
+    emitXRange(lo, hi)
   }, [zoomToSpikeRequest])
+
+  // Emit the initial auto-fit range so overlay viewers mirror it
+  // before the user does anything. Fires once per plot build.
+  useEffect(() => {
+    const u = plotRef.current
+    if (!u) return
+    const r = xRangeRef.current
+    if (r) emitXRange(r[0], r[1])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [traceTime, traceValues])
 
   return (
     <div style={{

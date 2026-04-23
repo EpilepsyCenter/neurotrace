@@ -4,6 +4,7 @@ import 'uplot/dist/uPlot.min.css'
 import { useAppStore, IVCurveData, IVResponseMetric, CursorPositions } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { ImSourceCard } from '../common/ImSourceCard'
 
 const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
@@ -461,62 +462,27 @@ export function IVCurveWindow({
               </label>
             </div>
 
-            {/* Manual Im fallback — for recordings where the stimulus
-                trace wasn't saved. When enabled, bypasses the .pgf
-                lookup and reconstructs Im per sweep from
-                start_pA + sweep_index * step_pA. */}
-            <div style={{
-              display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
-              padding: 8,
-              border: '1px solid var(--border)', borderRadius: 4,
-              background: 'var(--bg-primary)',
-              fontSize: 'var(--font-size-label)',
-            }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, width: '100%' }}
-                title="Use this when the stimulus channel wasn't recorded or the .pgf doesn't expose Im">
-                <input type="checkbox" checked={manualImEnabled}
-                  onChange={(e) => setManualImEnabled(e.target.checked)} />
-                <span style={{ fontWeight: 600 }}>Manual Im</span>
-              </label>
-              {manualImEnabled ? (
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                  gap: 6, width: '100%',
-                }}>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>start (s)</span>
-                    <NumInput value={manualImStartS} step={0.01}
-                      onChange={setManualImStartS} />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>end (s)</span>
-                    <NumInput value={manualImEndS} step={0.01}
-                      onChange={setManualImEndS} />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>start Im (pA)</span>
-                    <NumInput value={manualImStartPA} step={1}
-                      onChange={setManualImStartPA} />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>step (pA)</span>
-                    <NumInput value={manualImStepPA} step={1}
-                      onChange={setManualImStepPA} />
-                  </label>
-                  <span style={{
-                    gridColumn: '1 / -1',
-                    color: 'var(--text-muted)', fontStyle: 'italic',
-                  }}>
-                    Im(sweep n) = startPA + n · stepPA
-                  </span>
-                </div>
-              ) : (
-                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                  off — Im is read from the stimulus trace. Turn on if the stimulus isn't recorded.
-                </span>
-              )}
-            </div>
+            {/* Im source — shared with the AP window. Auto uses the
+                stimulus protocol; Manual falls back to user-supplied
+                start/step/window (for recordings where the stimulus
+                wasn't saved or the protocol doesn't expose Im). */}
+            <ImSourceCard
+              mode={manualImEnabled ? 'manual' : 'auto'}
+              onModeChange={(m) => setManualImEnabled(m === 'manual')}
+              manual={{
+                startS: manualImStartS,
+                endS: manualImEndS,
+                startPA: manualImStartPA,
+                stepPA: manualImStepPA,
+              }}
+              onManualChange={(p) => {
+                if (p.startS !== undefined) setManualImStartS(p.startS)
+                if (p.endS !== undefined) setManualImEndS(p.endS)
+                if (p.startPA !== undefined) setManualImStartPA(p.startPA)
+                if (p.stepPA !== undefined) setManualImStepPA(p.stepPA)
+              }}
+              detected={entry?.imSource ?? null}
+            />
           </div>
 
           {/* Pinned footer: Run + Sweeps dropdown + progressive

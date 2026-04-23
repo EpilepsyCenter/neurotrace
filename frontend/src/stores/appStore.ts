@@ -672,6 +672,18 @@ export interface FPspData {
 }
 
 /** Per-series I-V output, keyed in the store by "group:series". */
+/** Reported by the AP and IV backends on every `/run` response so the
+ *  UI's `ImSourceCard` info line can tell the user which Im source
+ *  was actually used. `mode`:
+ *    - 'protocol' — reconstructed from the recording's stimulus protocol
+ *    - 'manual'   — user-supplied start/step values
+ *    - 'none'     — no Im could be derived (no protocol, manual off)
+ *  `label` is an optional short description (e.g. "reconstructed (pA)"). */
+export interface ImSource {
+  mode: 'protocol' | 'manual' | 'none'
+  label: string | null
+}
+
 export interface IVCurveData {
   channel: number
   stimUnit: string           // mV for VC, pA for CC (x-axis label)
@@ -684,6 +696,9 @@ export interface IVCurveData {
   peakEndS: number
   points: IVPoint[]
   selectedIdx: number | null
+  /** What the backend actually used as the Im source on the last run.
+   *  Drives the ImSourceCard info line. Absent on pre-refactor saves. */
+  imSource?: ImSource
 }
 
 /** Per-series burst-detection output, keyed in the store by "group:series". */
@@ -862,9 +877,15 @@ export interface APData {
   group: number
   series: number
   trace: number
-  imTrace: number | null
-  /** Series the Im channel is read from. null = same as `series`. */
-  imSeries: number | null
+  /** Manual Im override. When enabled, the backend uses
+   *  `manualImStart/Step/StartS/EndS` directly instead of
+   *  reconstructing Im from the stimulus protocol. Mirrors the IV
+   *  window's manual-Im fallback for consistency. */
+  manualImEnabled: boolean
+  manualImStartS: number
+  manualImEndS: number
+  manualImStartPA: number
+  manualImStepPA: number
   detection: APDetectionParams
   kinetics: APKineticsParams
   rheobaseMode: APRheobaseMode
@@ -878,6 +899,9 @@ export interface APData {
   selectedSpikeIdx: number | null
   imOnsetS: number | null
   samplingRate: number
+  /** What the backend actually used as the Im source on the last run.
+   *  Drives the ImSourceCard info line. Absent on pre-refactor saves. */
+  imSource?: ImSource
 }
 
 export interface CursorAnalysisData {
@@ -1241,10 +1265,16 @@ interface AppState {
    *  resulting entry so closing/reopening the window restores them. */
   runAP: (
     group: number, series: number, trace: number,
-    imTrace: number | null,
-    /** Im channel's source series. null = same as Vm series. Used
-     *  when Vm and Im are on different series (common HEKA layout). */
-    imSeries: number | null,
+    /** Im source config — Auto (reconstruct from stimulus protocol) or
+     *  Manual (start/step/window). Matches the IV window's Manual Im
+     *  semantics so both use the same shape on the wire. */
+    imSource: {
+      manualEnabled: boolean
+      manualStartS: number
+      manualEndS: number
+      manualStartPA: number
+      manualStepPA: number
+    },
     sweepIndices: number[] | null,
     detection: APDetectionParams,
     kinetics: APKineticsParams,
@@ -2661,6 +2691,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         peakEndS: params.peakEndS,
         points: mergedPoints,
         selectedIdx: null,
+        imSource: resp.im_source ? {
+          mode: resp.im_source.mode as ImSource['mode'],
+          label: resp.im_source.label ?? null,
+        } : undefined,
       }
       set((s) => ({ ivCurves: { ...s.ivCurves, [key]: next }, loading: false }))
       _broadcastIVCurves(get().ivCurves)
@@ -3103,17 +3137,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- Action Potentials ----
 
-  runAP: async (group, series, trace, imTrace, imSeries, sweepIndices, detection, kinetics, rheobaseMode, rampParams, manualEdits, measureKinetics) => {
+  runAP: async (group, series, trace, imSource, sweepIndices, detection, kinetics, rheobaseMode, rampParams, manualEdits, measureKinetics) => {
     const { backendUrl } = get()
     if (!backendUrl) return
     set({ loading: true, error: null })
     try {
       // POST body — params are too nested for a query string. The
       // backend handles bounds_end_s = 0 as "use full sweep length".
-      const body = {
+      const body: Record<string, any> = {
         group, series, trace,
-        im_trace: imTrace,
-        im_series: imSeries,
         sweeps: sweepIndices,
         detection,
         kinetics,
@@ -3130,6 +3162,13 @@ export const useAppStore = create<AppState>((set, get) => ({
           ),
         },
         measure_kinetics: measureKinetics,
+        // Im source — Auto means "reconstruct from stimulus protocol"
+        // (default backend behavior), Manual passes start/step/window.
+        manual_im_enabled: imSource.manualEnabled,
+        manual_im_start_s: imSource.manualStartS,
+        manual_im_end_s: imSource.manualEndS,
+        manual_im_start_pa: imSource.manualStartPA,
+        manual_im_step_pa: imSource.manualStepPA,
       }
       const resp = await fetch(`${backendUrl}/api/ap/run`, {
         method: 'POST',
@@ -3182,7 +3221,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         : null
       const next: APData = {
-        group, series, trace, imTrace, imSeries,
+        group, series, trace,
+        manualImEnabled: imSource.manualEnabled,
+        manualImStartS: imSource.manualStartS,
+        manualImEndS: imSource.manualEndS,
+        manualImStartPA: imSource.manualStartPA,
+        manualImStepPA: imSource.manualStepPA,
         detection, kinetics,
         rheobaseMode,
         rampParams,
@@ -3197,6 +3241,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedSpikeIdx: null,
         imOnsetS: data.im_onset_s != null ? Number(data.im_onset_s) : null,
         samplingRate: Number(data.sampling_rate ?? 0),
+        imSource: data.im_source ? {
+          mode: data.im_source.mode as ImSource['mode'],
+          label: data.im_source.label ?? null,
+        } : undefined,
       }
       const key = `${group}:${series}`
       set((s) => ({ apAnalyses: { ...s.apAnalyses, [key]: next }, loading: false }))

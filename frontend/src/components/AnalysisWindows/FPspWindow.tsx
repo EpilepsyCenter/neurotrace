@@ -817,7 +817,7 @@ export function FPspWindow({
                 onClick={onAutoPlace}
                 disabled={!backendUrl || !fileInfo}
                 style={{ width: '100%', marginTop: 4 }}
-                title="Detect stim onset from the .pgf channel and place baseline / volley / fEPSP cursors at sensible defaults"
+                title="Detect stim onset from the stimulus protocol and place baseline / volley / fEPSP cursors at sensible defaults"
               >
                 Auto-place cursors
               </button>

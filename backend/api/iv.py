@@ -89,9 +89,9 @@ async def run_iv(
     peak_end_s: float = Query(..., description="Peak/SS cursor end (s from sweep start)"),
     sweeps: Optional[str] = Query(None, description="Comma-separated 0-based sweep indices. None = all sweeps."),
     manual_im_enabled: bool = Query(False, description=(
-        "Bypass the .pgf stimulus lookup and reconstruct Im from the four "
-        "parameters below. Use this when the stimulus trace isn't recorded "
-        "or the protocol doesn't expose Im."
+        "Bypass the stimulus-protocol lookup and reconstruct Im from the "
+        "four parameters below. Use this when the stimulus trace isn't "
+        "recorded or the protocol doesn't expose Im."
     )),
     manual_im_start_s: float = Query(0.0),
     manual_im_end_s: float = Query(0.0),
@@ -239,6 +239,17 @@ async def run_iv(
     # Sort points by stim level so the plot is monotonic in x.
     points.sort(key=lambda p: p["stim_level"])
 
+    # Report which Im source got used so the UI's ImSourceCard can
+    # surface it. Matches the shape AP returns.
+    if manual_im_enabled:
+        im_source = {"mode": "manual", "label": None}
+    elif target is not None:
+        picked = _pick_stim_channel(target)
+        unit = getattr(picked, "stim_unit_label", None) or stim_unit or ""
+        im_source = {"mode": "protocol", "label": f"reconstructed ({unit})" if unit else "reconstructed"}
+    else:
+        im_source = {"mode": "none", "label": None}
+
     return {
         "points": points,
         "stim_unit": stim_unit if points else "",
@@ -247,4 +258,5 @@ async def run_iv(
         "baseline_end_s": baseline_end_s,
         "peak_start_s": peak_start_s,
         "peak_end_s": peak_end_s,
+        "im_source": im_source,
     }

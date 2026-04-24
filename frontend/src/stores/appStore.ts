@@ -815,6 +815,13 @@ export interface FPspData {
    *  / LTP runs that may coexist for the same (group, series). Defaults
    *  to 'ltp' when absent for backward-compat with pre-tab-bar saves. */
   mode: FPspMode
+  /** Run-scope form state from the last run. Optional — pre-v0.3.1
+   *  saves don't carry these. Rehydrated on window reopen so "I was
+   *  running sweeps 15-30" survives a close. */
+  runMode?: 'all' | 'range' | 'one'
+  sweepFrom?: number
+  sweepTo?: number
+  sweepOne?: number
   channel: number
   responseUnit: string
   /** Primary ("baseline") series index in the file. */
@@ -909,6 +916,18 @@ export interface IVCurveData {
   /** What the backend actually used as the Im source on the last run.
    *  Drives the ImSourceCard info line. Absent on pre-refactor saves. */
   imSource?: ImSource
+  /** Form-state carried in the entry so reopening restores the user's
+   *  exact setup — run scope, manual-Im fallback, sweep selections.
+   *  All optional so pre-v0.3.1 saves still load. */
+  runMode?: 'all' | 'range' | 'one'
+  sweepFrom?: number
+  sweepTo?: number
+  sweepOne?: number
+  manualImEnabled?: boolean
+  manualImStartS?: number
+  manualImEndS?: number
+  manualImStartPA?: number
+  manualImStepPA?: number
 }
 
 /** Per-series burst-detection output, keyed in the store by "group:series". */
@@ -1115,6 +1134,13 @@ export interface APData {
   manualImEndS: number
   manualImStartPA: number
   manualImStepPA: number
+  /** Run-scope form state from the last run. Persisted so reopening
+   *  the file lands you on the exact same "which sweeps" selection.
+   *  Optional because pre-v0.3.1 saves don't carry it. */
+  runMode?: 'all' | 'range' | 'one'
+  sweepFrom?: number
+  sweepTo?: number
+  sweepOne?: number
   detection: APDetectionParams
   kinetics: APKineticsParams
   rheobaseMode: APRheobaseMode

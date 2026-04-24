@@ -98,6 +98,27 @@ export function IVCurveWindow({
   const key = `${group}:${series}`
   const entry = ivCurves[key]
 
+  // Rehydrate the form from the persisted entry whenever we land on
+  // a (group, series) pair with results. Mirrors the pattern in
+  // APWindow / FPspWindow — without this, closing and reopening the
+  // file leaves form defaults showing even though the plot + table
+  // below show the persisted run.
+  const rehydratedKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!entry) return
+    if (rehydratedKeyRef.current === key) return
+    rehydratedKeyRef.current = key
+    if (entry.runMode) setRunMode(entry.runMode)
+    if (entry.sweepFrom != null) setSweepFrom(entry.sweepFrom)
+    if (entry.sweepTo != null) setSweepTo(entry.sweepTo)
+    if (entry.sweepOne != null) setSweepOne(entry.sweepOne)
+    if (entry.manualImEnabled != null) setManualImEnabled(entry.manualImEnabled)
+    if (entry.manualImStartS != null) setManualImStartS(entry.manualImStartS)
+    if (entry.manualImEndS != null) setManualImEndS(entry.manualImEndS)
+    if (entry.manualImStartPA != null) setManualImStartPA(entry.manualImStartPA)
+    if (entry.manualImStepPA != null) setManualImStepPA(entry.manualImStepPA)
+  }, [entry, key])
+
   // Mode + per-sweep range controls. "all" runs every sweep; "range" runs a
   // user-picked half-open [from, to] range; "one" runs just one sweep and
   // appends to the existing table.
@@ -250,7 +271,7 @@ export function IVCurveWindow({
     document.addEventListener('mouseup', onUp)
   }
 
-  const onRun = () => {
+  const onRun = async () => {
     // Build the sweep selection based on mode. Backend accepts an optional
     // array of sweep indices; absent = run all.
     let sweepIndices: number[] | null = null
@@ -273,7 +294,7 @@ export function IVCurveWindow({
     // Pull the windows from the main-window cursors (now also
     // draggable inside the mini-viewer below). baseline = baseline
     // cursor, peak/SS = peak cursor.
-    runIVCurve(group, series, channel, {
+    await runIVCurve(group, series, channel, {
       baselineStartS: cursors.baselineStart,
       baselineEndS: cursors.baselineEnd,
       peakStartS: cursors.peakStart,
@@ -285,6 +306,23 @@ export function IVCurveWindow({
       manualImEndS,
       manualImStartPA,
       manualImStepPA,
+    })
+    // Stamp form state onto the entry so the sidecar persists it and
+    // the rehydration effect below restores it on reopen.
+    useAppStore.setState((s) => {
+      const e = s.ivCurves[`${group}:${series}`]
+      if (!e) return s
+      return {
+        ivCurves: {
+          ...s.ivCurves,
+          [`${group}:${series}`]: {
+            ...e,
+            runMode, sweepFrom, sweepTo, sweepOne,
+            manualImEnabled, manualImStartS, manualImEndS,
+            manualImStartPA, manualImStepPA,
+          },
+        },
+      }
     })
   }
   const onSelectRow = (idx: number) => {

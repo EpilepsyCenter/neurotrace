@@ -485,6 +485,11 @@ export function FPspWindow({
       if (entry.pprIsiMs != null) setPprIsiMs(entry.pprIsiMs)
       if (entry.pprMetric) setPprMetric(entry.pprMetric)
     }
+    // Run-scope fields (optional on older saves).
+    if (entry.runMode) setRunMode(entry.runMode)
+    if (entry.sweepFrom != null) setSweepFrom(entry.sweepFrom)
+    if (entry.sweepTo != null) setSweepTo(entry.sweepTo)
+    if (entry.sweepOne != null) setSweepOne(entry.sweepOne)
   }, [entry, key])
 
   /** Auto-place cursors: detect stim onset from the backend, then place
@@ -539,7 +544,7 @@ export function FPspWindow({
     } catch { /* ignore */ }
   }
 
-  const onRun = () => {
+  const onRun = async () => {
     let sweepIndices: number[] | null = null
     let appendToExisting = false
     const store = useAppStore.getState()
@@ -602,6 +607,18 @@ export function FPspWindow({
       filterLow,
       filterHigh,
       filterOrder,
+    })
+    // Stamp run-scope form state onto the entry so the sidecar
+    // persists it and the form rehydrates on reopen.
+    useAppStore.setState((s) => {
+      const e = s.fpspCurves[`${group}:${series}`]
+      if (!e) return s
+      return {
+        fpspCurves: {
+          ...s.fpspCurves,
+          [`${group}:${series}`]: { ...e, runMode, sweepFrom, sweepTo, sweepOne },
+        },
+      }
     })
   }
 

@@ -428,6 +428,11 @@ export function APWindow({
     setRheobaseMode(entry.rheobaseMode)
     if (entry.rampParams) setRampParams(entry.rampParams)
     setManualEdits(entry.manualEdits ?? { added: {}, removed: {} })
+    // Optional on pre-v0.3.1 saves — guard each field individually.
+    if (entry.runMode) setRunMode(entry.runMode)
+    if (entry.sweepFrom != null) setSweepFrom(entry.sweepFrom)
+    if (entry.sweepTo != null) setSweepTo(entry.sweepTo)
+    if (entry.sweepOne != null) setSweepOne(entry.sweepOne)
   }, [entry, key])
 
   // ---- Auto-seed series on window reopen from the saved AP entries
@@ -525,6 +530,18 @@ export function APWindow({
       manualEdits,
       true,
     )
+    // Stamp the run-mode + sweep selection onto the entry so the
+    // sidecar persists them and the form rehydrates them on reopen.
+    useAppStore.setState((s) => {
+      const e = s.apAnalyses[`${group}:${series}`]
+      if (!e) return s
+      return {
+        apAnalyses: {
+          ...s.apAnalyses,
+          [`${group}:${series}`]: { ...e, runMode, sweepFrom, sweepTo, sweepOne },
+        },
+      }
+    })
   }
 
   // Per-spike measurements for the current preview sweep — used by

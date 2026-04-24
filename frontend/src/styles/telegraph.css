@@ -1,35 +1,165 @@
 /* ============================================================
-   Telegraph theme — opt-in palette.
+   Telegraph theme stylesheet.
 
-   Every rule below is scoped to ``[data-palette="telegraph"]`` so
-   this stylesheet can live in the bundle alongside the classic
-   palette defined in global.css. The root ``<html>`` element gets
-   ``data-palette="telegraph" | "classic"`` from the theme store;
-   when "classic", none of these rules match and the baseline
-   tokens / typography from global.css win on their own.
+   Split into two halves:
 
-   Requires Google Fonts (loaded by main.tsx-side @import in
-   global.css):
-     IBM Plex Sans (400/500/600/700)
-     JetBrains Mono (400/500/600/700)
+   (1) COLOUR PALETTE — the ``:root[data-palette="telegraph"]`` and
+       ``[data-palette="telegraph"][data-theme=…]`` blocks. These are
+       gated by the palette picker in the toolbar settings. When the
+       user switches to "Classic", none of these rules match and the
+       baseline tokens from global.css take over.
+
+   (2) TYPOGRAPHY & LEDs — fonts, mono-heavy surfaces, uppercase
+       titles, status-bar LED pills. These are UNCONDITIONAL — they
+       apply under both palettes. The palette picker only toggles
+       colour, not the instrument-panel typography treatment the
+       user previously approved.
+
+   Requires Google Fonts (loaded from main.tsx-side @import in
+   global.css): IBM Plex Sans + JetBrains Mono, 400/500/600/700.
    ============================================================ */
 
-/* ---------- Theme-independent tokens ---------- */
-:root[data-palette="telegraph"] {
-  /* Fonts — swapped to Telegraph pair */
+
+/* ============================================================
+   (2) TYPOGRAPHY & LEDs — always on, regardless of palette.
+   ============================================================ */
+
+/* Unconditional token overrides — fonts (no colours here) so both
+   palettes share the same IBM Plex Sans / JetBrains Mono pair. */
+:root {
   --font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, monospace;
-  --font-size-base: 13px;
-  --font-size-sm: 12px;
-  --font-size-xs: 11px;
-  --font-size-label: 10px;
+}
 
+/* Form controls — <input> / <select> / <textarea> text is almost
+   always machine-oriented data. */
+input,
+select,
+textarea,
+button.num-stepper {
+  font-family: var(--font-mono);
+}
+
+/* Buttons — mono + UPPERCASE for the instrument-panel feel. */
+button {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Table bodies — numeric / tabular by default. */
+table tbody,
+table td {
+  font-family: var(--font-mono);
+}
+
+/* Readout / code utility classes. */
+.readout,
+.num-readout,
+.mono,
+.monospace,
+code, kbd, samp {
+  font-family: var(--font-mono);
+}
+
+/* Card titles + section labels — catches every inline
+   ``fontWeight: 600`` on a <span>. Spans only — buttons with bold
+   text stay covered by the ``button`` rule above. */
+span[style*="font-weight: 600"] {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Analysis-window Group / Series / Channel / Sweep selector
+   labels — tagged with .selector-label in the Field helpers. */
+.selector-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Tree navigator series / sweep / averaged-sweep name labels. */
+.tree-node-label {
+  font-family: var(--font-mono);
+}
+
+/* Table column headers stay UI sans. */
+table th {
+  font-family: var(--font-ui);
+}
+
+/* Status-bar LED pills — design is theme-agnostic; the colours
+   resolve from CSS tokens so the dots recolour automatically when
+   the palette changes. */
+.led {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-label);
+  line-height: 1.5;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.led::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--border) 70%, transparent);
+  flex-shrink: 0;
+}
+
+.led.ok::before {
+  background: var(--success);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--success) 40%, transparent),
+    0 0 6px color-mix(in oklab, var(--success) 55%, transparent);
+}
+
+.led.err::before {
+  background: var(--error);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--error) 40%, transparent),
+    0 0 6px color-mix(in oklab, var(--error) 55%, transparent);
+}
+.led.err {
+  color: var(--error);
+}
+
+.led.off::before {
+  background: var(--text-muted);
+  opacity: 0.6;
+  box-shadow: none;
+}
+.led.off {
+  opacity: 0.75;
+}
+
+
+/* ============================================================
+   (1) COLOUR PALETTE — only these rules are gated by the palette
+   picker. Classic palette gets the original tokens from
+   global.css; Telegraph gets warm amber dark / vellum light.
+   ============================================================ */
+
+/* Telegraph-only, theme-independent colour tokens. */
+:root[data-palette="telegraph"] {
   /* Status / semantic */
   --success: oklch(0.62 0.17 145);
   --warning: oklch(0.72 0.17 70);
   --error:   oklch(0.60 0.22 25);
 
-  /* Trace colors — amber-led primary, peacock secondary, then warm set */
+  /* Trace colors — amber primary, peacock secondary, warm set */
   --trace-color-1: oklch(0.72 0.17 65);   /* amber */
   --trace-color-2: oklch(0.65 0.14 195);  /* peacock */
   --trace-color-3: oklch(0.62 0.17 20);   /* terracotta */
@@ -47,7 +177,7 @@
   --cursor-fit-fill:      oklch(0.58 0.17 290 / 0.12);
 }
 
-/* ---------- Dark theme: warm near-black, amber accent ---------- */
+/* Telegraph dark — warm near-black, amber accent. */
 [data-palette="telegraph"][data-theme="dark"] {
   --bg-primary:    #0c0b08;
   --bg-secondary:  #12110d;
@@ -61,13 +191,11 @@
   --accent-dim:   oklch(0.42 0.10 65);
   --border:        #2a271f;
 
-  /* Chart */
   --chart-axis:  #c0b28a;
   --chart-grid:  rgba(240, 230, 203, 0.05);
   --chart-tick:  rgba(240, 230, 203, 0.18);
   --chart-bg:    #0a0907;
 
-  /* Cursors slightly brighter on dark */
   --cursor-baseline:      oklch(0.78 0.16 145);
   --cursor-baseline-fill: oklch(0.78 0.16 145 / 0.18);
   --cursor-peak:          oklch(0.80 0.17 65);
@@ -75,7 +203,6 @@
   --cursor-fit:           oklch(0.72 0.16 290);
   --cursor-fit-fill:      oklch(0.72 0.16 290 / 0.18);
 
-  /* Trace colors tuned up for dark */
   --trace-color-1: oklch(0.80 0.17 65);
   --trace-color-2: oklch(0.78 0.14 195);
   --trace-color-3: oklch(0.75 0.17 20);
@@ -86,7 +213,7 @@
   color-scheme: dark;
 }
 
-/* ---------- Light theme: vellum paper, warm ink ---------- */
+/* Telegraph light — vellum paper, warm ink. */
 [data-palette="telegraph"][data-theme="light"] {
   --bg-primary:    #fbf9f4;
   --bg-secondary:  #f1ede2;
@@ -100,13 +227,11 @@
   --accent-dim:   oklch(0.88 0.08 60);
   --border:        #d7cfb8;
 
-  /* Chart */
   --chart-axis:  #14130f;
   --chart-grid:  rgba(20, 19, 15, 0.08);
   --chart-tick:  rgba(20, 19, 15, 0.22);
   --chart-bg:    #fefcf5;
 
-  /* Cursors slightly stronger on light */
   --cursor-baseline:      oklch(0.55 0.18 145);
   --cursor-baseline-fill: oklch(0.55 0.18 145 / 0.14);
   --cursor-peak:          oklch(0.58 0.16 55);
@@ -114,7 +239,6 @@
   --cursor-fit:           oklch(0.45 0.18 290);
   --cursor-fit-fill:      oklch(0.45 0.18 290 / 0.14);
 
-  /* Trace colors tuned down for light */
   --trace-color-1: oklch(0.55 0.18 55);
   --trace-color-2: oklch(0.52 0.16 200);
   --trace-color-3: oklch(0.55 0.18 20);
@@ -123,135 +247,4 @@
   --trace-average: oklch(0.58 0.20 20);
 
   color-scheme: light;
-}
-
-/* ============================================================
-   Mono-leaning surfaces — the Telegraph aesthetic wants numeric
-   readouts, form controls, and tabular data in JetBrains Mono so
-   the UI reads like a scientific instrument. Titles, menus, body
-   copy keep the UI sans (IBM Plex Sans) via the global default.
-
-   Every rule below is scoped to ``[data-palette="telegraph"]`` so
-   the classic palette stays untouched by the typography changes.
-   ============================================================ */
-
-/* Form controls — the text inside an <input>, <select>, or
-   <textarea> is almost always machine-oriented data. */
-[data-palette="telegraph"] input,
-[data-palette="telegraph"] select,
-[data-palette="telegraph"] textarea,
-[data-palette="telegraph"] button.num-stepper {
-  font-family: var(--font-mono);
-}
-
-/* Buttons — mono + UPPERCASE for Telegraph's instrument-panel feel. */
-[data-palette="telegraph"] button {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-/* Table bodies — numeric / tabular by default. Column headers stay
-   UI sans via the override below. */
-[data-palette="telegraph"] table tbody,
-[data-palette="telegraph"] table td {
-  font-family: var(--font-mono);
-}
-
-/* Common readout / code classes. */
-[data-palette="telegraph"] .readout,
-[data-palette="telegraph"] .num-readout,
-[data-palette="telegraph"] .mono,
-[data-palette="telegraph"] .monospace,
-[data-palette="telegraph"] code,
-[data-palette="telegraph"] kbd,
-[data-palette="telegraph"] samp {
-  font-family: var(--font-mono);
-}
-
-/* Card titles + section labels — catches every inline
-   ``fontWeight: 600`` on a <span> (card headers, "Library", "Fit",
-   etc.) without having to retrofit a className across dozens of
-   call sites. Spans only — buttons with bold text stay separate. */
-[data-palette="telegraph"] span[style*="font-weight: 600"] {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-/* Analysis-window Group / Series / Channel / Sweep selector
-   labels — tagged with .selector-label in the shared Field helper. */
-[data-palette="telegraph"] .selector-label {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-/* Tree navigator series / sweep / averaged-sweep name labels. */
-[data-palette="telegraph"] .tree-node-label {
-  font-family: var(--font-mono);
-}
-
-/* Table column headers stay UI sans even though surrounding spans
-   may match the font-weight rule above. */
-[data-palette="telegraph"] table th {
-  font-family: var(--font-ui);
-}
-
-/* ============================================================
-   .led — status-bar pill with a small glowing indicator dot.
-   Only active under the Telegraph palette; the classic palette
-   falls back to plain text status items.
-   ============================================================ */
-[data-palette="telegraph"] .led {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-label);
-  line-height: 1.5;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
-[data-palette="telegraph"] .led::before {
-  content: '';
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--border) 70%, transparent);
-  flex-shrink: 0;
-}
-
-[data-palette="telegraph"] .led.ok::before {
-  background: var(--success);
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--success) 40%, transparent),
-    0 0 6px color-mix(in oklab, var(--success) 55%, transparent);
-}
-
-[data-palette="telegraph"] .led.err::before {
-  background: var(--error);
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--error) 40%, transparent),
-    0 0 6px color-mix(in oklab, var(--error) 55%, transparent);
-}
-[data-palette="telegraph"] .led.err {
-  color: var(--error);
-}
-
-[data-palette="telegraph"] .led.off::before {
-  background: var(--text-muted);
-  opacity: 0.6;
-  box-shadow: none;
-}
-[data-palette="telegraph"] .led.off {
-  opacity: 0.75;
 }

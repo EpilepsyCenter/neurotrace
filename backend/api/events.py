@@ -46,6 +46,7 @@ from analysis.events import (
     _sliding_correlation, _deconvolve,  # for /detection_measure
     _gaussian_fit_to_histogram,          # for deconvolution cutoff overlay
     run_events, average_detected_events,
+    measure_event_kinetics,              # for /add_manual
     EventRecord,
 )
 
@@ -286,9 +287,23 @@ class DetectRequest(BaseModel):
     filter_low: float = 1.0
     filter_high: float = 500.0
     filter_order: int = 4
+    # Optional rolling-median detrend applied BEFORE the Butterworth
+    # filter (and before detection). Subtracts a running median of
+    # width ``detrend_window_ms`` — cleaner than a high-pass for
+    # baseline drift because it doesn't ring at sharp event edges.
+    detrend_enabled: bool = False
+    detrend_window_ms: float = 500.0
 
     # Template-method params
     template: Optional[DetectionTemplate] = None
+    # Optional multi-template detection (up to 3). When supplied with ≥
+    # 2 entries, the detector uses them as a co-operating set: for
+    # correlation, peaks are picked from the pointwise max of the
+    # per-template correlation traces; for deconvolution, the union of
+    # per-template peak sets is merged under the shared min-IEI rule.
+    # Matches Easy Electrophysiology's "Detect with Templates 1/2/3"
+    # workflow. Leave empty (or null) to use the single ``template``.
+    templates: Optional[list[DetectionTemplate]] = None
     cutoff: float = 0.4            # correlation: 0-1; deconvolution: SD
 
     # Deconvolution extras
@@ -315,6 +330,9 @@ class DetectRequest(BaseModel):
     amplitude_min_abs: float = 5.0
     amplitude_max_abs: float = 2000.0
     auc_min_abs: Optional[float] = None
+    rise_max_ms: Optional[float] = None
+    decay_max_ms: Optional[float] = None
+    fwhm_max_ms: Optional[float] = None
 
     # Manual edits (in seconds within the sweep)
     manual_added_times: Optional[list[float]] = None
@@ -330,6 +348,20 @@ class DetectRequest(BaseModel):
 @router.post("/detect")
 async def detect(req: DetectRequest):
     values, sr, units = _trace_for(req.group, req.series, req.sweep, req.trace)
+
+    # Optional rolling-median detrend — done BEFORE the Butterworth
+    # filter so both operations see the same signal the detector will.
+    if req.detrend_enabled:
+        try:
+            from scipy.ndimage import median_filter
+            w = max(3, int(round(req.detrend_window_ms / 1000.0 * sr)))
+            # Force odd so the kernel is symmetric.
+            if w % 2 == 0:
+                w += 1
+            baseline = median_filter(values, size=w, mode="nearest")
+            values = values - baseline
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Detrend failed: {e}")
 
     # Pre-detection filter — same Butterworth sosfiltfilt as AP / Burst.
     # Applied once up front so every downstream step (thresholding,
@@ -347,24 +379,40 @@ async def detect(req: DetectRequest):
             raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
 
     template_arr: Optional[np.ndarray] = None
+    template_list: Optional[list[np.ndarray]] = None
     if req.method.startswith("template_"):
-        if req.template is None:
+        # Prefer the multi-template list when provided; fall back to
+        # the single ``template`` for backward compatibility.
+        if req.templates and len(req.templates) >= 1:
+            template_list = [
+                render_template(
+                    t.b0, t.b1,
+                    t.tau_rise_ms / 1000.0, t.tau_decay_ms / 1000.0,
+                    t.width_ms, sr,
+                )
+                for t in req.templates
+            ]
+            # Primary template feeds the detection-measure overlay.
+            template_arr = template_list[0]
+        elif req.template is not None:
+            t = req.template
+            template_arr = render_template(
+                t.b0, t.b1,
+                t.tau_rise_ms / 1000.0, t.tau_decay_ms / 1000.0,
+                t.width_ms, sr,
+            )
+        else:
             raise HTTPException(
                 status_code=400,
                 detail="Template methods require a template payload",
             )
-        t = req.template
-        template_arr = render_template(
-            t.b0, t.b1,
-            t.tau_rise_ms / 1000.0, t.tau_decay_ms / 1000.0,
-            t.width_ms, sr,
-        )
 
     try:
         records, dm = run_events(
             values, sr,
             method=req.method,
             template=template_arr,
+            templates=template_list,
             cutoff=req.cutoff,
             deconv_low_hz=req.deconv_low_hz,
             deconv_high_hz=req.deconv_high_hz,
@@ -381,6 +429,9 @@ async def detect(req: DetectRequest):
             amplitude_min_abs=req.amplitude_min_abs,
             amplitude_max_abs=req.amplitude_max_abs,
             auc_min_abs=req.auc_min_abs,
+            rise_max_ms=req.rise_max_ms,
+            decay_max_ms=req.decay_max_ms,
+            fwhm_max_ms=req.fwhm_max_ms,
             manual_added_times=req.manual_added_times,
             manual_removed_times=req.manual_removed_times,
             sweep_index=req.sweep,
@@ -517,6 +568,16 @@ async def refine_template(req: RefineRequest):
     # pre-peak samples to be meaningful — the easiest route is to
     # fit only from the window sample where the average crosses 10%
     # of its extremum amplitude, which approximates the foot.
+    #
+    # IMPORTANT — biexp cannot fit a "flat baseline + rise + decay"
+    # shape because the (1−exp(−t/τ_r))·exp(−t/τ_d) factor always
+    # rises from t=0. If we start the fit window far before the
+    # actual rise, curve_fit lands on degenerate parameters (very
+    # slow τ_decay + very slow τ_rise to keep the model near b0 for
+    # the flat prefix). That's exactly the "τ_decay jumps from 5 ms
+    # to 270 ms when window_before_ms goes from 5 → 7" failure mode
+    # users reported. Guard: cap how far back from the peak the foot
+    # is allowed to sit.
     direction = req.direction
     sign = -1 if direction == "negative" else 1
     # Find the extremum sample and the 10%-of-extremum crossing BEFORE
@@ -533,6 +594,15 @@ async def refine_template(req: RefineRequest):
             if (sign < 0 and v >= trigger) or (sign > 0 and v <= trigger):
                 foot_i = i
                 break
+        # Cap the walk-back: the fit window must start no more than
+        # ``max_pre_ms`` before the extremum. Prevents degenerate fits
+        # when the user-chosen pre-peak window is longer than one rise
+        # time (the averaged baseline is cleaner → trigger is close to
+        # baseline → walk-back reaches the pre-event noise floor).
+        max_pre_ms = max(req.initial_rise_ms * 4.0, 2.0)
+        min_foot_i = max(0, ex_idx - int(round(max_pre_ms / 1000.0 * sr)))
+        if foot_i < min_foot_i:
+            foot_i = min_foot_i
     else:
         foot_i = 0
 
@@ -561,6 +631,194 @@ async def refine_template(req: RefineRequest):
             "fit_time_s": [float(x) for x in fit.time],
             "fit_values": [float(x) for x in fit.fit_values],
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# /add_manual — measure a single user-clicked event (no full re-detection)
+# ---------------------------------------------------------------------------
+
+class AddManualRequest(BaseModel):
+    group: int
+    series: int
+    sweep: int
+    trace: int
+    click_time_s: float            # where the user clicked on the viewer
+    direction: str = "negative"
+    # Half-window around the click in which to snap to the local
+    # extremum. 5 ms default — wide enough to catch a click that
+    # landed on the rise/decay shoulder, narrow enough that we don't
+    # accidentally snap into a neighbouring event.
+    snap_window_ms: float = 5.0
+    # Kinetics knobs — same meaning as run_events; expose so the
+    # per-event measurement here matches the rest of the results table.
+    baseline_search_ms: float = 10.0
+    avg_baseline_ms: float = 1.0
+    avg_peak_ms: float = 1.0
+    rise_low_pct: float = 10.0
+    rise_high_pct: float = 90.0
+    decay_pct: float = 37.0
+    decay_search_ms: float = 30.0
+    # Optional pre-detection filter (matches /detect) — apply the same
+    # filter the user has on the main viewer so the snap + kinetics see
+    # the filtered trace, not the raw one.
+    filter_enabled: bool = False
+    filter_type: str = "bandpass"
+    filter_low: float = 1.0
+    filter_high: float = 500.0
+    filter_order: int = 4
+
+
+@router.post("/add_manual")
+async def add_manual(req: AddManualRequest):
+    """Measure a single event at a user-clicked time.
+
+    Purpose: the main events window lets the user click on the viewer
+    to add an event the detector missed. Running the full detection
+    pipeline again just to slot in one extra peak is slow (seconds on
+    long sweeps). This endpoint is the fast path — it snaps the click
+    to the local extremum and runs ``measure_event_kinetics`` on that
+    single peak, returning one ``EventRecord`` the frontend can splice
+    into its results table directly.
+    """
+    values, sr, _units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    if req.filter_enabled:
+        try:
+            values = _apply_pre_detection_filter(values, sr, {
+                "filter_enabled": True,
+                "filter_type": req.filter_type,
+                "filter_low": req.filter_low,
+                "filter_high": req.filter_high,
+                "filter_order": req.filter_order,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
+
+    n = len(values)
+    if n < 4:
+        raise HTTPException(status_code=400, detail="Sweep too short")
+
+    click_i = int(round(req.click_time_s * sr))
+    if click_i < 0 or click_i >= n:
+        raise HTTPException(status_code=400, detail="Click time outside sweep")
+
+    # Snap to local extremum in a ±snap_window half-window.
+    snap = max(1, int(round(req.snap_window_ms / 1000.0 * sr)))
+    a = max(0, click_i - snap)
+    b = min(n, click_i + snap + 1)
+    local = values[a:b]
+    if req.direction == "negative":
+        rel = int(np.argmin(local))
+    else:
+        rel = int(np.argmax(local))
+    peak_idx = a + rel
+
+    kin = measure_event_kinetics(
+        values, sr, peak_idx,
+        direction=req.direction,
+        baseline_search_ms=req.baseline_search_ms,
+        avg_baseline_ms=req.avg_baseline_ms,
+        avg_peak_ms=req.avg_peak_ms,
+        rise_low_pct=req.rise_low_pct,
+        rise_high_pct=req.rise_high_pct,
+        decay_pct=req.decay_pct,
+        decay_search_ms=req.decay_search_ms,
+    )
+
+    rec = EventRecord(
+        sweep=req.sweep,
+        peak_idx=kin.peak_idx,
+        peak_time_s=float(kin.peak_idx) / sr,
+        peak_val=kin.peak_val,
+        foot_idx=kin.foot_idx,
+        foot_time_s=float(kin.foot_idx) / sr,
+        baseline_val=kin.baseline_val,
+        amplitude=kin.amplitude,
+        rise_time_ms=kin.rise_time_ms,
+        decay_time_ms=kin.decay_time_ms,
+        half_width_ms=kin.half_width_ms,
+        auc=kin.auc,
+        decay_endpoint_idx=kin.decay_endpoint_idx,
+        manual=True,
+    )
+    return {"event": rec.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# /overlay — stack all events aligned on peak / foot for QC display
+# ---------------------------------------------------------------------------
+
+class OverlayEventRef(BaseModel):
+    peak_idx: int
+    foot_idx: int
+    baseline_val: float
+
+
+class OverlayRequest(BaseModel):
+    group: int
+    series: int
+    sweep: int
+    trace: int
+    events: list[OverlayEventRef]
+    align: str = "peak"              # 'peak' | 'foot'
+    window_before_ms: float = 5.0
+    window_after_ms: float = 50.0
+    baseline_subtract: bool = True   # subtract each event's baseline so
+                                     # overlays share a common zero line
+
+
+@router.post("/overlay")
+async def overlay(req: OverlayRequest):
+    """Return a stack of all events aligned on the chosen anchor.
+
+    Companion to the Overlay tab in the main events window. Each event
+    gets its window extracted from the raw trace (with baseline
+    subtracted by default), aligned, and returned alongside the
+    sample-wise mean + ±1 SD envelope.
+
+    Events whose window would extend past the sweep's ends are
+    skipped rather than zero-padded — padding would bias the mean.
+    """
+    values, sr, _units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    n_before = max(0, int(round(req.window_before_ms / 1000.0 * sr)))
+    n_after = max(1, int(round(req.window_after_ms / 1000.0 * sr)))
+    n_total = n_before + n_after + 1
+    time = (np.arange(n_total, dtype=float) - n_before) / sr
+
+    traces: list[list[Optional[float]]] = []
+    stack: list[np.ndarray] = []
+    for e in req.events:
+        ref = int(e.peak_idx) if req.align == "peak" else int(e.foot_idx)
+        a = ref - n_before
+        b = ref + n_after + 1
+        if a < 0 or b > len(values):
+            traces.append([None] * n_total)   # keep row to match entry.events count
+            continue
+        seg = np.asarray(values[a:b], dtype=float)
+        if req.baseline_subtract:
+            seg = seg - float(e.baseline_val)
+        stack.append(seg)
+        traces.append([float(x) for x in seg])
+
+    if stack:
+        arr = np.asarray(stack, dtype=float)
+        mean_arr = np.mean(arr, axis=0)
+        sd_arr = np.std(arr, axis=0, ddof=1) if arr.shape[0] > 1 else np.zeros_like(mean_arr)
+        mean_out: list[Optional[float]] = [float(x) for x in mean_arr]
+        sd_lo: list[Optional[float]] = [float(m - s) for m, s in zip(mean_arr, sd_arr)]
+        sd_hi: list[Optional[float]] = [float(m + s) for m, s in zip(mean_arr, sd_arr)]
+    else:
+        mean_out = [None] * n_total
+        sd_lo = [None] * n_total
+        sd_hi = [None] * n_total
+
+    return {
+        "time_s": [float(t) for t in time],
+        "traces": traces,
+        "mean": mean_out,
+        "sd_lo": sd_lo,
+        "sd_hi": sd_hi,
+        "n_included": len(stack),
     }
 
 
@@ -656,10 +914,13 @@ async def detection_measure(req: DetectionMeasureRequest):
             t_start_out = 0.0
     else:
         t_start_out = 0.0
-    # Cap at 200k points to avoid multi-MB JSON payloads on very long
-    # sweeps; uPlot renders at pixel-width resolution anyway.
-    if len(dm_arr) > 200_000:
-        stride = int(np.ceil(len(dm_arr) / 200_000))
+    # Cap at 500k points to avoid multi-MB JSON payloads on very long
+    # sweeps; uPlot renders at pixel-width resolution anyway. At 20 kHz
+    # this is 25 s of sample-for-sample data — longer viewports fall
+    # back to a small stride, which users are unlikely to perceive
+    # since the events they care about are tens of ms wide.
+    if len(dm_arr) > 500_000:
+        stride = int(np.ceil(len(dm_arr) / 500_000))
         dm_arr = dm_arr[::stride]
         dt = stride / sr
     else:

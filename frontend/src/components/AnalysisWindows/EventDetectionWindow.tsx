@@ -166,6 +166,10 @@ export function EventDetectionWindow({
   // ---- Splitters (persisted under eventsWindowUI) ----
   const [leftPanelWidth, setLeftPanelWidth] = useState(340)
   const [plotHeight, setPlotHeight] = useState(360)
+  // Bottom-pane tab — "table" (events results), "overlay" (all events
+  // aligned on peak/foot), or "histogram" (amplitude distribution).
+  // Matches EE's tab row below the viewer.
+  const [bottomTab, setBottomTab] = useState<'table' | 'overlay' | 'histogram'>('table')
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -445,9 +449,22 @@ export function EventDetectionWindow({
                 templates={eventsTemplates.entries}
                 activeTemplateId={activeTemplateId}
                 activeTemplate={activeTemplate}
+                additionalTemplateIds={params.additionalTemplateIds ?? []}
                 onPickTemplate={(id) => {
                   setParams((p) => ({ ...p, templateId: id }))
                   selectEventsTemplate(id)
+                }}
+                onPickAdditional={(idx, id) => {
+                  setParams((p) => {
+                    const next = [...(p.additionalTemplateIds ?? [])]
+                    if (id == null) {
+                      next.splice(idx, 1)
+                    } else {
+                      next[idx] = id
+                    }
+                    // Keep compact — drop any undefined slots.
+                    return { ...p, additionalTemplateIds: next.filter(Boolean) }
+                  })
                 }}
                 onOpenGenerator={openTemplateGenerator}
                 onOpenRefinement={openTemplateRefinement}
@@ -563,7 +580,10 @@ export function EventDetectionWindow({
               </Row>
             </Card>
 
-            {/* Exclusion card */}
+            {/* Exclusion card — matches EE's Exclusion panel. Events
+                outside any of these bounds get dropped from the table.
+                Null = filter off. Manual-added events bypass these
+                guards, so users can force-include a marginal event. */}
             <Card title="Exclusion">
               <Row label="Min |amp|">
                 <NumInput value={params.amplitudeMinAbs} step={1} min={0}
@@ -577,6 +597,22 @@ export function EventDetectionWindow({
                 <NumInput value={params.minIeiMs} step={1} min={0}
                   onChange={(v) => setParams((p) => ({ ...p, minIeiMs: v }))} />
               </Row>
+              <OptionalNumRow
+                label="Max AUC" value={params.aucMinAbs} step={0.01} min={0}
+                onChange={(v) => setParams((p) => ({ ...p, aucMinAbs: v }))}
+                title="Drop events whose integrated area is below this value" />
+              <OptionalNumRow
+                label="Max rise (ms)" value={params.riseMaxMs} step={0.5} min={0.1}
+                onChange={(v) => setParams((p) => ({ ...p, riseMaxMs: v }))}
+                title="Drop events with rise time exceeding this value" />
+              <OptionalNumRow
+                label="Max decay (ms)" value={params.decayMaxMs} step={1} min={0.1}
+                onChange={(v) => setParams((p) => ({ ...p, decayMaxMs: v }))}
+                title="Drop events with decay time exceeding this value" />
+              <OptionalNumRow
+                label="Max FWHM (ms)" value={params.fwhmMaxMs} step={1} min={0.1}
+                onChange={(v) => setParams((p) => ({ ...p, fwhmMaxMs: v }))}
+                title="Drop events with half-width exceeding this value" />
             </Card>
           </div>
 
@@ -689,17 +725,66 @@ export function EventDetectionWindow({
             }} />
           </div>
 
-          {/* Results */}
+          {/* Summary stats — single-line headline, live-updating. */}
+          <EventsSummaryBar entry={entry} />
+
+          {/* Bottom tabs: Results (table) / Overlay / Histogram. Tabs
+              let us add views without growing the already-busy main
+              window vertically. Each tab fills the remaining flex
+              space below the summary bar. */}
           <div style={{
-            flex: 1, minHeight: 0, overflow: 'auto',
-            marginTop: 6,
+            flex: 1, minHeight: 0,
+            display: 'flex', flexDirection: 'column',
+            marginTop: 4,
             border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
           }}>
-            <EventsResultsTable
-              entry={entry}
-              onSelect={(idx) => selectEvent(group, series, idx)}
-              onDiscard={(idx) => onDiscardEvent(idx)}
-            />
+            <div style={{
+              display: 'flex', gap: 2,
+              borderBottom: '1px solid var(--border)',
+              flexShrink: 0,
+              padding: '2px 2px 0 2px',
+            }}>
+              {(['table', 'overlay', 'histogram'] as const).map((k) => (
+                <button key={k} className="btn"
+                  onClick={() => setBottomTab(k)}
+                  style={{
+                    padding: '3px 10px',
+                    fontSize: 'var(--font-size-label)',
+                    background: bottomTab === k
+                      ? 'var(--bg-primary)' : 'transparent',
+                    borderBottom: bottomTab === k
+                      ? '2px solid var(--accent, #64b5f6)' : '2px solid transparent',
+                    borderRadius: '3px 3px 0 0',
+                  }}>
+                  {k === 'table' ? 'Results' : k === 'overlay' ? 'Overlay' : 'Histogram'}
+                </button>
+              ))}
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              {bottomTab === 'table' && (
+                <div style={{ height: '100%', overflow: 'auto' }}>
+                  <EventsResultsTable
+                    entry={entry}
+                    onSelect={(idx) => selectEvent(group, series, idx)}
+                    onDiscard={(idx) => onDiscardEvent(idx)}
+                  />
+                </div>
+              )}
+              {bottomTab === 'overlay' && (
+                <AllEventsOverlay
+                  backendUrl={backendUrl}
+                  entry={entry}
+                  heightSignal={plotHeight}
+                />
+              )}
+              {bottomTab === 'histogram' && (
+                <AmplitudeHistogram
+                  entry={entry}
+                  heightSignal={plotHeight}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -739,6 +824,41 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
       <span style={{ color: 'var(--text-muted)', flex: 1 }}>{label}</span>
       <span style={{ minWidth: 80 }}>{children}</span>
+    </label>
+  )
+}
+
+/** A nullable-number row with a small checkbox-style enable toggle.
+ *  Null = filter off (checkbox unchecked); number = filter on with
+ *  that value. Lets the user turn each kinetic-max filter on or off
+ *  without having to nuke the value when disabling. */
+function OptionalNumRow({
+  label, value, step, min, onChange, title,
+}: {
+  label: string
+  value: number | null
+  step?: number; min?: number
+  onChange: (v: number | null) => void
+  title?: string
+}) {
+  const enabled = value != null
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+           title={title}>
+      <input type="checkbox" checked={enabled}
+        onChange={(e) => onChange(e.target.checked
+          ? (value ?? (step ?? 1) * 10) : null)} />
+      <span style={{
+        color: enabled ? undefined : 'var(--text-muted)',
+        flex: 1, opacity: enabled ? 1 : 0.6,
+      }}>{label}</span>
+      <span style={{ minWidth: 80 }}>
+        <NumInput
+          value={value ?? 0}
+          step={step} min={min}
+          onChange={(v) => onChange(v)}
+        />
+      </span>
     </label>
   )
 }
@@ -803,6 +923,27 @@ function FilterCard({
           </Row>
         </>
       )}
+      {/* Detrend (rolling-median subtraction) — applied BEFORE the
+          Butterworth filter. Both can be on at once: detrend handles
+          slow drift, filter handles high-frequency noise. */}
+      <div style={{
+        marginTop: 4, paddingTop: 4,
+        borderTop: '1px solid var(--border)',
+        display: 'flex', flexDirection: 'column', gap: 4,
+      }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+          title="Subtract a rolling median before detection; flattens slow drift">
+          <input type="checkbox" checked={params.detrendEnabled}
+            onChange={(e) => setParams((p) => ({ ...p, detrendEnabled: e.target.checked }))} />
+          <span>Detrend (rolling median)</span>
+        </label>
+        {params.detrendEnabled && (
+          <Row label="Window (ms)">
+            <NumInput value={params.detrendWindowMs} step={50} min={10}
+              onChange={(v) => setParams((p) => ({ ...p, detrendWindowMs: v }))} />
+          </Row>
+        )}
+      </div>
     </Card>
   )
 }
@@ -811,16 +952,61 @@ function FilterCard({
 // Template panel
 // ---------------------------------------------------------------------------
 
+/** Miniature SVG preview of a biexponential template, rendered over a
+ *  fixed 60 × 18 viewport. Handy for library listings where users
+ *  want to pick by shape ("the fast one" / "the slow one") before
+ *  looking at coefficients. */
+function TemplateThumbnail({
+  template, width = 60, height = 18, stroke = '#64b5f6',
+}: {
+  template: EventsTemplate
+  width?: number; height?: number; stroke?: string
+}) {
+  const { b0, b1, tauRiseMs, tauDecayMs, widthMs } = template
+  const n = 64
+  const ys: number[] = []
+  let lo = Infinity, hi = -Infinity
+  for (let i = 0; i < n; i++) {
+    const t = (i / (n - 1)) * (widthMs / 1000.0)
+    const rise = 1 - Math.exp(-t / Math.max(tauRiseMs / 1000, 1e-6))
+    const decay = Math.exp(-t / Math.max(tauDecayMs / 1000, 1e-6))
+    const y = b0 + b1 * rise * decay
+    ys.push(y)
+    if (y < lo) lo = y
+    if (y > hi) hi = y
+  }
+  if (hi === lo) { hi = lo + 1 }
+  const pts = ys.map((y, i) => {
+    const x = (i / (n - 1)) * width
+    const py = height - ((y - lo) / (hi - lo)) * (height - 2) - 1
+    return `${x.toFixed(1)},${py.toFixed(1)}`
+  }).join(' ')
+  return (
+    <svg width={width} height={height}
+         style={{ verticalAlign: 'middle', flexShrink: 0 }}>
+      <polyline points={pts}
+        fill="none" stroke={stroke} strokeWidth={1.2} />
+    </svg>
+  )
+}
+
 function TemplatePanel({
   templates, activeTemplateId, activeTemplate,
+  additionalTemplateIds,
   onPickTemplate,
+  onPickAdditional,
   onOpenGenerator, onOpenRefinement,
   canRefine,
 }: {
   templates: Record<string, EventsTemplate>
   activeTemplateId: string | null
   activeTemplate: EventsTemplate | null
+  additionalTemplateIds: string[]
   onPickTemplate: (id: string) => void
+  /** Set the additional-template slot at ``index`` (0 or 1). Passing
+   *  ``null`` clears that slot; the rest shift down to keep the list
+   *  compact. */
+  onPickAdditional: (index: number, id: string | null) => void
   onOpenGenerator: () => void
   onOpenRefinement: () => void
   canRefine: boolean
@@ -831,30 +1017,64 @@ function TemplatePanel({
   // tweaks, save-as, delete) lives in the template generator —
   // matches EE's pattern where Generate Template is a separate
   // window from the main Events Analysis panel.
+  const libEntries = Object.values(templates)
+  const usedIds = new Set(
+    [activeTemplateId, ...additionalTemplateIds].filter(Boolean) as string[])
+  // Second slot is always visible; third only when the second is set,
+  // so users aren't confronted with empty rows they don't need.
+  const slot2 = additionalTemplateIds[0] ?? null
+  const slot3 = additionalTemplateIds[1] ?? null
   return (
     <Card title="Template">
-      <Row label="Library">
+      <Row label="Primary">
         <select value={activeTemplateId ?? ''} style={{ width: '100%' }}
           onChange={(e) => { if (e.target.value) onPickTemplate(e.target.value) }}>
           <option value="" disabled>— pick —</option>
-          {Object.values(templates).map((t) => (
+          {libEntries.map((t) => (
             <option key={t.id} value={t.id}>{t.name}</option>
           ))}
         </select>
       </Row>
       {activeTemplate && (
         <div style={{
-          fontFamily: 'var(--font-mono)',
-          color: 'var(--text-muted)',
-          fontSize: 'var(--font-size-label)',
-          lineHeight: 1.6,
+          display: 'flex', alignItems: 'center', gap: 6,
         }}>
-          τ rise = {activeTemplate.tauRiseMs.toFixed(2)} ms ·
-          τ decay = {activeTemplate.tauDecayMs.toFixed(2)} ms<br />
-          b0 = {activeTemplate.b0.toFixed(2)} ·
-          b1 = {activeTemplate.b1.toFixed(2)} ·
-          width = {activeTemplate.widthMs.toFixed(0)} ms
+          <TemplateThumbnail template={activeTemplate}
+            stroke={activeTemplate.direction === 'negative' ? '#e57373' : '#64b5f6'} />
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            color: 'var(--text-muted)',
+            fontSize: 'var(--font-size-label)',
+            lineHeight: 1.5,
+          }}>
+            τ {activeTemplate.tauRiseMs.toFixed(2)} / {activeTemplate.tauDecayMs.toFixed(1)} ms<br />
+            b0 {activeTemplate.b0.toFixed(1)} · b1 {activeTemplate.b1.toFixed(1)}
+          </div>
         </div>
+      )}
+      {/* Additional slots — EE-style 2nd and 3rd templates that get
+          merged into detection. Primary template carries the overlay;
+          additional ones contribute peaks via pointwise-max (corr) or
+          union (deconv). */}
+      <Row label="+ 2nd">
+        <select value={slot2 ?? ''} style={{ width: '100%' }}
+          onChange={(e) => onPickAdditional(0, e.target.value || null)}>
+          <option value="">— none —</option>
+          {libEntries
+            .filter((t) => !usedIds.has(t.id) || t.id === slot2)
+            .map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </Row>
+      {slot2 && (
+        <Row label="+ 3rd">
+          <select value={slot3 ?? ''} style={{ width: '100%' }}
+            onChange={(e) => onPickAdditional(1, e.target.value || null)}>
+            <option value="">— none —</option>
+            {libEntries
+              .filter((t) => !usedIds.has(t.id) || t.id === slot3)
+              .map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </Row>
       )}
       <div style={{
         marginTop: 6, paddingTop: 6,
@@ -871,9 +1091,92 @@ function TemplatePanel({
             : 'Run detection first (need ≥ 2 events)'}>
           Open refine template…
         </button>
+        {/* Library import/export — JSON round-trip for sharing
+            templates between datasets / users. */}
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button className="btn" onClick={() => exportTemplatesJSON(templates)}
+            disabled={libEntries.length === 0}
+            style={{ flex: 1, padding: '3px 6px', fontSize: 'var(--font-size-label)' }}
+            title="Download all library templates as a JSON file">
+            Export JSON
+          </button>
+          <button className="btn" onClick={() => importTemplatesJSON()}
+            style={{ flex: 1, padding: '3px 6px', fontSize: 'var(--font-size-label)' }}
+            title="Load templates from a JSON file, merging into the library">
+            Import JSON
+          </button>
+        </div>
       </div>
     </Card>
   )
+}
+
+/** Download the whole template library as a JSON file. */
+function exportTemplatesJSON(entries: Record<string, EventsTemplate>) {
+  const payload = {
+    format: 'neurotrace-event-templates',
+    version: 1,
+    templates: Object.values(entries),
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'neurotrace_event_templates.json'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** Open a file picker for a JSON template file and merge into the
+ *  library. Duplicate IDs are skipped (existing entries win); duplicate
+ *  names get a suffix. */
+function importTemplatesJSON() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'application/json,.json'
+  input.onchange = () => {
+    const f = input.files?.[0]
+    if (!f) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result))
+        const items: any[] = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.templates) ? parsed.templates : []
+        const store = useAppStore.getState()
+        const existing = store.eventsTemplates.entries
+        const existingNames = new Set(Object.values(existing).map((t) => t.name))
+        let imported = 0
+        for (const raw of items) {
+          if (!raw || typeof raw !== 'object') continue
+          const id = typeof raw.id === 'string' && raw.id.length > 0
+            ? raw.id : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+          if (existing[id]) continue          // don't clobber existing
+          let name = typeof raw.name === 'string' ? raw.name : 'Imported template'
+          if (existingNames.has(name)) name = `${name} (imported)`
+          const t: EventsTemplate = {
+            id,
+            name,
+            b0: Number(raw.b0 ?? 0),
+            b1: Number(raw.b1 ?? -30),
+            tauRiseMs: Number(raw.tauRiseMs ?? 0.5),
+            tauDecayMs: Number(raw.tauDecayMs ?? 5),
+            widthMs: Number(raw.widthMs ?? 30),
+            direction: raw.direction === 'positive' ? 'positive' : 'negative',
+          }
+          store.saveEventsTemplate(t)
+          existingNames.add(name)
+          imported++
+        }
+        alert(`Imported ${imported} template${imported === 1 ? '' : 's'}.`)
+      } catch (e) {
+        alert(`Import failed: ${e}`)
+      }
+    }
+    reader.readAsText(f)
+  }
+  input.click()
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1292,19 @@ function EventsSweepViewer({
   entryRef.current = entry
   const paramsRef = useRef(params)
   paramsRef.current = params
+  // Route pointer-handler callbacks through refs so changing their
+  // identity (e.g. the parent re-creating onAddEvent when `entry`
+  // updates) doesn't tear down and rebuild the uPlot instance. Event
+  // add/discard is a frequent action in normal use — without this, the
+  // whole plot + event listeners get reconstructed on every edit.
+  const onAddEventRef = useRef(onAddEvent)
+  onAddEventRef.current = onAddEvent
+  const onDiscardEventRef = useRef(onDiscardEvent)
+  onDiscardEventRef.current = onDiscardEvent
+  const setViewportRef = useRef(setViewport)
+  setViewportRef.current = setViewport
+  const updateCursorsRef = useRef(updateCursors)
+  updateCursorsRef.current = updateCursors
 
   const [data, setData] = useState<{
     time: Float64Array; values: Float64Array
@@ -1471,7 +1787,7 @@ function EventsSweepViewer({
           if (hit >= 0) {
             if (primedDiscardIdxRef.current === hit) {
               primedDiscardIdxRef.current = null
-              onDiscardEvent(hit)
+              onDiscardEventRef.current(hit)
             } else {
               primedDiscardIdxRef.current = hit
               plotRef.current?.redraw()
@@ -1507,14 +1823,14 @@ function EventsSweepViewer({
         }
         if (drag.kind === 'cursor-edge') {
           const x = pxToX(pxX)
-          updateCursors(drag.edge === 'start'
+          updateCursorsRef.current(drag.edge === 'start'
             ? { baselineStart: x }
             : { baselineEnd: x })
           return
         }
         if (drag.kind === 'cursor-band') {
           const dx = pxToX(pxX) - pxToX(drag.startPxX)
-          updateCursors({
+          updateCursorsRef.current({
             baselineStart: drag.startStart + dx,
             baselineEnd: drag.startEnd + dx,
           })
@@ -1539,7 +1855,7 @@ function EventsSweepViewer({
           yRangeRef.current = ny
           u.setScale('x', { min: nx[0], max: nx[1] })
           u.setScale('y', { min: ny[0], max: ny[1] })
-          setViewport({ tStart: nx[0], tEnd: nx[1] })
+          setViewportRef.current({ tStart: nx[0], tEnd: nx[1] })
           over.style.cursor = 'grabbing'
           return
         }
@@ -1558,7 +1874,7 @@ function EventsSweepViewer({
           const pxX = ev.clientX - rect.left
           const tClick = pxToX(pxX)
           primedDiscardIdxRef.current = null
-          if (isFinite(tClick)) onAddEvent(tClick)
+          if (isFinite(tClick)) onAddEventRef.current(tClick)
         }
       }
       const onWheel = (ev: WheelEvent) => {
@@ -1583,7 +1899,7 @@ function EventsSweepViewer({
           const nMax = xAt + (xMax - xAt) * factor
           xRangeRef.current = [nMin, nMax]
           u.setScale('x', { min: nMin, max: nMax })
-          setViewport({ tStart: nMin, tEnd: nMax })
+          setViewportRef.current({ tStart: nMin, tEnd: nMax })
         }
       }
 
@@ -1601,7 +1917,13 @@ function EventsSweepViewer({
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [data, dm, drawOverlays, updateCursors, onAddEvent, onDiscardEvent, setViewport])
+    // NOTE: pointer-handler callbacks are routed through refs above so
+    // we can leave them out of the deps. Otherwise every state change
+    // in the parent that touches `entry` / `params` would re-create
+    // the callbacks and force a full uPlot teardown + rebuild — which
+    // is what made adding a manual event or scrolling with many markers
+    // feel like the whole trace was being recomputed.
+  }, [data, dm, drawOverlays])
 
   // ResizeObserver: keep uPlot sized to container.
   useEffect(() => {
@@ -1674,6 +1996,474 @@ function EventsSweepViewer({
 // Results table
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Summary stats — single-line headline above the table. Mirrors EE's
+// "Summary" pane: n events, mean amp ± SD, mean rise / decay / FWHM,
+// frequency (Hz), mean IEI. Computed inline from entry.events; updates
+// live as the user discards / adds manual events.
+// ---------------------------------------------------------------------------
+
+function mean(xs: number[]): number {
+  if (xs.length === 0) return NaN
+  let s = 0; for (let i = 0; i < xs.length; i++) s += xs[i]
+  return s / xs.length
+}
+function sd(xs: number[]): number {
+  if (xs.length < 2) return NaN
+  const m = mean(xs)
+  let s = 0; for (let i = 0; i < xs.length; i++) { const d = xs[i] - m; s += d * d }
+  return Math.sqrt(s / (xs.length - 1))
+}
+
+function EventsSummaryBar({ entry }: { entry: EventsData | undefined }) {
+  if (!entry || entry.events.length === 0) return null
+  const amps = entry.events.map((e) => e.amplitude)
+  const rises = entry.events.map((e) => e.riseTimeMs).filter((v): v is number => v != null)
+  const decays = entry.events.map((e) => e.decayTimeMs).filter((v): v is number => v != null)
+  const fwhms = entry.events.map((e) => e.halfWidthMs).filter((v): v is number => v != null)
+  const iei: number[] = []
+  for (let i = 1; i < entry.events.length; i++) {
+    iei.push(entry.events[i].peakTimeS - entry.events[i - 1].peakTimeS)
+  }
+  const freqHz = entry.sweepLengthS > 0 ? entry.events.length / entry.sweepLengthS : NaN
+  const u = entry.units
+  const fmt = (v: number, p = 2) => (Number.isFinite(v) ? v.toFixed(p) : '—')
+  const cell: React.CSSProperties = {
+    display: 'flex', flexDirection: 'column', gap: 1,
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)',
+    padding: '3px 8px', borderRight: '1px solid var(--border)',
+    whiteSpace: 'nowrap',
+  }
+  const lbl: React.CSSProperties = { color: 'var(--text-muted)', fontSize: 10 }
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'stretch', flexWrap: 'wrap',
+      background: 'var(--bg-primary)',
+      borderTop: '1px solid var(--border)',
+      borderBottom: '1px solid var(--border)',
+    }}>
+      <div style={cell}>
+        <span style={lbl}>n events</span>
+        <span>{entry.events.length}</span>
+      </div>
+      <div style={cell}>
+        <span style={lbl}>rate (Hz)</span>
+        <span>{fmt(freqHz, 2)}</span>
+      </div>
+      <div style={cell}>
+        <span style={lbl}>Amp ({u})</span>
+        <span>{fmt(mean(amps))} ± {fmt(sd(amps))}</span>
+      </div>
+      <div style={cell}>
+        <span style={lbl}>Rise (ms)</span>
+        <span>{fmt(mean(rises))} ± {fmt(sd(rises))}</span>
+      </div>
+      <div style={cell}>
+        <span style={lbl}>Decay (ms)</span>
+        <span>{fmt(mean(decays))} ± {fmt(sd(decays))}</span>
+      </div>
+      <div style={cell}>
+        <span style={lbl}>FWHM (ms)</span>
+        <span>{fmt(mean(fwhms))} ± {fmt(sd(fwhms))}</span>
+      </div>
+      <div style={{ ...cell, borderRight: 'none' }}>
+        <span style={lbl}>IEI (ms)</span>
+        <span>{fmt(mean(iei) * 1000, 1)} ± {fmt(sd(iei) * 1000, 1)}</span>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// All-events overlay — every detected event aligned on peak, drawn as
+// faint grey traces with the mean in red and a ±1 SD envelope. Fetches
+// a short window of the raw trace around each event's peak via a
+// single backend call (/api/events/overlay).
+// ---------------------------------------------------------------------------
+
+function AllEventsOverlay({
+  backendUrl, entry, heightSignal,
+}: {
+  backendUrl: string
+  entry: EventsData | undefined
+  heightSignal: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const [data, setData] = useState<{
+    time: number[]; traces: (number | null)[][]
+    mean: (number | null)[]; sdLo: (number | null)[]; sdHi: (number | null)[]
+    nIncluded: number
+  } | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [alignMode, setAlignMode] = useState<'peak' | 'foot'>('peak')
+  const [beforeMs, setBeforeMs] = useState(5)
+  const [afterMs, setAfterMs] = useState(50)
+
+  // Fetch when the events list changes. Small debounce so rapid edits
+  // (manual adds / discards) don't hammer the backend.
+  useEffect(() => {
+    if (!backendUrl || !entry || entry.events.length === 0) {
+      setData(null); return
+    }
+    const t = setTimeout(() => {
+      setLoading(true); setErr(null)
+      fetch(`${backendUrl}/api/events/overlay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group: entry.group, series: entry.series,
+          sweep: entry.sweep, trace: entry.channel,
+          events: entry.events.map((e) => ({
+            peak_idx: e.peakIdx, foot_idx: e.footIdx,
+            baseline_val: e.baselineVal,
+          })),
+          align: alignMode,
+          window_before_ms: beforeMs,
+          window_after_ms: afterMs,
+          baseline_subtract: true,
+        }),
+      }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+        .then((d) => {
+          setData({
+            time: (d.time_s ?? []).map((x: any) => Number(x)),
+            traces: (d.traces ?? []).map((row: any[]) =>
+              row.map((x) => x == null ? null : Number(x))),
+            mean: (d.mean ?? []).map((x: any) => x == null ? null : Number(x)),
+            sdLo: (d.sd_lo ?? []).map((x: any) => x == null ? null : Number(x)),
+            sdHi: (d.sd_hi ?? []).map((x: any) => x == null ? null : Number(x)),
+            nIncluded: Number(d.n_included ?? 0),
+          })
+          setLoading(false)
+        })
+        .catch((e) => { setErr(String(e)); setLoading(false); setData(null) })
+    }, 150)
+    return () => clearTimeout(t)
+  }, [backendUrl, entry, alignMode, beforeMs, afterMs])
+
+  // Build / rebuild uPlot when data or container size changes.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!data || data.time.length === 0) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      // Build the uPlot aligned-data: x + each individual trace + mean.
+      const aligned: uPlot.AlignedData = [
+        data.time as any,
+        ...(data.traces.map((row) => row as any) as any[]),
+        data.mean as any,
+      ]
+      // Series: x + N faint grey + 1 red mean + SD envelope as 2 series.
+      const seriesDefs: uPlot.Series[] = [{}]
+      for (let i = 0; i < data.traces.length; i++) {
+        seriesDefs.push({
+          stroke: 'rgba(128,128,128,0.35)', width: 0.8, spanGaps: false,
+        })
+      }
+      seriesDefs.push({ stroke: '#e57373', width: 2, spanGaps: false })
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: {
+          x: { time: false },
+          y: { auto: true },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: `Time (ms, 0 = ${alignMode})`, labelSize: 14,
+            values: (_u, vals) => vals.map((v) => (v * 1000).toFixed(0)),
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 55,
+            label: 'Δ baseline',
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: seriesDefs,
+        hooks: {
+          draw: [(u) => {
+            // ±1 SD envelope behind the mean.
+            if (data.sdLo.length === data.time.length
+                && data.sdHi.length === data.time.length) {
+              const ctx = u.ctx
+              ctx.save()
+              ctx.fillStyle = 'rgba(229, 115, 115, 0.18)'
+              ctx.beginPath()
+              let started = false
+              for (let i = 0; i < data.time.length; i++) {
+                const v = data.sdHi[i]
+                if (v == null) continue
+                const px = u.valToPos(data.time[i], 'x', true)
+                const py = u.valToPos(v, 'y', true)
+                if (!started) { ctx.moveTo(px, py); started = true }
+                else ctx.lineTo(px, py)
+              }
+              for (let i = data.time.length - 1; i >= 0; i--) {
+                const v = data.sdLo[i]
+                if (v == null) continue
+                const px = u.valToPos(data.time[i], 'x', true)
+                const py = u.valToPos(v, 'y', true)
+                ctx.lineTo(px, py)
+              }
+              ctx.closePath()
+              ctx.fill()
+              ctx.restore()
+            }
+          }],
+        },
+      }
+      plotRef.current = new uPlot(opts, aligned, container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [data, alignMode])
+
+  // ResizeObserver to match container size.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      minHeight: 0, gap: 6, padding: 6,
+    }}>
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+      }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Align</span>
+          <select value={alignMode}
+            onChange={(e) => setAlignMode(e.target.value as 'peak' | 'foot')}>
+            <option value="peak">peak</option>
+            <option value="foot">foot</option>
+          </select>
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Before (ms)</span>
+          <NumInput value={beforeMs} step={1} min={1} onChange={setBeforeMs} />
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>After (ms)</span>
+          <NumInput value={afterMs} step={5} min={5} onChange={setAfterMs} />
+        </label>
+        {data && (
+          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            {data.nIncluded} / {entry?.events.length ?? 0} events
+          </span>
+        )}
+        {loading && <span style={{ color: 'var(--text-muted)' }}>loading…</span>}
+        {err && <span style={{ color: '#e57373' }}>⚠ {err}</span>}
+      </div>
+      <div ref={containerRef} style={{
+        flex: 1, minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+      }}>
+        {(!entry || entry.events.length === 0) && (
+          <div style={{
+            padding: 16, textAlign: 'center',
+            color: 'var(--text-muted)', fontStyle: 'italic',
+            fontSize: 'var(--font-size-label)',
+          }}>
+            Run detection to see the event overlay.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Amplitude histogram — distribution of event amplitudes with a
+// Gaussian fit to the bulk. Useful QC for "am I catching the shoulder
+// or the noise?". Counts are per-bin; Gaussian and cutoff line drawn
+// in overlay. Computed entirely client-side from entry.events.
+// ---------------------------------------------------------------------------
+
+function AmplitudeHistogram({
+  entry, heightSignal,
+}: {
+  entry: EventsData | undefined
+  heightSignal: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+
+  const stats = useMemo(() => {
+    if (!entry || entry.events.length < 5) return null
+    const amps = entry.events.map((e) => e.amplitude)
+    const n = amps.length
+    const m = mean(amps)
+    const s = sd(amps) || 1
+    const nBins = Math.max(8, Math.min(40, Math.round(Math.sqrt(n))))
+    const lo = Math.min(...amps), hi = Math.max(...amps)
+    const pad = (hi - lo) * 0.05 || 1
+    const minE = lo - pad, maxE = hi + pad
+    const bw = (maxE - minE) / nBins
+    const counts = new Array<number>(nBins).fill(0)
+    for (const a of amps) {
+      const k = Math.max(0, Math.min(nBins - 1, Math.floor((a - minE) / bw)))
+      counts[k]++
+    }
+    const centers = new Array<number>(nBins)
+    for (let i = 0; i < nBins; i++) centers[i] = minE + (i + 0.5) * bw
+    // Gaussian curve — not re-fit; just plot N(μ,σ) scaled to max count.
+    const peakCount = Math.max(...counts) || 1
+    const gauss = centers.map((x) =>
+      peakCount * Math.exp(-0.5 * ((x - m) / s) ** 2))
+    return { centers, counts, gauss, mean: m, sd: s, n }
+  }, [entry])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!stats) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      // Bars via uPlot paths: use a "bars" pattern by drawing line from
+      // bar-top to zero with wide width. Simpler: custom draw hook.
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: {
+          x: { time: false },
+          y: { range: (_u, _dmin, dmax) => [0, Math.max(1, dmax * 1.1)] },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: `Amplitude (${entry?.units ?? ''})`, labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 50,
+            label: 'count',
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: [
+          {},
+          { stroke: cssVar('--trace-color-1'), width: 1.5 },
+        ],
+        hooks: {
+          draw: [(u) => {
+            // Draw bars under the line.
+            const ctx = u.ctx
+            const dpr = devicePixelRatio || 1
+            const bw = stats.centers.length > 1
+              ? stats.centers[1] - stats.centers[0] : 1
+            ctx.save()
+            ctx.fillStyle = 'rgba(100,181,246,0.35)'
+            for (let i = 0; i < stats.centers.length; i++) {
+              const x0 = u.valToPos(stats.centers[i] - bw / 2, 'x', true)
+              const x1 = u.valToPos(stats.centers[i] + bw / 2, 'x', true)
+              const y0 = u.valToPos(0, 'y', true)
+              const y1 = u.valToPos(stats.counts[i], 'y', true)
+              ctx.fillRect(Math.min(x0, x1), y1, Math.abs(x1 - x0), y0 - y1)
+            }
+            // Vertical line at mean.
+            const mx = u.valToPos(stats.mean, 'x', true)
+            ctx.strokeStyle = '#e57373'
+            ctx.lineWidth = 1.5 * dpr
+            ctx.setLineDash([4 * dpr, 3 * dpr])
+            ctx.beginPath()
+            ctx.moveTo(mx, u.bbox.top)
+            ctx.lineTo(mx, u.bbox.top + u.bbox.height)
+            ctx.stroke()
+            ctx.restore()
+          }],
+        },
+      }
+      const data: uPlot.AlignedData = [stats.centers, stats.gauss]
+      plotRef.current = new uPlot(opts, data, container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [stats, entry?.units])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      minHeight: 0, gap: 6, padding: 6,
+    }}>
+      <div style={{
+        display: 'flex', gap: 12, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+        fontFamily: 'var(--font-mono)',
+      }}>
+        {stats
+          ? (
+            <>
+              <span>n = {stats.n}</span>
+              <span>μ = {stats.mean.toFixed(2)} {entry?.units}</span>
+              <span>σ = {stats.sd.toFixed(2)} {entry?.units}</span>
+            </>
+          )
+          : <span style={{ color: 'var(--text-muted)' }}>Need ≥ 5 events.</span>}
+      </div>
+      <div ref={containerRef} style={{
+        flex: 1, minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+      }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Results table
+// ---------------------------------------------------------------------------
+
 function EventsResultsTable({
   entry,
   onSelect, onDiscard,
@@ -1704,7 +2494,8 @@ function EventsResultsTable({
       <thead>
         <tr>
           {['#', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
-            'FWHM (ms)', `AUC (${unit}·s)`, ''].map((h, i) => (
+            'τ decay (ms)', 'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)',
+            ''].map((h, i) => (
             <th key={i} style={{
               padding: '3px 6px', textAlign: 'left',
               borderBottom: '1px solid var(--border)',
@@ -1716,32 +2507,39 @@ function EventsResultsTable({
         </tr>
       </thead>
       <tbody>
-        {entry.events.map((e: EventRow, i: number) => (
-          <tr key={i}
-            onClick={() => onSelect(i)}
-            style={{
-              cursor: 'pointer',
-              background: i === entry.selectedIdx
-                ? 'var(--accent-muted, rgba(100,181,246,0.15))'
-                : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
-              fontStyle: e.manual ? 'italic' : 'normal',
-            }}>
-            <td style={td}>{i + 1}{e.manual ? ' *' : ''}</td>
-            <td style={td}>{e.peakTimeS.toFixed(4)}</td>
-            <td style={td}>{e.amplitude.toFixed(2)}</td>
-            <td style={td}>{e.riseTimeMs != null ? e.riseTimeMs.toFixed(2) : '—'}</td>
-            <td style={td}>{e.decayTimeMs != null ? e.decayTimeMs.toFixed(2) : '—'}</td>
-            <td style={td}>{e.halfWidthMs != null ? e.halfWidthMs.toFixed(2) : '—'}</td>
-            <td style={td}>{e.auc != null ? e.auc.toFixed(4) : '—'}</td>
-            <td style={{ ...td, textAlign: 'right' }}>
-              <button className="btn" onClick={(ev) => { ev.stopPropagation(); onDiscard(i) }}
-                style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
-                title="Remove this event from the results">
-                ✕
-              </button>
-            </td>
-          </tr>
-        ))}
+        {entry.events.map((e: EventRow, i: number) => {
+          const iei = i === 0
+            ? null
+            : (e.peakTimeS - entry.events[i - 1].peakTimeS) * 1000
+          return (
+            <tr key={i}
+              onClick={() => onSelect(i)}
+              style={{
+                cursor: 'pointer',
+                background: i === entry.selectedIdx
+                  ? 'var(--accent-muted, rgba(100,181,246,0.15))'
+                  : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
+                fontStyle: e.manual ? 'italic' : 'normal',
+              }}>
+              <td style={td}>{i + 1}{e.manual ? ' *' : ''}</td>
+              <td style={td}>{e.peakTimeS.toFixed(4)}</td>
+              <td style={td}>{e.amplitude.toFixed(2)}</td>
+              <td style={td}>{e.riseTimeMs != null ? e.riseTimeMs.toFixed(2) : '—'}</td>
+              <td style={td}>{e.decayTimeMs != null ? e.decayTimeMs.toFixed(2) : '—'}</td>
+              <td style={td}>{e.decayTauMs != null ? e.decayTauMs.toFixed(2) : '—'}</td>
+              <td style={td}>{e.halfWidthMs != null ? e.halfWidthMs.toFixed(2) : '—'}</td>
+              <td style={td}>{e.auc != null ? e.auc.toFixed(4) : '—'}</td>
+              <td style={td}>{iei != null ? iei.toFixed(1) : '—'}</td>
+              <td style={{ ...td, textAlign: 'right' }}>
+                <button className="btn" onClick={(ev) => { ev.stopPropagation(); onDiscard(i) }}
+                  style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+                  title="Remove this event from the results">
+                  ✕
+                </button>
+              </td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )
@@ -1763,17 +2561,25 @@ function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
   const header = [
     '#', 'Sweep', 'Time_s', 'Foot_time_s',
     `Peak_${unit}`, `Baseline_${unit}`, `Amplitude_${unit}`,
-    'Rise_ms', 'Decay_ms', 'FWHM_ms', `AUC_${unit}·s`,
+    'Rise_ms', 'Decay_ms', 'DecayTau_ms', 'FWHM_ms', `AUC_${unit}·s`,
+    'IEI_ms',
     'Manual',
   ]
-  const rows = entry.events.map((e, i) => [
-    i + 1, e.sweep,
-    e.peakTimeS.toFixed(6), e.footTimeS.toFixed(6),
-    e.peakVal.toFixed(4), e.baselineVal.toFixed(4), e.amplitude.toFixed(4),
-    e.riseTimeMs ?? '', e.decayTimeMs ?? '', e.halfWidthMs ?? '',
-    e.auc ?? '',
-    e.manual ? 1 : 0,
-  ])
+  const rows = entry.events.map((e, i) => {
+    const iei = i === 0
+      ? ''
+      : ((e.peakTimeS - entry.events[i - 1].peakTimeS) * 1000).toFixed(3)
+    return [
+      i + 1, e.sweep,
+      e.peakTimeS.toFixed(6), e.footTimeS.toFixed(6),
+      e.peakVal.toFixed(4), e.baselineVal.toFixed(4), e.amplitude.toFixed(4),
+      e.riseTimeMs ?? '', e.decayTimeMs ?? '',
+      e.decayTauMs ?? '', e.halfWidthMs ?? '',
+      e.auc ?? '',
+      iei,
+      e.manual ? 1 : 0,
+    ]
+  })
   const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
   const name = fileName.replace(/\.[^.]+$/, '') + '_events.csv'
   const blob = new Blob([csv], { type: 'text/csv' })

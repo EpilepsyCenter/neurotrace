@@ -634,6 +634,11 @@ class EventKinetics:
     half_width_ms: Optional[float]
     auc: Optional[float]       # trapezoidal integral over (foot, decay endpoint)
     decay_endpoint_idx: Optional[int]
+    # Per-event monoexponential decay fit: ``y = baseline + a · exp(-t/τ)``
+    # fit to samples from peak → decay_endpoint. ``decay_tau_ms`` is the
+    # τ in milliseconds; None when the fit can't run (too few samples,
+    # degenerate amplitude, or scipy convergence failure).
+    decay_tau_ms: Optional[float] = None
 
 
 def _find_rise_crossing(
@@ -660,6 +665,46 @@ def _find_rise_crossing(
     if idxs.size == 0:
         return None
     return int(idxs[0])
+
+
+def _find_rise_crossing_near_peak(
+    pre: np.ndarray, baseline: float, target: float,
+) -> Optional[int]:
+    """Rise-crossing nearest to the peak, scanning backward from the end.
+
+    ``pre`` is a pre-peak window, ordered baseline → peak. This walks
+    backward from the last sample and returns the latest index where
+    ``pre[i]`` is still on the PEAK side of ``target``. That's the
+    rise-crossing closest to the peak, which is what we want for
+    computing rise time.
+
+    Forward-scanning (via :func:`_find_rise_crossing`) returns the
+    *first* crossing — which is wrong when baseline noise early in
+    ``pre`` dips below the threshold, producing a false crossing far
+    from the actual rise. This function ignores those excursions by
+    construction.
+    """
+    n = pre.size
+    if n == 0:
+        return None
+    upward = (target - baseline) > 0
+    # "On peak side" means the signal has crossed past target toward peak.
+    if upward:
+        on_peak_side = pre >= target
+    else:
+        on_peak_side = pre <= target
+    # End of pre (nearest sample to peak) is expected to be on peak
+    # side. If it isn't, the rise-crossing hasn't happened inside this
+    # window — tell the caller.
+    if not on_peak_side[n - 1]:
+        return None
+    # Walk backward until we find the first sample that is NOT on peak
+    # side. The crossing is the sample immediately after it.
+    for i in range(n - 2, -1, -1):
+        if not on_peak_side[i]:
+            return i + 1
+    # Whole window is on peak side — crossing sits before pre starts.
+    return 0
 
 
 def measure_event_kinetics(
@@ -748,6 +793,14 @@ def measure_event_kinetics(
         rough_baseline = float(np.percentile(pre, 75 if sign < 0 else 25))
 
     # ---- Rise 20/80 points between rough_baseline and peak ----
+    #
+    # Scan the pre-window BACKWARD from the peak side so baseline-noise
+    # excursions earlier in the window can't masquerade as the rise.
+    # The old forward scan returned the first crossing of t20 — which
+    # for clean fast-rise events often landed deep in the pre-window
+    # (on a noise sample) and inflated the reported rise time to tens
+    # of ms. Walking back from peak picks the crossing nearest to the
+    # peak, which is the ACTUAL rise onset.
     amp_rough = peak_val - rough_baseline
     if amp_rough == 0:
         foot_idx = max(0, peak_idx - 1)
@@ -755,8 +808,8 @@ def measure_event_kinetics(
     else:
         t20 = rough_baseline + 0.20 * amp_rough
         t80 = rough_baseline + 0.80 * amp_rough
-        idx20 = _find_rise_crossing(pre, rough_baseline, t20, rising=True)
-        idx80 = _find_rise_crossing(pre, rough_baseline, t80, rising=True)
+        idx20 = _find_rise_crossing_near_peak(pre, rough_baseline, t20)
+        idx80 = _find_rise_crossing_near_peak(pre, rough_baseline, t80)
         if idx20 is None or idx80 is None or idx80 <= idx20:
             # Fall back to the rough pre-event lookup.
             foot_idx = bl_a
@@ -844,6 +897,44 @@ def measure_event_kinetics(
         # NumPy 2.0 renamed trapz → trapezoid; use the new name.
         auc = float(np.trapezoid(seg, dx=dt))
 
+    # ---- Per-event decay τ (monoexponential fit, peak → endpoint) ----
+    # Fit ``y = baseline + a · exp(-t/τ)`` to the decay phase. Reports
+    # the decay time constant directly, rather than the percent-drop
+    # heuristic used for ``decay_time_ms``. Matches EE's per-event τ
+    # column. Fails silently (returns None) on short windows or
+    # degenerate data — those events just don't get a τ column value.
+    decay_tau_ms: Optional[float] = None
+    if (decay_endpoint_idx is not None
+            and decay_endpoint_idx > peak_idx + 2
+            and amplitude != 0):
+        dec_seg = np.asarray(values[peak_idx:decay_endpoint_idx + 1], dtype=float)
+        t_dec = np.arange(dec_seg.size, dtype=float) / sr
+        try:
+            # Model with fixed baseline — leaves just (a, τ). Seed a
+            # from the peak's baseline-subtracted amplitude; seed τ
+            # from the decay_time_ms (percent-drop) estimate if we
+            # have one, else a tenth of the window.
+            a0 = float(dec_seg[0]) - baseline
+            if a0 == 0:
+                a0 = amplitude  # fallback
+            tau0 = (decay_time_ms / 1000.0) if decay_time_ms else max(
+                1e-4, t_dec[-1] / 10.0)
+            def _monoexp(t, a, tau):
+                return baseline + a * np.exp(-t / max(tau, 1e-9))
+            bounds_lo = (-np.inf, 1e-5)
+            bounds_hi = (np.inf, max(t_dec[-1] * 5.0, 1e-4))
+            popt, _ = curve_fit(
+                _monoexp, t_dec, dec_seg,
+                p0=(a0, min(max(tau0, bounds_lo[1] * 1.01), bounds_hi[1] * 0.99)),
+                bounds=(bounds_lo, bounds_hi),
+                maxfev=1000,
+            )
+            tau_s = float(popt[1])
+            if tau_s > 0:
+                decay_tau_ms = tau_s * 1000.0
+        except (RuntimeError, ValueError):
+            decay_tau_ms = None
+
     return EventKinetics(
         peak_idx=peak_idx,
         peak_val=peak_val,
@@ -855,6 +946,7 @@ def measure_event_kinetics(
         half_width_ms=half_width_ms,
         auc=auc,
         decay_endpoint_idx=decay_endpoint_idx,
+        decay_tau_ms=decay_tau_ms,
     )
 
 
@@ -878,6 +970,7 @@ class EventRecord:
     half_width_ms: Optional[float]
     auc: Optional[float]
     decay_endpoint_idx: Optional[int]
+    decay_tau_ms: Optional[float] = None
     manual: bool = False
 
     def to_dict(self) -> dict:
@@ -897,6 +990,7 @@ class EventRecord:
             "decay_endpoint_idx": (
                 None if self.decay_endpoint_idx is None else int(self.decay_endpoint_idx)
             ),
+            "decay_tau_ms": None if self.decay_tau_ms is None else float(self.decay_tau_ms),
             "manual": bool(self.manual),
         }
 
@@ -907,6 +1001,13 @@ def run_events(
     method: str,                            # 'template_correlation' | 'template_deconvolution' | 'threshold'
     # template params (used for the two template methods)
     template: Optional[np.ndarray] = None,
+    # Optional multi-template detection (EE parity). When supplied with
+    # ≥ 2 entries, detection runs independently for each template and
+    # the peak sets are merged (correlation: pointwise max of r(t);
+    # deconvolution: union of detected peaks, with min_iei enforced on
+    # the merged set). The first entry becomes the "primary" template
+    # whose detection measure is returned for overlay display.
+    templates: Optional[list[np.ndarray]] = None,
     cutoff: float = 0.4,                    # correlation cutoff OR deconvolution SD cutoff
     deconv_low_hz: float = 0.1,
     deconv_high_hz: float = 200.0,
@@ -927,6 +1028,9 @@ def run_events(
     amplitude_min_abs: float = 5.0,
     amplitude_max_abs: float = 2000.0,
     auc_min_abs: Optional[float] = None,
+    rise_max_ms: Optional[float] = None,
+    decay_max_ms: Optional[float] = None,
+    fwhm_max_ms: Optional[float] = None,
     # manual edits
     manual_added_times: Optional[list[float]] = None,   # seconds within this sweep
     manual_removed_times: Optional[list[float]] = None,
@@ -943,24 +1047,95 @@ def run_events(
     detection_measure: Optional[np.ndarray] = None
 
     # ---- Step 1: candidate peak indices ----
+    # Multi-template consolidation. If the caller supplied a list of
+    # templates (EE's up-to-3 detection), run detection per template
+    # and merge the peak sets; the "primary" template's detection
+    # measure is what we return for the overlay (arbitrary but
+    # consistent — it's the one the UI has the cutoff slider wired to).
+    tmpl_list: list[np.ndarray] = []
+    if templates:
+        tmpl_list = [np.asarray(t, dtype=float) for t in templates
+                     if t is not None and len(t) >= 4]
+    if not tmpl_list and template is not None and len(template) >= 4:
+        tmpl_list = [np.asarray(template, dtype=float)]
+
     if method == "template_correlation":
-        if template is None or len(template) < 4:
+        if not tmpl_list:
             raise ValueError("template_correlation requires a template of ≥ 4 samples")
-        peak_idxs = detect_correlation(
-            x, sr, np.asarray(template, dtype=float),
-            cutoff=cutoff, direction=direction, min_iei_ms=min_iei_ms,
-        )
-        # For visualisation, compute and return the full correlation.
-        detection_measure = _sliding_correlation(x, np.asarray(template, dtype=float))
+        if len(tmpl_list) == 1:
+            peak_idxs = detect_correlation(
+                x, sr, tmpl_list[0],
+                cutoff=cutoff, direction=direction, min_iei_ms=min_iei_ms,
+            )
+            detection_measure = _sliding_correlation(x, tmpl_list[0])
+        else:
+            # Pointwise max of correlation traces across templates.
+            # Align to shortest output length (len N − W_max + 1).
+            r_traces = [_sliding_correlation(x, t) for t in tmpl_list]
+            min_len = min(len(r) for r in r_traces)
+            stacked = np.stack([r[:min_len] for r in r_traces])
+            r_max = np.max(stacked, axis=0)
+            # Find peaks in the max trace — EE's behaviour (positive
+            # peaks because correlation is always positive for aligned
+            # events regardless of polarity).
+            min_dist = max(1, int(round(min_iei_ms / 1000.0 * sr)))
+            peak_idxs_raw = _find_peaks_above(r_max, cutoff, min_dist, direction=1)
+            # Refine each peak by snapping to the local extremum of the
+            # RAW trace — otherwise peak_idx might sit on a correlation
+            # lobe rather than the trace extremum.
+            sign = -1 if direction == "negative" else 1
+            snap = max(1, int(round(0.5 * min_iei_ms / 1000.0 * sr)))
+            peak_idxs = []
+            for pi in peak_idxs_raw:
+                a = max(0, pi - snap); b = min(len(x), pi + snap + 1)
+                if b <= a + 1:
+                    peak_idxs.append(pi); continue
+                seg = x[a:b]
+                peak_idxs.append(int(a + (np.argmin(seg) if sign < 0 else np.argmax(seg))))
+            detection_measure = r_traces[0]  # primary template's DM for overlay
     elif method == "template_deconvolution":
-        if template is None or len(template) < 4:
+        if not tmpl_list:
             raise ValueError("template_deconvolution requires a template of ≥ 4 samples")
-        peak_idxs, decon, _mu, _sigma = detect_deconvolution(
-            x, sr, np.asarray(template, dtype=float),
-            cutoff_sd=cutoff, low_hz=deconv_low_hz, high_hz=deconv_high_hz,
-            direction=direction, min_iei_ms=min_iei_ms,
-        )
-        detection_measure = decon
+        if len(tmpl_list) == 1:
+            peak_idxs, decon, _mu, _sigma = detect_deconvolution(
+                x, sr, tmpl_list[0],
+                cutoff_sd=cutoff, low_hz=deconv_low_hz, high_hz=deconv_high_hz,
+                direction=direction, min_iei_ms=min_iei_ms,
+            )
+            detection_measure = decon
+        else:
+            # Union of per-template peak sets. Deconvolution traces
+            # differ in amplitude per template (different b1) so we
+            # can't just stack + max; detect per-template and merge.
+            sign = -1 if direction == "negative" else 1
+            all_peaks: list[int] = []
+            primary_decon: Optional[np.ndarray] = None
+            for i, t in enumerate(tmpl_list):
+                pidxs, decon_i, _mu, _sigma = detect_deconvolution(
+                    x, sr, t,
+                    cutoff_sd=cutoff, low_hz=deconv_low_hz, high_hz=deconv_high_hz,
+                    direction=direction, min_iei_ms=min_iei_ms,
+                )
+                if i == 0:
+                    primary_decon = decon_i
+                all_peaks.extend(int(p) for p in pidxs)
+            # Merge: sort, then enforce min_iei — when two peaks from
+            # different templates are within min_iei_ms of each other,
+            # keep the one whose trace extremum is larger.
+            all_peaks.sort()
+            min_dist = max(1, int(round(min_iei_ms / 1000.0 * sr)))
+            merged: list[int] = []
+            for pi in all_peaks:
+                if merged and pi - merged[-1] < min_dist:
+                    # Keep whichever has the larger absolute deflection.
+                    prev_v = abs(float(x[merged[-1]]))
+                    this_v = abs(float(x[pi]))
+                    if this_v > prev_v:
+                        merged[-1] = pi
+                else:
+                    merged.append(pi)
+            peak_idxs = merged
+            detection_measure = primary_decon
     elif method == "threshold":
         if threshold_value is None:
             raise ValueError("threshold method requires threshold_value")
@@ -1037,6 +1212,19 @@ def run_events(
                 continue
             if auc_min_abs is not None and (k.auc is None or abs(k.auc) < auc_min_abs):
                 continue
+            # Max-kinetic filters: drop events with implausibly slow
+            # rise / decay / half-width — usually indicates a merged
+            # double-peak or noise cluster that the detector mistook
+            # for one event.
+            if rise_max_ms is not None and k.rise_time_ms is not None \
+                    and k.rise_time_ms > rise_max_ms:
+                continue
+            if decay_max_ms is not None and k.decay_time_ms is not None \
+                    and k.decay_time_ms > decay_max_ms:
+                continue
+            if fwhm_max_ms is not None and k.half_width_ms is not None \
+                    and k.half_width_ms > fwhm_max_ms:
+                continue
 
         records.append(EventRecord(
             sweep=sweep_index,
@@ -1052,6 +1240,7 @@ def run_events(
             half_width_ms=k.half_width_ms,
             auc=k.auc,
             decay_endpoint_idx=k.decay_endpoint_idx,
+            decay_tau_ms=k.decay_tau_ms,
             manual=mf,
         ))
     return records, detection_measure

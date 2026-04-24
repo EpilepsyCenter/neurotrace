@@ -398,7 +398,10 @@ export function defaultEventsParams(): EventsParams {
     filterLow: 1,
     filterHigh: 500,
     filterOrder: 4,
+    detrendEnabled: false,
+    detrendWindowMs: 500,
     templateId: null,
+    additionalTemplateIds: [],
     correlationCutoff: 0.4,
     deconvCutoffSd: 3.5,
     deconvLowHz: 1.0,             // EE default (high-pass corner of the Gaussian bandpass)
@@ -421,6 +424,12 @@ export function defaultEventsParams(): EventsParams {
     minIEIMs: 5,
     minIeiMs: 5,   // duplicate — backend expects min_iei_ms
     aucMinAbs: null,
+    // Max-kinetic filters — events exceeding these are dropped as
+    // artefacts (double-peaks, long-tailed noise). ``null`` disables
+    // the filter for that kinetic.
+    riseMaxMs: null,
+    decayMaxMs: null,
+    fwhmMaxMs: null,
   }
 }
 
@@ -1038,8 +1047,20 @@ export interface EventsParams {
   filterLow: number
   filterHigh: number
   filterOrder: number
+  /** Pre-detection detrending via rolling-median subtraction. Flattens
+   *  slow drift that a high-pass filter would also handle but with
+   *  less ringing near sharp edges. Matches EE's "Subtract baseline
+   *  (moving median)" option. Window is in ms. */
+  detrendEnabled: boolean
+  detrendWindowMs: number
   // Template-method
-  templateId: string | null                 // which template from the library
+  templateId: string | null                 // primary template from the library
+  /** Up to two ADDITIONAL templates for multi-template detection (EE
+   *  parity: detect with templates 1/2/3 simultaneously). When any of
+   *  these is non-null, correlation/deconvolution uses the cooperative
+   *  set — correlation takes pointwise max, deconvolution unions
+   *  per-template peak sets. Empty array = single-template mode. */
+  additionalTemplateIds: string[]
   correlationCutoff: number                 // 0-1, default 0.4
   deconvCutoffSd: number                    // default 3.5 σ
   deconvLowHz: number
@@ -1064,6 +1085,11 @@ export interface EventsParams {
   amplitudeMaxAbs: number                   // above → rejected as artefact
   minIEIMs: number
   aucMinAbs: number | null                  // null = off
+  // Max-kinetic filters — events exceeding these get dropped. ``null``
+  // disables that specific filter. Matches EE's Exclusion panel.
+  riseMaxMs: number | null
+  decayMaxMs: number | null
+  fwhmMaxMs: number | null
   // Common
   minIeiMs: number
 }
@@ -1085,6 +1111,10 @@ export interface EventRow {
   halfWidthMs: number | null
   auc: number | null
   decayEndpointIdx: number | null
+  /** Per-event monoexponential decay τ in milliseconds — fit of
+   *  ``y = baseline + a·exp(-t/τ)`` from peak to decay-endpoint.
+   *  Null when the fit couldn't converge (short window, noisy tail). */
+  decayTauMs: number | null
   manual: boolean
 }
 
@@ -3633,6 +3663,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         filter_low: params.filterLow,
         filter_high: params.filterHigh,
         filter_order: params.filterOrder,
+        detrend_enabled: params.detrendEnabled,
+        detrend_window_ms: params.detrendWindowMs,
         min_iei_ms: params.minIeiMs,
         baseline_search_ms: params.baselineSearchMs,
         avg_baseline_ms: params.avgBaselineMs,
@@ -3644,6 +3676,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         amplitude_min_abs: params.amplitudeMinAbs,
         amplitude_max_abs: params.amplitudeMaxAbs,
         auc_min_abs: params.aucMinAbs,
+        rise_max_ms: params.riseMaxMs,
+        decay_max_ms: params.decayMaxMs,
+        fwhm_max_ms: params.fwhmMaxMs,
         manual_added_times: addedTimes,
         manual_removed_times: removedTimes,
         return_detection_measure: params.showDetectionMeasure
@@ -3652,12 +3687,26 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       if (params.method === 'template_correlation' || params.method === 'template_deconvolution') {
         if (!template) throw new Error('Template methods require a selected template')
+        // Primary template (preserved for single-template compat).
         body.template = {
           b0: template.b0,
           b1: template.b1,
           tau_rise_ms: template.tauRiseMs,
           tau_decay_ms: template.tauDecayMs,
           width_ms: template.widthMs,
+        }
+        // Multi-template: resolve additional IDs from the library and
+        // send the full list. Backend prefers this when present.
+        const { eventsTemplates } = get()
+        const addl = (params.additionalTemplateIds ?? [])
+          .map((id) => eventsTemplates.entries[id])
+          .filter((t): t is EventsTemplate => !!t)
+        if (addl.length > 0) {
+          body.templates = [template, ...addl].map((t) => ({
+            b0: t.b0, b1: t.b1,
+            tau_rise_ms: t.tauRiseMs, tau_decay_ms: t.tauDecayMs,
+            width_ms: t.widthMs,
+          }))
         }
         body.cutoff = params.method === 'template_correlation'
           ? params.correlationCutoff
@@ -3706,6 +3755,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         halfWidthMs: e.half_width_ms == null ? null : Number(e.half_width_ms),
         auc: e.auc == null ? null : Number(e.auc),
         decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
+        decayTauMs: e.decay_tau_ms == null ? null : Number(e.decay_tau_ms),
         manual: Boolean(e.manual),
       }))
 
@@ -3905,26 +3955,84 @@ export const useAppStore = create<AppState>((set, get) => ({
     const key = `${group}:${series}`
     const entry = get().eventsAnalyses[key]
     if (!entry) return
-    const nextAdded = [...entry.manualEdits.addedTimes, timeS]
-    // Also clean up any "removed" entry at the same time — user may
+    // Clean up any pending "removed" entry at the same time — user may
     // have removed then changed their mind.
+    const nextAdded = [...entry.manualEdits.addedTimes, timeS]
     const nextRemoved = entry.manualEdits.removedTimes.filter(
       (t) => Math.abs(t - timeS) > 0.001,
     )
+
+    // Fast path: ask the backend to snap + measure ONLY this one
+    // event, then splice it into the existing results. Avoids the
+    // seconds-long full re-detection on every manual click.
+    const { backendUrl } = get()
+    if (!backendUrl) return
+    let newRow: EventRow | null = null
+    try {
+      const p = entry.params
+      const resp = await fetch(`${backendUrl}/api/events/add_manual`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group, series, sweep: entry.sweep, trace: entry.channel,
+          click_time_s: timeS,
+          direction: p.peakDirection,
+          baseline_search_ms: p.baselineSearchMs,
+          avg_baseline_ms: p.avgBaselineMs,
+          avg_peak_ms: p.avgPeakMs,
+          rise_low_pct: p.riseLowPct,
+          rise_high_pct: p.riseHighPct,
+          decay_pct: p.decayPct,
+          decay_search_ms: p.decaySearchMs,
+          filter_enabled: p.filterEnabled,
+          filter_type: p.filterType,
+          filter_low: p.filterLow,
+          filter_high: p.filterHigh,
+          filter_order: p.filterOrder,
+        }),
+      })
+      if (resp.ok) {
+        const d = await resp.json()
+        const e = d.event
+        newRow = {
+          sweep: Number(e.sweep ?? entry.sweep),
+          peakIdx: Number(e.peak_idx ?? 0),
+          peakTimeS: Number(e.peak_time_s ?? 0),
+          peakVal: Number(e.peak_val ?? 0),
+          footIdx: Number(e.foot_idx ?? 0),
+          footTimeS: Number(e.foot_time_s ?? 0),
+          baselineVal: Number(e.baseline_val ?? 0),
+          amplitude: Number(e.amplitude ?? 0),
+          riseTimeMs: e.rise_time_ms == null ? null : Number(e.rise_time_ms),
+          decayTimeMs: e.decay_time_ms == null ? null : Number(e.decay_time_ms),
+          halfWidthMs: e.half_width_ms == null ? null : Number(e.half_width_ms),
+          auc: e.auc == null ? null : Number(e.auc),
+          decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
+          decayTauMs: e.decay_tau_ms == null ? null : Number(e.decay_tau_ms),
+          manual: true,
+        }
+      }
+    } catch {
+      // Network error — fall through to just recording the addedTime
+      // without measured kinetics. The next full re-run will pick it up.
+    }
+
+    // Splice the new row into the existing events list (sorted by
+    // peak time) and drop any auto-detected peak at the same time.
+    const prunedEvents = newRow
+      ? entry.events.filter((ev) => Math.abs(ev.peakTimeS - newRow!.peakTimeS) > 0.001)
+      : entry.events
+    const insertedEvents = newRow
+      ? [...prunedEvents, newRow].sort((a, b) => a.peakTimeS - b.peakTimeS)
+      : prunedEvents
+
     const updated: EventsData = {
       ...entry,
+      events: insertedEvents,
       manualEdits: { addedTimes: nextAdded, removedTimes: nextRemoved },
     }
     set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
-    // Re-run detection so the backend snaps the added time to the
-    // local extremum and computes kinetics for it.
-    const { runEvents, eventsTemplates } = get()
-    const template = entry.params.templateId
-      ? eventsTemplates.entries[entry.params.templateId] ?? null
-      : (eventsTemplates.selectedId
-          ? eventsTemplates.entries[eventsTemplates.selectedId] ?? null
-          : null)
-    await runEvents(group, series, entry.channel, entry.sweep, entry.params, template)
+    _broadcastEvents(get().eventsAnalyses)
   },
 
   removeEvent: async (group, series, idx) => {
@@ -3941,18 +4049,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     } else {
       nextRemoved = [...nextRemoved, target.peakTimeS]
     }
+    // Fast path: drop the row locally. A full re-run isn't needed —
+    // removal is a pure subtraction. The `manualEdits.removedTimes`
+    // list persists the decision so the next explicit "Run detection"
+    // re-applies it.
+    const nextEvents = entry.events.filter((_, i) => i !== idx)
+    const nextSelected = entry.selectedIdx == null
+      ? null
+      : entry.selectedIdx === idx
+        ? null
+        : entry.selectedIdx > idx
+          ? entry.selectedIdx - 1
+          : entry.selectedIdx
     const updated: EventsData = {
       ...entry,
+      events: nextEvents,
+      selectedIdx: nextSelected,
       manualEdits: { addedTimes: nextAdded, removedTimes: nextRemoved },
     }
     set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
-    const { runEvents, eventsTemplates } = get()
-    const template = entry.params.templateId
-      ? eventsTemplates.entries[entry.params.templateId] ?? null
-      : (eventsTemplates.selectedId
-          ? eventsTemplates.entries[eventsTemplates.selectedId] ?? null
-          : null)
-    await runEvents(group, series, entry.channel, entry.sweep, entry.params, template)
+    _broadcastEvents(get().eventsAnalyses)
   },
 
   saveEventsTemplate: (template) => {

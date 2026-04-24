@@ -101,9 +101,18 @@ export function EventsTemplateGeneratorWindow({
   // Viewport nav.
   const [viewport, setViewport] = useState<Viewport>({ tStart: 0, tEnd: 10 })
   const [sweepDurationS, setSweepDurationS] = useState(0)
+  // Once the viewport has been set explicitly (by session handoff from
+  // the main window, or by the user navigating in-generator), stop
+  // auto-resetting it when the sweep changes. Otherwise the default
+  // "0..10 s" would clobber the main window's viewport the instant the
+  // generator's trace fetch completes and sweepDurationS updates.
+  const viewportExplicitlySetRef = useRef(false)
   useEffect(() => {
-    setViewport({ tStart: 0, tEnd: sweepDurationS > 0 ? Math.min(10, sweepDurationS) : 10 })
-  }, [group, series, sweep, sweepDurationS])
+    if (viewportExplicitlySetRef.current) return
+    if (sweepDurationS <= 0) return
+    setViewport({ tStart: 0, tEnd: Math.min(10, sweepDurationS) })
+    viewportExplicitlySetRef.current = true
+  }, [sweepDurationS])
   const shiftViewport = useCallback((factor: number) => {
     setViewport((v) => shiftViewportBy(v, sweepDurationS, factor))
   }, [sweepDurationS])
@@ -182,6 +191,10 @@ export function EventsTemplateGeneratorWindow({
     if (typeof s.sweep === 'number') setSweep(s.sweep)
     if (s.viewport && typeof s.viewport.tStart === 'number'
         && typeof s.viewport.tEnd === 'number') {
+      // Mark BEFORE setState so the default-viewport effect (which
+      // fires on sweepDurationS loading after the trace fetch) sees
+      // the flag set and doesn't override us.
+      viewportExplicitlySetRef.current = true
       setViewport({ tStart: s.viewport.tStart, tEnd: s.viewport.tEnd })
     }
     if (s.filter && typeof s.filter === 'object') {
@@ -220,11 +233,47 @@ export function EventsTemplateGeneratorWindow({
   const [saveName, setSaveName] = useState('')
   const [err, setErr] = useState<string | null>(null)
 
-  /** Fit biexponential to the cursor region and IMMEDIATELY update
-   *  the active template's coefficients. Single black curve on the
-   *  viewer; no intermediate yellow/orange overlay to confuse the
-   *  user. Follow-up: they can tweak with sliders, or Save As to
-   *  freeze a copy under a new name. */
+  /** Working coefficients — the generator's draft / preview state.
+   *  Edits via sliders and "Fit biexponential" update this local
+   *  state ONLY. Committing to the library is explicit: either
+   *  "Apply to existing" (overwrites the selected template) or
+   *  "Save as new" (creates a copy). Matches EE's Generate-Template
+   *  flow where tweaks don't persist until the user presses Apply. */
+  type PreviewCoeffs = {
+    b0: number; b1: number
+    tauRiseMs: number; tauDecayMs: number
+    widthMs: number
+    direction: 'positive' | 'negative'
+  }
+  const [preview, setPreview] = useState<PreviewCoeffs | null>(null)
+  // Reset preview to the active template's coefficients whenever the
+  // library selection changes — the user is now editing a fresh copy
+  // of that entry, any pending tweaks on the previous one are dropped.
+  useEffect(() => {
+    if (!activeTemplate) { setPreview(null); return }
+    setPreview({
+      b0: activeTemplate.b0, b1: activeTemplate.b1,
+      tauRiseMs: activeTemplate.tauRiseMs, tauDecayMs: activeTemplate.tauDecayMs,
+      widthMs: activeTemplate.widthMs,
+      direction: activeTemplate.direction,
+    })
+  }, [activeTemplate?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** True when the preview differs from the library template (i.e.
+   *  there are unsaved edits). Drives the "Apply to existing" button
+   *  enabled state + the "· modified" indicator. */
+  const isDirty = !!(preview && activeTemplate && (
+    preview.b0 !== activeTemplate.b0 ||
+    preview.b1 !== activeTemplate.b1 ||
+    preview.tauRiseMs !== activeTemplate.tauRiseMs ||
+    preview.tauDecayMs !== activeTemplate.tauDecayMs ||
+    preview.widthMs !== activeTemplate.widthMs ||
+    preview.direction !== activeTemplate.direction
+  ))
+
+  /** Fit biexponential to the cursor region. Updates the PREVIEW
+   *  coefficients only — user must click "Apply to existing" or
+   *  "Save as new" to commit. */
   const onFit = async () => {
     if (cursors.baselineEnd <= cursors.baselineStart) {
       setErr('Place the cursor band over a clean event first (use "Cursors to view").')
@@ -241,17 +290,16 @@ export function EventsTemplateGeneratorWindow({
       )
       const effectiveDir: 'positive' | 'negative' =
         direction === 'auto' ? (r.b1 < 0 ? 'negative' : 'positive') : direction
-      if (activeTemplate) {
-        saveEventsTemplate({
-          ...activeTemplate,
-          b0: r.b0, b1: r.b1,
-          tauRiseMs: r.tauRiseMs, tauDecayMs: r.tauDecayMs,
-          direction: effectiveDir,
-        })
-      } else {
-        // No active template — create one from the fit as a sensible
-        // starting point; user will typically Save As with a meaningful
-        // name right after.
+      setPreview({
+        b0: r.b0, b1: r.b1,
+        tauRiseMs: r.tauRiseMs, tauDecayMs: r.tauDecayMs,
+        widthMs: activeTemplate?.widthMs ?? Math.max(10, 6 * r.tauDecayMs),
+        direction: effectiveDir,
+      })
+      // No active template yet — create one on-the-fly so there's
+      // something to apply to. The preview already holds the fit
+      // values; apply-to-existing commits them.
+      if (!activeTemplate) {
         const id = `${Date.now().toString(36)}-gen`
         saveEventsTemplate({
           id, name: 'Fitted template',
@@ -269,13 +317,33 @@ export function EventsTemplateGeneratorWindow({
     }
   }
 
-  /** Save a COPY of the current template under a new name. The
-   *  original stays untouched; the new copy becomes the selected
-   *  template. */
+  /** Apply preview coefficients to the currently-selected library
+   *  template. Overwrites its (b0, b1, τ_rise, τ_decay, width,
+   *  direction) in place. Propagates through the shared store so the
+   *  main events window picks up the new template on its next
+   *  detection run. */
+  const onApplyToExisting = () => {
+    if (!activeTemplate || !preview) return
+    saveEventsTemplate({
+      ...activeTemplate,
+      b0: preview.b0, b1: preview.b1,
+      tauRiseMs: preview.tauRiseMs, tauDecayMs: preview.tauDecayMs,
+      widthMs: preview.widthMs, direction: preview.direction,
+    })
+  }
+
+  /** Save a COPY of the preview under a new name. Leaves the
+   *  originally-selected template untouched; the new copy becomes
+   *  the selected template. */
   const onSaveAs = (name: string) => {
-    if (!activeTemplate || !name.trim()) return
+    if (!preview || !name.trim()) return
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    saveEventsTemplate({ ...activeTemplate, id, name: name.trim() })
+    saveEventsTemplate({
+      id, name: name.trim(),
+      b0: preview.b0, b1: preview.b1,
+      tauRiseMs: preview.tauRiseMs, tauDecayMs: preview.tauDecayMs,
+      widthMs: preview.widthMs, direction: preview.direction,
+    })
     selectEventsTemplate(id)
     setSaveName('')
   }
@@ -422,41 +490,75 @@ export function EventsTemplateGeneratorWindow({
               coefficient, same as EE's Generate Template. The
               user can edit BEFORE or AFTER fitting. Values outside
               the slider range can still be typed into the input. */}
-          {activeTemplate && (
+          {activeTemplate && preview && (
             <div style={{
               padding: 8, border: '1px solid var(--border)', borderRadius: 4,
               background: 'var(--bg-primary)', display: 'flex', flexDirection: 'column', gap: 8,
               fontSize: 'var(--font-size-label)',
             }}>
-              <span style={{ fontWeight: 600, color: 'var(--text-muted)' }}>
+              <span style={{
+                fontWeight: 600, color: 'var(--text-muted)',
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
                 Coefficients
+                {isDirty && (
+                  <span style={{
+                    fontSize: 10, color: '#ffb74d',
+                    fontStyle: 'italic', fontWeight: 400,
+                  }}>· modified</span>
+                )}
               </span>
               <CoefficientStepper
-                label="b0" value={activeTemplate.b0} step={0.1}
-                onChange={(v) => saveEventsTemplate({ ...activeTemplate, b0: v })}
+                label="b0" value={preview.b0} step={0.1}
+                onChange={(v) => setPreview({ ...preview, b0: v })}
               />
               <CoefficientStepper
-                label="b1" value={activeTemplate.b1} step={1}
-                onChange={(v) => saveEventsTemplate({ ...activeTemplate, b1: v })}
+                label="b1" value={preview.b1} step={1}
+                onChange={(v) => setPreview({ ...preview, b1: v })}
               />
               <CoefficientStepper
-                label="τ rise" value={activeTemplate.tauRiseMs} step={0.05}
+                label="τ rise" value={preview.tauRiseMs} step={0.05}
                 min={0.05} max={50}
-                onChange={(v) => saveEventsTemplate({ ...activeTemplate, tauRiseMs: v })}
+                onChange={(v) => setPreview({ ...preview, tauRiseMs: v })}
                 unit="ms"
               />
               <CoefficientStepper
-                label="τ decay" value={activeTemplate.tauDecayMs} step={0.5}
+                label="τ decay" value={preview.tauDecayMs} step={0.5}
                 min={0.1} max={500}
-                onChange={(v) => saveEventsTemplate({ ...activeTemplate, tauDecayMs: v })}
+                onChange={(v) => setPreview({ ...preview, tauDecayMs: v })}
                 unit="ms"
               />
               <CoefficientStepper
-                label="width" value={activeTemplate.widthMs} step={1}
+                label="width" value={preview.widthMs} step={1}
                 min={5} max={500}
-                onChange={(v) => saveEventsTemplate({ ...activeTemplate, widthMs: v })}
+                onChange={(v) => setPreview({ ...preview, widthMs: v })}
                 unit="ms"
               />
+              <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                <button className="btn btn-primary"
+                  disabled={!isDirty}
+                  onClick={onApplyToExisting}
+                  style={{ flex: 1, padding: '4px 0' }}
+                  title="Overwrite the selected library template with these coefficients">
+                  Apply to existing
+                </button>
+                <button className="btn"
+                  disabled={!isDirty}
+                  onClick={() => {
+                    if (!activeTemplate) return
+                    setPreview({
+                      b0: activeTemplate.b0, b1: activeTemplate.b1,
+                      tauRiseMs: activeTemplate.tauRiseMs,
+                      tauDecayMs: activeTemplate.tauDecayMs,
+                      widthMs: activeTemplate.widthMs,
+                      direction: activeTemplate.direction,
+                    })
+                  }}
+                  style={{ padding: '4px 10px' }}
+                  title="Discard pending edits; reset to the library template">
+                  Revert
+                </button>
+              </div>
             </div>
           )}
 
@@ -594,7 +696,16 @@ export function EventsTemplateGeneratorWindow({
             shiftViewport={shiftViewport} goHome={goHome} goEnd={goEnd}
             filterEnabled={filterEnabled} filterType={filterType}
             filterLow={filterLow} filterHigh={filterHigh} filterOrder={filterOrder}
-            activeTemplate={activeTemplate}
+            // Black curve on the viewer renders from PREVIEW
+            // coefficients so slider tweaks update in real time
+            // without committing to the library until the user
+            // presses Apply / Save As.
+            activeTemplate={activeTemplate && preview ? {
+              ...activeTemplate,
+              b0: preview.b0, b1: preview.b1,
+              tauRiseMs: preview.tauRiseMs, tauDecayMs: preview.tauDecayMs,
+              widthMs: preview.widthMs, direction: preview.direction,
+            } : activeTemplate}
             theme={theme} fontSize={fontSize}
           />
         </div>

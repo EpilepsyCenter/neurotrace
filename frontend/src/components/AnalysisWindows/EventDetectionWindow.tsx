@@ -169,7 +169,9 @@ export function EventDetectionWindow({
   // Bottom-pane tab — "table" (events results), "overlay" (all events
   // aligned on peak/foot), or "histogram" (amplitude distribution).
   // Matches EE's tab row below the viewer.
-  const [bottomTab, setBottomTab] = useState<'table' | 'overlay' | 'histogram'>('table')
+  const [bottomTab, setBottomTab] = useState<
+    'table' | 'browser' | 'overlay' | 'histogram' | 'rate'
+  >('table')
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -745,7 +747,7 @@ export function EventDetectionWindow({
               flexShrink: 0,
               padding: '2px 2px 0 2px',
             }}>
-              {(['table', 'overlay', 'histogram'] as const).map((k) => (
+              {(['table', 'browser', 'overlay', 'histogram', 'rate'] as const).map((k) => (
                 <button key={k} className="btn"
                   onClick={() => setBottomTab(k)}
                   style={{
@@ -757,7 +759,11 @@ export function EventDetectionWindow({
                       ? '2px solid var(--accent, #64b5f6)' : '2px solid transparent',
                     borderRadius: '3px 3px 0 0',
                   }}>
-                  {k === 'table' ? 'Results' : k === 'overlay' ? 'Overlay' : 'Histogram'}
+                  {k === 'table' ? 'Results'
+                    : k === 'browser' ? 'Browser'
+                    : k === 'overlay' ? 'Overlay'
+                    : k === 'histogram' ? 'Histogram'
+                    : 'Rate'}
                 </button>
               ))}
             </div>
@@ -771,6 +777,25 @@ export function EventDetectionWindow({
                   />
                 </div>
               )}
+              {bottomTab === 'browser' && (
+                <EventBrowser
+                  backendUrl={backendUrl}
+                  entry={entry}
+                  heightSignal={plotHeight}
+                  onSelect={(idx) => selectEvent(group, series, idx)}
+                  onDiscard={(idx) => onDiscardEvent(idx)}
+                  onZoomTo={(timeS) => {
+                    // Centre a 50 ms window on the selected event's
+                    // peak in the main viewer — user's "show me that
+                    // one" shortcut. Clamps to sweep bounds.
+                    const w = 0.050
+                    const start = Math.max(0, timeS - w / 2)
+                    const end = Math.min(sweepDurationS || (timeS + w),
+                      timeS + w / 2)
+                    setViewport({ tStart: start, tEnd: end })
+                  }}
+                />
+              )}
               {bottomTab === 'overlay' && (
                 <AllEventsOverlay
                   backendUrl={backendUrl}
@@ -780,6 +805,12 @@ export function EventDetectionWindow({
               )}
               {bottomTab === 'histogram' && (
                 <AmplitudeHistogram
+                  entry={entry}
+                  heightSignal={plotHeight}
+                />
+              )}
+              {bottomTab === 'rate' && (
+                <EventRatePlot
                   entry={entry}
                   heightSignal={plotHeight}
                 />
@@ -2456,6 +2487,459 @@ function AmplitudeHistogram({
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)',
       }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Event rate plot — histogram of event peak times in N bins across
+// the sweep duration, reported in Hz. Useful for detecting wash-in /
+// wash-out effects over a recording. Bin width is user-adjustable.
+// ---------------------------------------------------------------------------
+
+function EventRatePlot({
+  entry, heightSignal,
+}: {
+  entry: EventsData | undefined
+  heightSignal: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const [binS, setBinS] = useState(5)
+
+  const stats = useMemo(() => {
+    if (!entry || entry.events.length === 0 || entry.sweepLengthS <= 0) return null
+    const T = entry.sweepLengthS
+    const n = Math.max(1, Math.ceil(T / binS))
+    const counts = new Array<number>(n).fill(0)
+    for (const e of entry.events) {
+      const k = Math.max(0, Math.min(n - 1, Math.floor(e.peakTimeS / binS)))
+      counts[k]++
+    }
+    const centers = new Array<number>(n)
+    const rates = new Array<number>(n)
+    for (let i = 0; i < n; i++) {
+      centers[i] = (i + 0.5) * binS
+      rates[i] = counts[i] / binS  // Hz
+    }
+    return { centers, rates }
+  }, [entry, binS])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!stats) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: {
+          x: { time: false },
+          y: { range: (_u, _dmin, dmax) => [0, Math.max(1, dmax * 1.1)] },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: 'Time (s)', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 50, label: 'Rate (Hz)',
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: [{}, { stroke: cssVar('--trace-color-1'), width: 1.5 }],
+        hooks: {
+          draw: [(u) => {
+            // Bars: cleaner PSTH look than a line.
+            const ctx = u.ctx
+            const bw = stats.centers.length > 1
+              ? stats.centers[1] - stats.centers[0] : binS
+            ctx.save()
+            ctx.fillStyle = 'rgba(100,181,246,0.35)'
+            for (let i = 0; i < stats.centers.length; i++) {
+              const x0 = u.valToPos(stats.centers[i] - bw / 2, 'x', true)
+              const x1 = u.valToPos(stats.centers[i] + bw / 2, 'x', true)
+              const y0 = u.valToPos(0, 'y', true)
+              const y1 = u.valToPos(stats.rates[i], 'y', true)
+              ctx.fillRect(Math.min(x0, x1), y1, Math.abs(x1 - x0), y0 - y1)
+            }
+            ctx.restore()
+          }],
+        },
+      }
+      const payload: uPlot.AlignedData = [stats.centers, stats.rates]
+      plotRef.current = new uPlot(opts, payload, container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [stats, binS])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      gap: 6, padding: 6, minHeight: 0,
+    }}>
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+      }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Bin (s)</span>
+          <NumInput value={binS} step={1} min={0.5} onChange={setBinS} />
+        </label>
+        {stats && (
+          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            {stats.centers.length} bins
+          </span>
+        )}
+      </div>
+      <div ref={containerRef} style={{
+        flex: 1, minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+      }}>
+        {(!entry || entry.events.length === 0) && (
+          <div style={{
+            padding: 16, textAlign: 'center',
+            color: 'var(--text-muted)', fontStyle: 'italic',
+            fontSize: 'var(--font-size-label)',
+          }}>
+            Run detection to see the event rate vs time.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Event-by-event browser — single selected event, prev/next nav with
+// keyboard shortcuts, per-event kinetics card, zoomed mini-plot showing
+// the selected event with foot/peak/decay markers, and buttons to
+// discard / zoom-to in the main viewer.
+// ---------------------------------------------------------------------------
+
+function EventBrowser({
+  backendUrl, entry, heightSignal,
+  onSelect, onDiscard, onZoomTo,
+}: {
+  backendUrl: string
+  entry: EventsData | undefined
+  heightSignal: number
+  onSelect: (idx: number) => void
+  onDiscard: (idx: number) => void
+  onZoomTo: (timeS: number) => void
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const [winMs, setWinMs] = useState(60)   // total window around peak
+  const [preMs, setPreMs] = useState(10)
+
+  const idx = entry?.selectedIdx ?? (entry && entry.events.length > 0 ? 0 : null)
+  const ev: EventRow | null = entry && idx != null && idx >= 0 && idx < entry.events.length
+    ? entry.events[idx]
+    : null
+
+  // Keyboard ← / → advance selection. Attach to window so table/tab
+  // focus isn't required. Ignore when typing in inputs.
+  useEffect(() => {
+    if (!entry) return
+    const handler = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT'
+                || t.tagName === 'TEXTAREA')) return
+      if (e.key === 'ArrowRight') {
+        const cur = entry.selectedIdx ?? -1
+        const next = Math.min(entry.events.length - 1, cur + 1)
+        if (next !== cur) onSelect(next)
+        e.preventDefault()
+      } else if (e.key === 'ArrowLeft') {
+        const cur = entry.selectedIdx ?? 0
+        const next = Math.max(0, cur - 1)
+        if (next !== cur) onSelect(next)
+        e.preventDefault()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [entry, onSelect])
+
+  // Fetch the single event's window via /overlay. Re-fetch on
+  // selection / window change.
+  const [winData, setWinData] = useState<{
+    time: number[]; values: (number | null)[]
+  } | null>(null)
+  useEffect(() => {
+    if (!backendUrl || !entry || !ev) { setWinData(null); return }
+    const after = Math.max(1, winMs - preMs)
+    fetch(`${backendUrl}/api/events/overlay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group: entry.group, series: entry.series,
+        sweep: entry.sweep, trace: entry.channel,
+        events: [{
+          peak_idx: ev.peakIdx, foot_idx: ev.footIdx,
+          baseline_val: ev.baselineVal,
+        }],
+        align: 'peak',
+        window_before_ms: preMs,
+        window_after_ms: after,
+        baseline_subtract: false,   // keep absolute units for markers
+      }),
+    }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then((d) => {
+        const row = (d.traces?.[0] ?? []) as (number | null)[]
+        setWinData({
+          time: (d.time_s ?? []).map((x: any) => Number(x)),
+          values: row.map((x) => x == null ? null : Number(x)),
+        })
+      })
+      .catch(() => setWinData(null))
+  }, [backendUrl, entry, ev, preMs, winMs])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!winData || winData.time.length === 0 || !ev || !entry) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      // Compute marker offsets relative to peak in seconds (because
+      // the window's x-axis is centred on peak = 0).
+      const sr = entry.samplingRate || 1
+      const footOff = (ev.footIdx - ev.peakIdx) / sr
+      const decayOff = ev.decayEndpointIdx != null
+        ? (ev.decayEndpointIdx - ev.peakIdx) / sr : null
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: {
+          x: { time: false },
+          y: { auto: true },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            values: (_u, vals) => vals.map((v) => (v * 1000).toFixed(0)),
+            label: 'Time (ms, 0 = peak)', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 55,
+            label: entry.units,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: [{}, {
+          stroke: cssVar('--trace-color-1'), width: 1.5, spanGaps: false,
+        }],
+        hooks: {
+          draw: [(u) => {
+            const ctx = u.ctx
+            const dpr = devicePixelRatio || 1
+            // Baseline line (gray, horizontal at baseline_val).
+            const byPos = u.valToPos(ev.baselineVal, 'y', true)
+            ctx.save()
+            ctx.strokeStyle = 'rgba(158,158,158,0.7)'
+            ctx.setLineDash([4 * dpr, 3 * dpr])
+            ctx.lineWidth = 1 * dpr
+            ctx.beginPath()
+            ctx.moveTo(u.bbox.left, byPos)
+            ctx.lineTo(u.bbox.left + u.bbox.width, byPos)
+            ctx.stroke()
+            ctx.setLineDash([])
+            // Foot dot — gray
+            const fx = u.valToPos(footOff, 'x', true)
+            ctx.fillStyle = '#9e9e9e'
+            ctx.beginPath()
+            ctx.arc(fx, byPos, 3 * dpr, 0, 2 * Math.PI)
+            ctx.fill()
+            // Peak dot — red, at (0, peak_val)
+            const px = u.valToPos(0, 'x', true)
+            const py = u.valToPos(ev.peakVal, 'y', true)
+            ctx.fillStyle = '#e57373'
+            ctx.beginPath()
+            ctx.arc(px, py, 4 * dpr, 0, 2 * Math.PI)
+            ctx.fill()
+            // Decay endpoint — purple
+            if (decayOff != null) {
+              const dx = u.valToPos(decayOff, 'x', true)
+              ctx.fillStyle = '#ab47bc'
+              ctx.beginPath()
+              ctx.arc(dx, byPos, 3 * dpr, 0, 2 * Math.PI)
+              ctx.fill()
+            }
+            ctx.restore()
+          }],
+        },
+      }
+      const payload: uPlot.AlignedData = [
+        winData.time as any, winData.values as any,
+      ]
+      plotRef.current = new uPlot(opts, payload, container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [winData, ev, entry])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  if (!entry || entry.events.length === 0) {
+    return (
+      <div style={{
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        Run detection to browse events one by one.
+      </div>
+    )
+  }
+
+  const unit = entry.units
+  const cur = (idx ?? 0) + 1
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      gap: 6, padding: 6, minHeight: 0,
+    }}>
+      {/* Top control strip — prev/next, counter, zoom-to, discard. */}
+      <div style={{
+        display: 'flex', gap: 6, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+      }}>
+        <button className="btn" onClick={() => onSelect(Math.max(0, (idx ?? 0) - 1))}
+          disabled={(idx ?? 0) <= 0}
+          style={{ padding: '2px 8px' }} title="Previous event (←)">← Prev</button>
+        <span style={{
+          fontFamily: 'var(--font-mono)', minWidth: 60, textAlign: 'center',
+        }}>{cur} / {entry.events.length}</span>
+        <button className="btn" onClick={() => onSelect(Math.min(entry.events.length - 1, (idx ?? 0) + 1))}
+          disabled={(idx ?? 0) >= entry.events.length - 1}
+          style={{ padding: '2px 8px' }} title="Next event (→)">Next →</button>
+        <span style={{ flex: 1 }} />
+        {ev && (
+          <button className="btn" onClick={() => onZoomTo(ev.peakTimeS)}
+            style={{ padding: '2px 8px' }}
+            title="Center the main viewer on this event">
+            Zoom to
+          </button>
+        )}
+        {ev && (
+          <button className="btn" onClick={() => idx != null && onDiscard(idx)}
+            style={{ padding: '2px 8px' }}
+            title="Remove this event from the results">
+            Discard
+          </button>
+        )}
+      </div>
+
+      {/* Kinetics card + mini plot side-by-side. */}
+      <div style={{
+        display: 'flex', gap: 8, flex: 1, minHeight: 0,
+      }}>
+        <div style={{
+          width: 180, flexShrink: 0,
+          padding: 6, border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)',
+          fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)',
+          lineHeight: 1.7, overflow: 'auto',
+        }}>
+          {ev ? (
+            <>
+              <div>t<sub>peak</sub> = {ev.peakTimeS.toFixed(4)} s</div>
+              <div>amp = {ev.amplitude.toFixed(2)} {unit}</div>
+              <div>baseline = {ev.baselineVal.toFixed(2)} {unit}</div>
+              <div>peak = {ev.peakVal.toFixed(2)} {unit}</div>
+              <div style={{
+                marginTop: 4, paddingTop: 4, borderTop: '1px solid var(--border)',
+              }} />
+              <div>rise = {ev.riseTimeMs != null ? ev.riseTimeMs.toFixed(2) : '—'} ms</div>
+              <div>decay = {ev.decayTimeMs != null ? ev.decayTimeMs.toFixed(2) : '—'} ms</div>
+              <div>τ decay = {ev.decayTauMs != null ? ev.decayTauMs.toFixed(2) : '—'} ms</div>
+              <div>FWHM = {ev.halfWidthMs != null ? ev.halfWidthMs.toFixed(2) : '—'} ms</div>
+              <div>AUC = {ev.auc != null ? ev.auc.toFixed(3) : '—'} {unit}·s</div>
+              <div style={{
+                marginTop: 4, color: ev.manual ? '#ffb74d' : 'var(--text-muted)',
+                fontStyle: 'italic',
+              }}>{ev.manual ? 'manual' : 'auto-detected'}</div>
+            </>
+          ) : <span style={{ color: 'var(--text-muted)' }}>No event selected.</span>}
+        </div>
+        <div style={{
+          flex: 1, minWidth: 0,
+          display: 'flex', flexDirection: 'column', gap: 4,
+        }}>
+          <div style={{
+            display: 'flex', gap: 8, alignItems: 'center',
+            fontSize: 'var(--font-size-label)', flexShrink: 0,
+          }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ color: 'var(--text-muted)' }}>Before (ms)</span>
+              <NumInput value={preMs} step={1} min={1}
+                onChange={(v) => setPreMs(Math.max(1, Math.min(winMs - 1, v)))} />
+            </label>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ color: 'var(--text-muted)' }}>Total (ms)</span>
+              <NumInput value={winMs} step={5} min={10}
+                onChange={(v) => setWinMs(Math.max(preMs + 1, v))} />
+            </label>
+          </div>
+          <div ref={containerRef} style={{
+            flex: 1, minHeight: 0,
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-primary)',
+          }} />
+        </div>
+      </div>
     </div>
   )
 }

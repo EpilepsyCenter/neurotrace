@@ -149,16 +149,17 @@ Tree view, collapsible by analysis type:
 
 ```
 ▸ Events
-    ☑ rate_hz
-    ☑ amp_mean
-    ☐ amp_sd
-    ☑ rise_mean_ms
+    ☑ rate_hz           [role: events_baseline ▾]
+    ☑ amp_mean          [role: events_baseline ▾]
+    ☐ amp_sd            [role: <any> ▾]
+    ☑ rise_mean_ms      [role: events_baseline ▾]
     ...
 ▸ AP
-    ☐ rheobase_pa
+    ☑ rheobase_pa       [role: <any> ▾]
+    ☑ threshold_mean_mv [role: <any> ▾]
     ...
 ▸ Resistance
-    ☑ rs_mean
+    ☑ rs_mean           [role: <any> ▾]
     ...
 ```
 
@@ -167,6 +168,46 @@ For each checked metric, a **role filter** dropdown next to it:
 - `<any>` — pull from every series of that analysis type
 - `events_baseline`, `events_drug`, … — populated from the role tags
   seen across selected cells
+
+#### Default selection & persistence
+
+**First-run default = curated preset.** Only the metrics most
+commonly reported in figures are pre-checked. Everything else is
+off, visible, and one click away. Rationale: 90 % of users export
+the same handful of metrics every time; a curated preset skips the
+"check all / uncheck half" ritual. Unusual metrics are still
+reachable — they just require an intentional action.
+
+Preset per analysis type (initial values, tweakable based on
+feedback):
+
+| Analysis | Pre-checked metrics |
+|---|---|
+| **Events** | `rate_hz`, `amp_mean`, `rise_mean_ms`, `decay_mean_ms`, `tau_decay_mean_ms`, `n_events` |
+| **AP** | `rheobase_pa`, `threshold_mean_mv`, `ap_amp_mean_mv`, `fwhm_mean_ms`, `fi_slope_hz_per_pa`, `max_rate_hz` |
+| **I-V** | `slope_near_rest`, `input_resistance_mohm`, `reversal_potential_mv` |
+| **Resistance** | `rs_mean`, `rin_mean`, `cm_mean` |
+| **Bursts** | `burst_count`, `rate_per_min`, `duration_mean_ms`, `peak_mean` |
+| **fPSP** — LTP | `baseline_slope_mean`, `post_tetanus_slope_mean`, `pct_potentiation_at_30min` |
+| **fPSP** — PPR | `ratio_mean`, `isi_ms` |
+| **fPSP** — I-O | whole curve (XY) — not a scalar, handled separately |
+
+**Persistence.** After the first export, the user's actual
+selection (which boxes + which role filters) is saved under
+`prefs.batchExport.metricSelection`. Next export opens with the
+same state. Changing the selection and exporting re-saves.
+
+**Reset-to-defaults button** in step 3, next to the role-filter
+master dropdown. Clears `metricSelection` back to the curated preset.
+
+#### Named presets — deferred
+
+Follow-up: "Save as preset…" lets users name a selection
+(`"mEPSC summary figure"`, `"intrinsic properties"`,
+`"LTP primary outcomes"`) and a dropdown at the top of step 3 switches
+between them. Shares the same persistence mechanic; skipped in this
+sprint but the schema of `metricSelection` is already a shape that
+scales to multiple named entries.
 
 ### Step 4 — preview + export
 
@@ -272,6 +313,9 @@ Defaults to `prism`. Lives in the export dialog's step 3.
 - **"Combine into single xlsx"** toggle — concatenates all analysis
   workbooks into one for email-a-cohort scenarios. Easy to add
   later; skip until someone asks.
+- **Named metric presets** — "Save as preset…" + a dropdown to
+  switch between `mEPSC summary`, `intrinsic properties`, etc.
+  Persistence schema already accommodates it; UI follows later.
 - `.pzfx` direct Prism-XML export
 - "Save batch config" → reusable for repeat exports
 - Summary-plot preview (mean ± SEM bar chart per metric/group)

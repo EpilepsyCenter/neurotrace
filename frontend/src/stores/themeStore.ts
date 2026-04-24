@@ -2,17 +2,24 @@ import { create } from 'zustand'
 
 export type ThemeName = 'dark' | 'light'
 
+// Telegraph-branch dropdowns — IBM Plex Sans / JetBrains Mono first so
+// they're the defaults for new installs. ``Theme default`` is a magic
+// empty-string value that tells ``applyToDOM`` to REMOVE the inline
+// property, letting the stylesheet cascade decide — useful when the
+// user wants the theme's built-in fonts without picking one manually.
 export const FONT_FAMILIES = [
+  { value: "'IBM Plex Sans', 'Inter', sans-serif", label: 'IBM Plex Sans' },
+  { value: '', label: 'Theme default' },
   { value: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", label: 'Inter' },
   { value: "'SF Pro Text', 'SF Pro', -apple-system, BlinkMacSystemFont, sans-serif", label: 'SF Pro' },
   { value: "'Helvetica Neue', Helvetica, Arial, sans-serif", label: 'Helvetica Neue' },
-  { value: "'IBM Plex Sans', 'Inter', sans-serif", label: 'IBM Plex Sans' },
   { value: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", label: 'System Default' },
 ] as const
 
 export const MONO_FONTS = [
-  { value: "'Fira Code', 'Consolas', 'SF Mono', monospace", label: 'Fira Code' },
   { value: "'JetBrains Mono', 'Consolas', monospace", label: 'JetBrains Mono' },
+  { value: '', label: 'Theme default' },
+  { value: "'Fira Code', 'Consolas', 'SF Mono', monospace", label: 'Fira Code' },
   { value: "'SF Mono', 'Menlo', 'Monaco', monospace", label: 'SF Mono' },
   { value: "'Consolas', 'Courier New', monospace", label: 'Consolas' },
 ] as const
@@ -90,12 +97,23 @@ function savePrefs(state: ThemeState) {
   }
 }
 
-/** Push current theme values to the DOM so CSS variables take effect */
+/** Push current theme values to the DOM so CSS variables take effect.
+ *  Empty-string font values REMOVE the inline property so the
+ *  stylesheet cascade (Telegraph / global.css) gets to decide — this
+ *  is how the "Theme default" entry in the font dropdowns works. */
 function applyToDOM(state: ThemeState) {
   const root = document.documentElement
   root.dataset.theme = state.theme
-  root.style.setProperty('--font-ui', state.fontFamily)
-  root.style.setProperty('--font-mono', state.monoFont)
+  if (state.fontFamily) {
+    root.style.setProperty('--font-ui', state.fontFamily)
+  } else {
+    root.style.removeProperty('--font-ui')
+  }
+  if (state.monoFont) {
+    root.style.setProperty('--font-mono', state.monoFont)
+  } else {
+    root.style.removeProperty('--font-mono')
+  }
   root.style.setProperty('--font-size-base', `${state.fontSize}px`)
   root.style.setProperty('--font-size-sm', `${state.fontSize - 1}px`)
   root.style.setProperty('--font-size-xs', `${state.fontSize - 2}px`)
@@ -104,10 +122,21 @@ function applyToDOM(state: ThemeState) {
 
 const defaults = {
   theme: 'dark' as ThemeName,
-  fontFamily: FONT_FAMILIES[0].value,
-  monoFont: MONO_FONTS[0].value,
+  // Empty string = "Theme default" — let the stylesheet decide. New
+  // installs on the Telegraph branch get IBM Plex Sans / JetBrains
+  // Mono from telegraph.css; old themes get their own defaults.
+  fontFamily: '',
+  monoFont: '',
   fontSize: 13,
 }
+
+// Legacy font-pref values that used to be the pre-Telegraph defaults.
+// Users who never opened the font picker have these literally saved —
+// we migrate them to '' ("Theme default") so the Telegraph stylesheet
+// wins instead of inline Inter / Fira Code. Explicitly-chosen
+// alternatives (SF Pro, Helvetica, etc.) are left alone.
+const LEGACY_DEFAULT_FONT_UI = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+const LEGACY_DEFAULT_FONT_MONO = "'Fira Code', 'Consolas', 'SF Mono', monospace"
 
 // Sync load for immediate store creation (prevents first-paint flash)
 const saved = loadPrefsSync()
@@ -122,11 +151,17 @@ function validateFontSize(s: unknown): number {
 }
 
 function validateFontFamily(f: unknown): string {
-  return typeof f === 'string' && f.length > 0 ? f : defaults.fontFamily
+  if (typeof f !== 'string') return defaults.fontFamily
+  // Migrate old default → "Theme default" so the Telegraph stylesheet
+  // can take over. Non-default choices stay intact.
+  if (f === LEGACY_DEFAULT_FONT_UI) return ''
+  return f
 }
 
 function validateMonoFont(f: unknown): string {
-  return typeof f === 'string' && f.length > 0 ? f : defaults.monoFont
+  if (typeof f !== 'string') return defaults.monoFont
+  if (f === LEGACY_DEFAULT_FONT_MONO) return ''
+  return f
 }
 
 export const useThemeStore = create<ThemeState>((set, get) => ({

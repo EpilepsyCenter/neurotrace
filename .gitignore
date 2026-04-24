@@ -9,7 +9,14 @@ __pycache__/
 # Build output
 dist/
 dist-electron/
-build/
+# electron-builder's intermediate dirs live under build/, but
+# build/icon.{png,icns,ico} are the source app-icon files and MUST
+# stay tracked. Can't use ``build/`` + ``!build/icon.png`` because
+# git won't re-include paths inside an excluded directory — have to
+# ignore the sub-paths directly.
+build/pyi-dist/
+build/pyi-work/
+build/electron-builder/
 backend-dist/
 *.dmg
 *.exe

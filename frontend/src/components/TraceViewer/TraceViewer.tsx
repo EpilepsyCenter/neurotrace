@@ -1806,11 +1806,38 @@ export function TraceViewer() {
               textAlign: 'center',
               color: 'var(--text-muted)',
               zIndex: 20,
+              padding: 32,
             }}
           >
-            <div>
-              <p style={{ fontSize: 'var(--font-size-base)', marginBottom: 8 }}>No trace loaded</p>
-              <p style={{ fontSize: 'var(--font-size-sm)' }}>Open a file to view electrophysiology data</p>
+            <div style={{ maxWidth: 520 }}>
+              {/* Horizontal lockup — plain <img> since the PNG sits in
+                  src/assets and Vite inlines/copies it automatically.
+                  Max-width keeps it readable on narrow plot panes;
+                  opacity softens it against the recorder's dark chrome
+                  without losing legibility. */}
+              <img
+                src={new URL('../../assets/lockup-horizontal.png', import.meta.url).href}
+                alt="NeuroTrace"
+                style={{
+                  maxWidth: '60%',
+                  height: 'auto',
+                  opacity: 0.88,
+                  marginBottom: 18,
+                }}
+              />
+              <p style={{
+                fontSize: 'var(--font-size-base)',
+                lineHeight: 1.55,
+                maxWidth: 440,
+                margin: '0 auto',
+              }}>
+                An open electrophysiology workbench. Load a HEKA DAT,
+                Axon ABF, or Neuralynx recording from the file menu, then
+                pick a group / series / sweep on the left. Cursors,
+                bursts, action potentials, fPSPs, I-V curves, and the
+                event-detection module run as live analyses on whichever
+                sweep you're looking at.
+              </p>
             </div>
           </div>
         )}

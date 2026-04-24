@@ -4,6 +4,18 @@ import { join } from 'path'
 import { createServer } from 'net'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 
+// Pin the app name BEFORE the app ready event so the macOS application
+// menu + dock both read "NeuroTrace" instead of "Electron". In packaged
+// builds electron-builder bakes ``productName`` into the bundle's
+// Info.plist, but in dev the menu bar otherwise shows "Electron".
+app.setName('NeuroTrace')
+
+// Absolute path to the app icon PNG. electron-builder auto-generates
+// the platform-native icons (icns / ico) from this PNG at package
+// time; in dev we also pass it directly to BrowserWindow so the dock
+// / taskbar / window chrome picks it up live.
+const ICON_PATH = join(__dirname, '..', 'build', 'icon.png')
+
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
 let backendPort: number = 0
@@ -119,6 +131,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 700,
     title: 'NeuroTrace',
+    icon: ICON_PATH,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -269,6 +282,7 @@ ipcMain.handle('open-analysis-window', (_event, analysisType: string) => {
     minWidth: 500,
     minHeight: 400,
     title: `NeuroTrace — ${title}`,
+    icon: ICON_PATH,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,

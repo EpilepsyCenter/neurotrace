@@ -639,6 +639,16 @@ class EventKinetics:
     # τ in milliseconds; None when the fit can't run (too few samples,
     # degenerate amplitude, or scipy convergence failure).
     decay_tau_ms: Optional[float] = None
+    # Per-event biexponential fit: ``y = b0 + b1·(1-exp(-t/τ_r))·exp(-t/τ_d)``
+    # fit to the full event window (foot → decay_endpoint). Gives a
+    # per-event τ_rise that the percent-crossing rise_time_ms can't
+    # deliver on noisy events. All four parameters are reported so
+    # the caller can validate fit quality (e.g. r² not stored yet but
+    # a follow-up can add it). None when the fit fails.
+    biexp_tau_rise_ms: Optional[float] = None
+    biexp_tau_decay_ms: Optional[float] = None
+    biexp_b0: Optional[float] = None
+    biexp_b1: Optional[float] = None
 
 
 def _find_rise_crossing(
@@ -968,6 +978,39 @@ def measure_event_kinetics(
         except (RuntimeError, ValueError):
             decay_tau_ms = None
 
+    # ---- Per-event biexponential fit (foot → endpoint) ----
+    # Uses the shared `fit_biexponential` helper, same model as the
+    # template generator. Gives us a per-event τ_rise — the
+    # percent-threshold rise_time_ms is useful for a quick-look but
+    # misbehaves on noisy events where the 10 %/90 % crossings don't
+    # reflect the real kinetics. Direction comes from the sign of the
+    # amplitude so the fit knows where to put b1.
+    biexp_tau_rise_ms: Optional[float] = None
+    biexp_tau_decay_ms: Optional[float] = None
+    biexp_b0: Optional[float] = None
+    biexp_b1: Optional[float] = None
+    if (decay_endpoint_idx is not None
+            and decay_endpoint_idx - foot_idx >= 6
+            and amplitude != 0):
+        try:
+            seg_t = np.arange(decay_endpoint_idx - foot_idx + 1,
+                              dtype=float) / sr
+            seg_v = np.asarray(values[foot_idx:decay_endpoint_idx + 1], dtype=float)
+            direction = "negative" if amplitude < 0 else "positive"
+            fit = fit_biexponential(
+                seg_t, seg_v,
+                initial_rise_ms=max(0.2, (rise_time_ms or 0.5) * 0.5),
+                initial_decay_ms=max(1.0, decay_tau_ms or
+                                     (decay_time_ms or 5.0)),
+                direction=direction,
+            )
+            biexp_b0 = fit.b0
+            biexp_b1 = fit.b1
+            biexp_tau_rise_ms = fit.tau_rise_s * 1000.0
+            biexp_tau_decay_ms = fit.tau_decay_s * 1000.0
+        except (RuntimeError, ValueError):
+            pass
+
     return EventKinetics(
         peak_idx=peak_idx,
         peak_val=peak_val,
@@ -980,6 +1023,10 @@ def measure_event_kinetics(
         auc=auc,
         decay_endpoint_idx=decay_endpoint_idx,
         decay_tau_ms=decay_tau_ms,
+        biexp_tau_rise_ms=biexp_tau_rise_ms,
+        biexp_tau_decay_ms=biexp_tau_decay_ms,
+        biexp_b0=biexp_b0,
+        biexp_b1=biexp_b1,
     )
 
 
@@ -1004,6 +1051,11 @@ class EventRecord:
     auc: Optional[float]
     decay_endpoint_idx: Optional[int]
     decay_tau_ms: Optional[float] = None
+    # Per-event biexp fit coefficients — see EventKinetics docstring.
+    biexp_tau_rise_ms: Optional[float] = None
+    biexp_tau_decay_ms: Optional[float] = None
+    biexp_b0: Optional[float] = None
+    biexp_b1: Optional[float] = None
     manual: bool = False
 
     def to_dict(self) -> dict:
@@ -1024,6 +1076,12 @@ class EventRecord:
                 None if self.decay_endpoint_idx is None else int(self.decay_endpoint_idx)
             ),
             "decay_tau_ms": None if self.decay_tau_ms is None else float(self.decay_tau_ms),
+            "biexp_tau_rise_ms": None if self.biexp_tau_rise_ms is None
+                else float(self.biexp_tau_rise_ms),
+            "biexp_tau_decay_ms": None if self.biexp_tau_decay_ms is None
+                else float(self.biexp_tau_decay_ms),
+            "biexp_b0": None if self.biexp_b0 is None else float(self.biexp_b0),
+            "biexp_b1": None if self.biexp_b1 is None else float(self.biexp_b1),
             "manual": bool(self.manual),
         }
 
@@ -1064,6 +1122,11 @@ def run_events(
     rise_max_ms: Optional[float] = None,
     decay_max_ms: Optional[float] = None,
     fwhm_max_ms: Optional[float] = None,
+    # Manual skip regions — list of (start_s, end_s). Peaks whose time
+    # lies inside ANY region get dropped. Applied AFTER detection but
+    # BEFORE manual adds, so users can still force-add an event inside
+    # a skip region (rare but useful).
+    skip_regions: Optional[list[list[float]]] = None,
     # manual edits
     manual_added_times: Optional[list[float]] = None,   # seconds within this sweep
     manual_removed_times: Optional[list[float]] = None,
@@ -1180,10 +1243,27 @@ def run_events(
     else:
         raise ValueError(f"Unknown method: {method!r}")
 
+    # ---- Step 1.5: apply manual skip regions ----
+    # Drop any detected peak whose time falls inside a skip region.
+    # Applied BEFORE manual adds so the user can still force-add an
+    # event inside a skip region if the region was too aggressive.
+    peak_idxs = list(peak_idxs)
+    if skip_regions:
+        kept = []
+        for pi in peak_idxs:
+            t = pi / sr
+            drop = False
+            for r in skip_regions:
+                if len(r) >= 2 and r[0] <= t <= r[1]:
+                    drop = True
+                    break
+            if not drop:
+                kept.append(pi)
+        peak_idxs = kept
+
     # ---- Step 2: apply manual edits (remove first, then add) ----
     manual_added_times = list(manual_added_times or [])
     manual_removed_times = list(manual_removed_times or [])
-    peak_idxs = list(peak_idxs)
     manual_flags = [False] * len(peak_idxs)
 
     if manual_removed_times and peak_idxs:
@@ -1274,6 +1354,10 @@ def run_events(
             auc=k.auc,
             decay_endpoint_idx=k.decay_endpoint_idx,
             decay_tau_ms=k.decay_tau_ms,
+            biexp_tau_rise_ms=k.biexp_tau_rise_ms,
+            biexp_tau_decay_ms=k.biexp_tau_decay_ms,
+            biexp_b0=k.biexp_b0,
+            biexp_b1=k.biexp_b1,
             manual=mf,
         ))
     return records, detection_measure

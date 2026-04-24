@@ -74,54 +74,70 @@ land; order is chosen by "most user-visible payoff per hour of work".
 - [x] **Pre-detection filter defaults** — bandpass 1–1000 Hz, order 1
   (EE's mEPSC defaults).
 
+## Sprint 6 — deep EE parity (done)
+
+- [x] **Cross-sweep detection** — `/detect` now accepts a `sweeps`
+  list and concatenates events across sweeps with per-event `sweep`
+  field. Frontend has a "Run on" dropdown under the Run button
+  (Current / All sweeps); excluded sweeps are auto-skipped. Results
+  table gets a Sweep column in cross-sweep mode; IEI no longer spans
+  sweep boundaries; clicking a row switches the viewer to the event's
+  sweep before re-centring. Rate / IEI tabs use `totalLengthS` so
+  Hz comes out right across sweeps.
+- [x] **Skip regions** (manual artifact skip) — up to 5 cursor-band
+  pairs on the main events viewer. Collapsible card in the left
+  panel manages them (add / remove / enable / "from cursors").
+  Draggable on the viewer just like the baseline cursor band;
+  disabled regions render as dashed ghosts. Backend `/detect` drops
+  any peak whose time falls inside an enabled region.
+- [x] **Per-event biexp fit** — fit the full biexp
+  `b0 + b1·(1-exp(-t/τ_r))·exp(-t/τ_d)` to each event's
+  (foot → decay-endpoint) window. `biexpTauRiseMs`, `biexpTauDecayMs`,
+  `biexpB0`, `biexpB1` added to `EventRow` and to the CSV. New
+  `τ rise (ms)` column in the results table.
+- [x] **Amp-vs-time scatter tab** — new bottom tab next to Rate.
+- [x] **IEI histogram tab** — new bottom tab, sqrt-N auto-binning
+  with optional override, mean IEI line.
+- [x] **Rise-time convention switcher** — dropdown in the Kinetics
+  card: 10-90 (default) / 20-80 (noise-robust) / 37-63 (1 τ span) /
+  Custom. Behind the scenes, just drives `riseLowPct` / `riseHighPct`.
+
 ## Backlog — still outstanding or new
 
-### From the user's review
+### From earlier sprints
 
-- [ ] **Display interpolation** — EE upsamples each event window ~10×
-  for smoother rendering at tight zooms. Probably not strictly
-  necessary for us: the backend already reports sub-sample foot
-  positions via the 20/80-line slope intersection, and uPlot
-  connects raw samples linearly. Revisit if users complain about
-  jagged visuals inside the Browser window.
-- [ ] **Draggable event markers** (Sprint 2 carry-over) — drag foot/
-  peak/decay dots to correct one event's kinetics. Needs a mode
-  switch so it doesn't clash with cursor-band drag + click-to-add.
-- [ ] **RMS-in-area auto-threshold** (Sprint 3 carry-over).
-- [ ] **Verify min-IEI refractory** (Sprint 3 carry-over).
+- [ ] **Draggable event markers** — drag foot/peak/decay dots on the
+  main viewer to correct one event's kinetics. Needs a mode switch
+  so it doesn't clash with cursor-band drag + click-to-add.
+- [ ] **RMS-in-area auto-threshold** — compute a rolling-window RMS
+  of the quiet stretches between events, use × multiplier as a
+  self-updating threshold.
+- [ ] **Verify min-IEI refractory** — pytest asserting `minIeiMs`
+  is honoured by all three detection methods on synthetic data.
+- [ ] **Display interpolation** — optional 10× upsampling in the
+  Browser window for smoother zoom. Probably not needed: markers
+  already carry sub-sample precision; trace at 20 kHz looks fine.
 
-### EE features I don't think we have yet
+### EE features still to add
 
-- [ ] **Cross-sweep detection** — run detection on every sweep in a
-  series at once, pool the results into one table. We're single-
-  sweep today. Needs per-sweep rows in `EventsData` or a new
-  container. Big UX change: sweep-selector column in the table, the
-  Browser needs to address (sweep, idx) rather than idx alone.
-- [ ] **Auto-skip stimulus artifact regions** — when the series has
-  a stimulus protocol, skip detection ±N ms around each pulse
-  edge. Reuses `sweepStimulusSegments` from the store.
-- [ ] **Per-event biexp fit** — fit the full biexp (both τ_rise and
-  τ_decay) to each event, not just monoexp decay. Gets rise τ per
-  event instead of just the rise-time-ms percent measurement.
-- [ ] **Amplitude-vs-time scatter** — tab next to Rate for a scatter
-  of amplitude vs. peak time. Reveals run-down / drug-response
-  trends at a glance.
-- [ ] **IEI histogram** — separate histogram of inter-event
-  intervals. Often reveals refractory period or bursting structure.
+- [ ] **Auto-skip stimulus artifact regions** — auto-detect TTL
+  edges in the stimulus and pre-populate skip regions around them.
+  Now that manual skip regions exist, this just needs a "detect
+  artifacts" button that writes into `params.skipRegions`.
 - [ ] **Copy-to-clipboard** — results table as TSV for direct paste
   into Excel / Prism / Origin.
-- [ ] **Rise-time convention switcher** — EE lets users pick 10–90,
-  20–80, or custom percentile pair from a dropdown. We expose the
-  raw `riseLowPct` / `riseHighPct` params but no picker.
 - [ ] **Event-deletion keyboard shortcut** — Del / Backspace on a
-  selected row should discard it. Matches EE.
-- [ ] **Skip-region cursors** — a second cursor pair marks a time
-  range where detection should be suppressed. Useful for ignoring
-  perfusion switch artifacts mid-recording.
-- [ ] **Per-sweep window stats** — split sweep into N equal windows
-  and report stats per window (dose-response / wash-in studies).
-- [ ] **Sweep annotations** — free-text per-sweep notes field,
-  persisted alongside the analysis.
+  selected row should discard it.
+- [ ] **Per-sweep window stats** — new bottom tab: split current
+  sweep (or all sweeps when cross-sweep is on) into N bins, show
+  per-bin count / rate / mean amp / mean rise. Good for wash-in /
+  wash-out analyses. UI-only once we add a tab and a bin-count
+  field.
+- [ ] **Sweep annotations** — free-text per-sweep notes. Persisted
+  per (file, group, series, sweep) in Electron prefs. Small strip
+  under the sweep selector. Included in the CSV export as an
+  extra column. Badge on the main TraceViewer when a sweep has
+  notes. No backend needed.
 
 ## Out of scope (explicitly deferred)
 
@@ -142,3 +158,11 @@ land; order is chosen by "most user-visible payoff per hour of work".
   stim artifacts, per-event biexp, amp-vs-time, IEI histogram,
   copy-to-clipboard, rise-time picker, Del-to-discard, skip-region
   cursors, per-sweep window stats, sweep annotations.
+- **2026-04-24** — Sprint 6 landed most of that deep-parity batch:
+  cross-sweep detection + Sweep column + sweep-boundary-aware IEI,
+  manual skip regions with draggable cursor bands on the viewer,
+  per-event biexp fit (τ_rise + τ_decay + b0 + b1 per event, in the
+  CSV too), rise-time convention dropdown, Amp-vs-time + IEI hist
+  tabs. Remaining: draggable markers, RMS-in-area, min-IEI pytest,
+  auto-skip stim, copy-to-clipboard, Del-to-discard, per-sweep
+  window stats, sweep annotations.

@@ -272,8 +272,14 @@ class DetectionTemplate(BaseModel):
 class DetectRequest(BaseModel):
     group: int
     series: int
-    sweep: int                     # which sweep to run on (Phase 1 = one at a time)
+    sweep: int                     # primary sweep (used for the DM overlay)
     trace: int
+    # Cross-sweep detection. When non-null, detection runs on every
+    # sweep in the list, events are concatenated with their sweep
+    # index, and the returned detection-measure corresponds to the
+    # primary ``sweep`` above (so the overlay on the main viewer
+    # stays sensible). Leave null for single-sweep detection.
+    sweeps: Optional[list[int]] = None
 
     method: str = "template_correlation"
     # 'template_correlation' | 'template_deconvolution' | 'threshold'
@@ -333,6 +339,10 @@ class DetectRequest(BaseModel):
     rise_max_ms: Optional[float] = None
     decay_max_ms: Optional[float] = None
     fwhm_max_ms: Optional[float] = None
+    # Manual skip regions — list of [start_s, end_s] pairs. Events whose
+    # peak falls inside any region get dropped. Intended for stimulus
+    # artifacts, perfusion switches, etc. Drawn as red bands in the UI.
+    skip_regions: Optional[list[list[float]]] = None
 
     # Manual edits (in seconds within the sweep)
     manual_added_times: Optional[list[float]] = None
@@ -347,42 +357,54 @@ class DetectRequest(BaseModel):
 
 @router.post("/detect")
 async def detect(req: DetectRequest):
-    values, sr, units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    # Sweep list: either the explicit cross-sweep list, or the single
+    # primary sweep. The "primary" sweep is the one whose trace feeds
+    # the detection-measure overlay and whose units / sampling-rate
+    # bootstrap the response.
+    primary = int(req.sweep)
+    sweeps: list[int] = list(req.sweeps) if req.sweeps else [primary]
+    if primary not in sweeps:
+        # Force-include the primary so the DM overlay always has data.
+        sweeps = [primary, *sweeps]
 
-    # Optional rolling-median detrend — done BEFORE the Butterworth
-    # filter so both operations see the same signal the detector will.
-    if req.detrend_enabled:
-        try:
-            from scipy.ndimage import median_filter
-            w = max(3, int(round(req.detrend_window_ms / 1000.0 * sr)))
-            # Force odd so the kernel is symmetric.
-            if w % 2 == 0:
-                w += 1
-            baseline = median_filter(values, size=w, mode="nearest")
-            values = values - baseline
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Detrend failed: {e}")
+    # Preprocess one sweep: detrend → Butterworth filter. Shared helper
+    # so cross-sweep detection applies the SAME pipeline to each sweep.
+    def _prep_sweep(sw_idx: int) -> tuple[np.ndarray, float, str]:
+        vv, sr_i, units_i = _trace_for(req.group, req.series, sw_idx, req.trace)
+        if req.detrend_enabled:
+            try:
+                from scipy.ndimage import median_filter
+                w = max(3, int(round(req.detrend_window_ms / 1000.0 * sr_i)))
+                if w % 2 == 0:
+                    w += 1
+                base_i = median_filter(vv, size=w, mode="nearest")
+                vv = vv - base_i
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Detrend failed: {e}")
+        if req.filter_enabled:
+            try:
+                vv = _apply_pre_detection_filter(vv, sr_i, {
+                    "filter_enabled": True,
+                    "filter_type": req.filter_type,
+                    "filter_low": req.filter_low,
+                    "filter_high": req.filter_high,
+                    "filter_order": req.filter_order,
+                })
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
+        return vv, sr_i, units_i
 
-    # Pre-detection filter — same Butterworth sosfiltfilt as AP / Burst.
-    # Applied once up front so every downstream step (thresholding,
-    # template detection, kinetics) sees the same filtered trace.
-    if req.filter_enabled:
-        try:
-            values = _apply_pre_detection_filter(values, sr, {
-                "filter_enabled": True,
-                "filter_type": req.filter_type,
-                "filter_low": req.filter_low,
-                "filter_high": req.filter_high,
-                "filter_order": req.filter_order,
-            })
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
+    # Render templates once — they don't depend on the sweep.
+    # Note: biexp templates are parametric so they'd work at any sampling
+    # rate, but `render_template` bakes in the sample count from `sr`.
+    # For mixed-sr series this would be wrong; in practice all sweeps in
+    # one series share the same sampling rate so using the primary's sr
+    # is fine.
+    values_primary, sr, units = _prep_sweep(primary)
 
     template_arr: Optional[np.ndarray] = None
     template_list: Optional[list[np.ndarray]] = None
     if req.method.startswith("template_"):
-        # Prefer the multi-template list when provided; fall back to
-        # the single ``template`` for backward compatibility.
         if req.templates and len(req.templates) >= 1:
             template_list = [
                 render_template(
@@ -392,7 +414,6 @@ async def detect(req: DetectRequest):
                 )
                 for t in req.templates
             ]
-            # Primary template feeds the detection-measure overlay.
             template_arr = template_list[0]
         elif req.template is not None:
             t = req.template
@@ -407,39 +428,64 @@ async def detect(req: DetectRequest):
                 detail="Template methods require a template payload",
             )
 
-    try:
-        records, dm = run_events(
-            values, sr,
-            method=req.method,
-            template=template_arr,
-            templates=template_list,
-            cutoff=req.cutoff,
-            deconv_low_hz=req.deconv_low_hz,
-            deconv_high_hz=req.deconv_high_hz,
-            threshold_value=req.threshold_value,
-            direction=req.direction,
-            min_iei_ms=req.min_iei_ms,
-            baseline_search_ms=req.baseline_search_ms,
-            avg_baseline_ms=req.avg_baseline_ms,
-            avg_peak_ms=req.avg_peak_ms,
-            rise_low_pct=req.rise_low_pct,
-            rise_high_pct=req.rise_high_pct,
-            decay_pct=req.decay_pct,
-            decay_search_ms=req.decay_search_ms,
-            amplitude_min_abs=req.amplitude_min_abs,
-            amplitude_max_abs=req.amplitude_max_abs,
-            auc_min_abs=req.auc_min_abs,
-            rise_max_ms=req.rise_max_ms,
-            decay_max_ms=req.decay_max_ms,
-            fwhm_max_ms=req.fwhm_max_ms,
-            manual_added_times=req.manual_added_times,
-            manual_removed_times=req.manual_removed_times,
-            sweep_index=req.sweep,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    all_records: list[EventRecord] = []
+    primary_dm: Optional[np.ndarray] = None
+    # Sweep-length bookkeeping for the response — each event's sweep
+    # idx is known, so the frontend can compute total-sweep-duration
+    # for cross-sweep rates.
+    sweep_lengths_s: dict[int, float] = {}
+    for sw_idx in sweeps:
+        if sw_idx == primary:
+            vv = values_primary
+            sr_i = sr
+        else:
+            vv, sr_i, _ = _prep_sweep(sw_idx)
+        # Manual edits only apply to the user-active sweep — cross-
+        # sweep mass detection should run clean on the rest.
+        added_times = req.manual_added_times if sw_idx == primary else None
+        removed_times = req.manual_removed_times if sw_idx == primary else None
+        try:
+            recs_i, dm_i = run_events(
+                vv, sr_i,
+                method=req.method,
+                template=template_arr,
+                templates=template_list,
+                cutoff=req.cutoff,
+                deconv_low_hz=req.deconv_low_hz,
+                deconv_high_hz=req.deconv_high_hz,
+                threshold_value=req.threshold_value,
+                direction=req.direction,
+                min_iei_ms=req.min_iei_ms,
+                baseline_search_ms=req.baseline_search_ms,
+                avg_baseline_ms=req.avg_baseline_ms,
+                avg_peak_ms=req.avg_peak_ms,
+                rise_low_pct=req.rise_low_pct,
+                rise_high_pct=req.rise_high_pct,
+                decay_pct=req.decay_pct,
+                decay_search_ms=req.decay_search_ms,
+                amplitude_min_abs=req.amplitude_min_abs,
+                amplitude_max_abs=req.amplitude_max_abs,
+                auc_min_abs=req.auc_min_abs,
+                rise_max_ms=req.rise_max_ms,
+                decay_max_ms=req.decay_max_ms,
+                fwhm_max_ms=req.fwhm_max_ms,
+                skip_regions=req.skip_regions,
+                manual_added_times=added_times,
+                manual_removed_times=removed_times,
+                sweep_index=sw_idx,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        all_records.extend(recs_i)
+        sweep_lengths_s[sw_idx] = float(len(vv)) / sr_i
+        if sw_idx == primary:
+            primary_dm = dm_i
 
-    events_out = [r.to_dict() for r in records]
+    # Sort merged records by (sweep, peak_time) so the table is
+    # consistent across re-runs.
+    all_records.sort(key=lambda r: (r.sweep, r.peak_time_s))
+    events_out = [r.to_dict() for r in all_records]
+    dm = primary_dm
 
     # Detection-measure overlay (optional). Decimated for the wire.
     # For deconvolution the payload also carries the amplitude
@@ -480,12 +526,17 @@ async def detect(req: DetectRequest):
             **extra,
         }
 
+    # Total duration across all sweeps that contributed events —
+    # lets the frontend compute cross-sweep rates without a re-fetch.
+    total_len_s = float(sum(sweep_lengths_s.values()))
     return {
         "events": events_out,
         "n_events": len(events_out),
         "sampling_rate": sr,
         "units": units,
-        "sweep_length_s": float(len(values)) / sr,
+        "sweep_length_s": sweep_lengths_s.get(primary, total_len_s),
+        "total_length_s": total_len_s,
+        "sweeps_analysed": sorted(sweep_lengths_s.keys()),
         "detection_measure": dm_payload,
     }
 

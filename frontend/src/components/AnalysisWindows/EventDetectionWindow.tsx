@@ -210,7 +210,7 @@ export function EventDetectionWindow({
   // all-events overlay moved to their own Electron window (see the
   // "Open browser window" button in the results header).
   const [bottomTab, setBottomTab] = useState<
-    'table' | 'histogram' | 'rate'
+    'table' | 'histogram' | 'rate' | 'ampvstime' | 'iei'
   >('table')
   useEffect(() => {
     let cancelled = false
@@ -614,6 +614,35 @@ export function EventDetectionWindow({
                 <NumInput value={params.avgPeakMs} step={0.1} min={0.1}
                   onChange={(v) => setParams((p) => ({ ...p, avgPeakMs: v }))} />
               </Row>
+              {/* Rise-time convention — standard presets (10–90 is the
+                  classic e-phys default, 20–80 is less noise-sensitive,
+                  37–63 is the "1 τ" span). Custom unlocks the two
+                  number fields. Whatever pair is active feeds the per-
+                  event `rise_time_ms` calculation. */}
+              <Row label="Rise convention">
+                <select style={{ width: '100%' }}
+                  value={(() => {
+                    const lo = params.riseLowPct, hi = params.riseHighPct
+                    if (lo === 10 && hi === 90) return '10-90'
+                    if (lo === 20 && hi === 80) return '20-80'
+                    if (lo === 37 && hi === 63) return '37-63'
+                    return 'custom'
+                  })()}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (v === '10-90') setParams((p) => ({ ...p, riseLowPct: 10, riseHighPct: 90 }))
+                    else if (v === '20-80') setParams((p) => ({ ...p, riseLowPct: 20, riseHighPct: 80 }))
+                    else if (v === '37-63') setParams((p) => ({ ...p, riseLowPct: 37, riseHighPct: 63 }))
+                    // 'custom' leaves the current values in place — user
+                    // edits the two fields below, which show inline once
+                    // the preset no longer matches.
+                  }}>
+                  <option value="10-90">10–90 % (default)</option>
+                  <option value="20-80">20–80 % (noise-robust)</option>
+                  <option value="37-63">37–63 % (1 τ span)</option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </Row>
               <Row label="Rise low %">
                 <NumInput value={params.riseLowPct} step={5} min={0} max={100}
                   onChange={(v) => setParams((p) => ({ ...p, riseLowPct: v }))} />
@@ -666,6 +695,20 @@ export function EventDetectionWindow({
                 onChange={(v) => setParams((p) => ({ ...p, fwhmMaxMs: v }))}
                 title="Drop events with half-width exceeding this value" />
             </Card>
+
+            {/* Skip regions — up to 5 time ranges where detection is
+                suppressed (stimulus artifacts, perfusion switches).
+                Each entry is independently toggleable so users can
+                A/B detection with and without a given region. Drawn
+                as red bands on the main viewer; drag edges / bands
+                to adjust like the baseline cursors. Sweep-duration-
+                anchored, so they persist across re-runs. */}
+            <SkipRegionsCard
+              params={params}
+              setParams={setParams}
+              sweepDurationS={sweepDurationS}
+              viewport={viewport}
+            />
           </div>
 
           {/* Pinned Run footer */}
@@ -680,8 +723,30 @@ export function EventDetectionWindow({
                 width: '100%', padding: '8px 0',
                 fontSize: 'var(--font-size-sm)', fontWeight: 600,
               }}>
-              {loading ? 'Running…' : 'Run'}
+              {loading
+                ? 'Running…'
+                : params.sweepMode === 'all'
+                  ? `Run on all sweeps (${totalSweeps})`
+                  : 'Run'}
             </button>
+            {/* Sweep-mode dropdown — sits directly under the Run
+                button so the "what am I about to run on?" is right
+                next to the action. Same pattern as the other analysis
+                windows. Excluded sweeps (from the CursorPanel) are
+                automatically skipped when 'all' is chosen. */}
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              fontSize: 'var(--font-size-label)',
+            }}>
+              <span style={{ color: 'var(--text-muted)', flex: 1 }}>Run on</span>
+              <select value={params.sweepMode} style={{ minWidth: 140 }}
+                onChange={(e) => setParams((p) => ({
+                  ...p, sweepMode: e.target.value as 'current' | 'all',
+                }))}>
+                <option value="current">Current sweep only</option>
+                <option value="all">All sweeps ({totalSweeps})</option>
+              </select>
+            </label>
             <div style={{
               display: 'flex', gap: 6, marginTop: 2,
               borderTop: '1px solid var(--border)', paddingTop: 6,
@@ -746,6 +811,7 @@ export function EventDetectionWindow({
               group={group} series={series} channel={channel} sweep={sweep}
               entry={entry}
               params={params}
+              setParams={setParams}
               activeTemplate={activeTemplate}
               cursors={cursors}
               updateCursors={updateCursors}
@@ -797,7 +863,7 @@ export function EventDetectionWindow({
               flexShrink: 0,
               padding: '2px 2px 0 2px',
             }}>
-              {(['table', 'histogram', 'rate'] as const).map((k) => (
+              {(['table', 'histogram', 'iei', 'rate', 'ampvstime'] as const).map((k) => (
                 <button key={k} className="btn"
                   onClick={() => setBottomTab(k)}
                   style={{
@@ -810,8 +876,10 @@ export function EventDetectionWindow({
                     borderRadius: '3px 3px 0 0',
                   }}>
                   {k === 'table' ? 'Results'
-                    : k === 'histogram' ? 'Histogram'
-                    : 'Rate'}
+                    : k === 'histogram' ? 'Amp hist'
+                    : k === 'iei' ? 'IEI hist'
+                    : k === 'rate' ? 'Rate'
+                    : 'Amp vs time'}
                 </button>
               ))}
               <span style={{ flex: 1 }} />
@@ -836,16 +904,15 @@ export function EventDetectionWindow({
                   <EventsResultsTable
                     entry={entry}
                     onSelect={(idx) => {
-                      // Mark selected for marker-highlighting in the
-                      // viewer AND re-centre the viewport on that
-                      // event so clicking a row becomes a quick
-                      // "show me this one in context" action. Same
-                      // behaviour as the detached browser's
-                      // zoom-to-event message, but we set viewport
-                      // directly since we're in the same window.
+                      // Mark selected + zoom to event. In cross-sweep
+                      // mode the clicked row may belong to a different
+                      // sweep than the one currently shown — switch to
+                      // that sweep first so the viewport applies to
+                      // the right trace.
                       selectEvent(group, series, idx)
                       const e = entry?.events[idx]
                       if (e) {
+                        if (e.sweep !== sweep) setSweep(e.sweep)
                         const useLen = viewport
                           && viewport.tEnd - viewport.tStart > 0
                           && viewport.tEnd - viewport.tStart <= 0.12
@@ -877,6 +944,18 @@ export function EventDetectionWindow({
               )}
               {bottomTab === 'rate' && (
                 <EventRatePlot
+                  entry={entry}
+                  heightSignal={plotHeight}
+                />
+              )}
+              {bottomTab === 'ampvstime' && (
+                <AmpVsTimeScatter
+                  entry={entry}
+                  heightSignal={plotHeight}
+                />
+              )}
+              {bottomTab === 'iei' && (
+                <IEIHistogram
                   entry={entry}
                   heightSignal={plotHeight}
                 />
@@ -968,6 +1047,148 @@ function HelpText({ children }: { children: React.ReactNode }) {
     }}>
       {children}
     </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Skip-regions card — up to 5 time ranges where detection is
+// suppressed. Each has its own enable checkbox + start / end inputs
+// + delete button. "From cursors" sets the region to the current
+// baseline cursor span so users don't always have to type numbers.
+// The regions also draw as translucent red bands on the main events
+// viewer, with edge/band drag support (see SkipRegionHandle refs).
+// ---------------------------------------------------------------------------
+
+const MAX_SKIP_REGIONS = 5
+
+function SkipRegionsCard({
+  params, setParams, sweepDurationS, viewport,
+}: {
+  params: EventsParams
+  setParams: React.Dispatch<React.SetStateAction<EventsParams>>
+  sweepDurationS: number
+  viewport: Viewport
+}) {
+  const regions = params.skipRegions ?? []
+  const [collapsed, setCollapsed] = useState(true)
+  const { cursors } = useAppStore()
+  // Collapsed by default — skip regions are a power-user feature, no
+  // need to take sidebar space until the user cares. Count badge on
+  // the header tells them at a glance whether any are configured.
+  const enabledCount = regions.filter((r) => r.enabled).length
+
+  const update = (i: number, patch: Partial<typeof regions[number]>) => {
+    setParams((p) => {
+      const next = [...(p.skipRegions ?? [])]
+      next[i] = { ...next[i], ...patch }
+      return { ...p, skipRegions: next }
+    })
+  }
+  const addRegion = () => {
+    setParams((p) => {
+      const prev = p.skipRegions ?? []
+      if (prev.length >= MAX_SKIP_REGIONS) return p
+      // Place the new region in the middle 20% of the current view,
+      // so the user can see it immediately and drag to refine.
+      const vp = viewport ?? { tStart: 0, tEnd: sweepDurationS || 10 }
+      const len = Math.max(1e-3, vp.tEnd - vp.tStart)
+      const startS = vp.tStart + 0.40 * len
+      const endS = vp.tStart + 0.60 * len
+      return {
+        ...p,
+        skipRegions: [...prev, { enabled: true, startS, endS }],
+      }
+    })
+    setCollapsed(false)
+  }
+  const removeRegion = (i: number) => {
+    setParams((p) => ({
+      ...p,
+      skipRegions: (p.skipRegions ?? []).filter((_, k) => k !== i),
+    }))
+  }
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 6,
+      padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+      background: 'var(--bg-primary)',
+      fontSize: 'var(--font-size-label)',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        cursor: 'pointer',
+      }} onClick={() => setCollapsed((v) => !v)}>
+        <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>
+          Skip regions {enabledCount > 0 ? `(${enabledCount})` : ''}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{
+          color: 'var(--text-muted)',
+          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+          transition: 'transform 0.15s',
+          display: 'inline-block',
+        }}>▾</span>
+      </div>
+      {!collapsed && (
+        <>
+          {regions.length === 0 && (
+            <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+              Detection is never suppressed. Add a region to exclude a
+              time range — useful for stimulus artifacts.
+            </span>
+          )}
+          {regions.map((r, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 4,
+              padding: 6, borderRadius: 3,
+              background: r.enabled ? 'rgba(229,115,115,0.1)' : 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={r.enabled}
+                  onChange={(e) => update(i, { enabled: e.target.checked })} />
+                <span style={{ fontWeight: 600, flex: 1 }}>Region {i + 1}</span>
+                <button className="btn"
+                  title="Set this region to the current baseline-cursor span"
+                  onClick={() => update(i, {
+                    startS: Math.min(cursors.baselineStart, cursors.baselineEnd),
+                    endS: Math.max(cursors.baselineStart, cursors.baselineEnd),
+                  })}
+                  style={{ padding: '1px 6px', fontSize: 10 }}>
+                  from cursors
+                </button>
+                <button className="btn"
+                  onClick={() => removeRegion(i)}
+                  style={{ padding: '1px 6px', fontSize: 10 }}
+                  title="Remove this region">✕</button>
+              </div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 3, flex: 1 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Start (s)</span>
+                  <NumInput value={r.startS} step={0.1} min={0}
+                    onChange={(v) => update(i, { startS: v })} />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 3, flex: 1 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>End (s)</span>
+                  <NumInput value={r.endS} step={0.1} min={0}
+                    onChange={(v) => update(i, { endS: v })} />
+                </label>
+              </div>
+            </div>
+          ))}
+          <button className="btn"
+            disabled={regions.length >= MAX_SKIP_REGIONS}
+            onClick={addRegion}
+            style={{ padding: '3px 6px', marginTop: 2 }}
+            title={regions.length >= MAX_SKIP_REGIONS
+              ? `Max ${MAX_SKIP_REGIONS} skip regions`
+              : 'Add a new skip region centred in the current view'}>
+            + Add region ({regions.length}/{MAX_SKIP_REGIONS})
+          </button>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -1349,7 +1570,7 @@ function ThresholdPanel({
 // ---------------------------------------------------------------------------
 
 function EventsSweepViewer({
-  backendUrl, group, series, channel, sweep, entry, params,
+  backendUrl, group, series, channel, sweep, entry, params, setParams,
   activeTemplate,
   cursors, updateCursors,
   viewport, setViewport, sweepDurationS, setSweepDurationS,
@@ -1361,6 +1582,9 @@ function EventsSweepViewer({
   group: number; series: number; channel: number; sweep: number
   entry: EventsData | undefined
   params: EventsParams
+  /** Updater for params — needed so skip-region edge / band drags
+   *  can write back the new start / end times. */
+  setParams: React.Dispatch<React.SetStateAction<EventsParams>>
   /** Active biexp template — needed so the viewer can refetch the
    *  detection-measure overlay on viewport / template changes. */
   activeTemplate: EventsTemplate | null
@@ -1398,6 +1622,8 @@ function EventsSweepViewer({
   onAddEventRef.current = onAddEvent
   const onDiscardEventRef = useRef(onDiscardEvent)
   onDiscardEventRef.current = onDiscardEvent
+  const setParamsRef = useRef(setParams)
+  setParamsRef.current = setParams
   const setViewportRef = useRef(setViewport)
   setViewportRef.current = setViewport
   const updateCursorsRef = useRef(updateCursors)
@@ -1540,6 +1766,49 @@ function EventsSweepViewer({
         ctx.fillStyle = CURSOR_COLOR
         ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
         ctx.fillText('cursors', Math.min(a, b) + 2 * dpr, u.bbox.top + 12 * dpr)
+        ctx.restore()
+      }
+    }
+
+    // Skip-region bands (translucent red). Drawn only for regions the
+    // user has enabled; disabled ones are kept as outlined ghosts so
+    // the user can still see where they'd fall when toggling. Drag
+    // edges / bands like the baseline cursor — see pointer handler.
+    const skips = p.skipRegions ?? []
+    if (skips.length > 0) {
+      for (let i = 0; i < skips.length; i++) {
+        const r = skips[i]
+        if (r.endS <= r.startS) continue
+        const a = u.valToPos(r.startS, 'x', true)
+        const b = u.valToPos(r.endS, 'x', true)
+        if (!isFinite(a) || !isFinite(b)) continue
+        ctx.save()
+        if (r.enabled) {
+          ctx.globalAlpha = 0.18
+          ctx.fillStyle = '#e57373'
+          ctx.fillRect(
+            Math.min(a, b), u.bbox.top,
+            Math.abs(b - a), u.bbox.height,
+          )
+          ctx.globalAlpha = 0.85
+          ctx.strokeStyle = '#e57373'
+          ctx.lineWidth = 1.5 * dpr
+        } else {
+          ctx.globalAlpha = 0.35
+          ctx.strokeStyle = '#e57373'
+          ctx.lineWidth = 1 * dpr
+          ctx.setLineDash([4 * dpr, 3 * dpr])
+        }
+        ctx.beginPath()
+        ctx.moveTo(a, u.bbox.top); ctx.lineTo(a, u.bbox.top + u.bbox.height)
+        ctx.moveTo(b, u.bbox.top); ctx.lineTo(b, u.bbox.top + u.bbox.height)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.globalAlpha = 1
+        ctx.fillStyle = '#e57373'
+        ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
+        ctx.fillText(`skip ${i + 1}${r.enabled ? '' : ' (off)'}`,
+          Math.min(a, b) + 2 * dpr, u.bbox.top + 24 * dpr)
         ctx.restore()
       }
     }
@@ -1813,6 +2082,8 @@ function EventsSweepViewer({
       type Drag =
         | { kind: 'cursor-edge'; edge: 'start' | 'end' }
         | { kind: 'cursor-band'; startPxX: number; startStart: number; startEnd: number }
+        | { kind: 'skip-edge'; index: number; edge: 'start' | 'end' }
+        | { kind: 'skip-band'; index: number; startPxX: number; startStart: number; startEnd: number }
         | {
             kind: 'maybe-pan'
             startPxX: number; startPxY: number
@@ -1840,6 +2111,31 @@ function EventsSweepViewer({
         }
         return null
       }
+      // Hit-test any enabled skip region. Only enabled regions are
+      // draggable — disabled ones show as dashed ghosts and ignore
+      // pointer events, so toggling a region off doesn't stop you
+      // from click-adding events inside it.
+      const findSkipHit = (pxX: number) => {
+        const u = plotRef.current!
+        const skips = paramsRef.current.skipRegions ?? []
+        for (let i = 0; i < skips.length; i++) {
+          const r = skips[i]
+          if (!r.enabled || r.endS <= r.startS) continue
+          const aPx = u.valToPos(r.startS, 'x', false)
+          const bPx = u.valToPos(r.endS, 'x', false)
+          const [lo, hi] = aPx <= bPx ? [aPx, bPx] : [bPx, aPx]
+          if (Math.abs(pxX - aPx) <= EDGE_PX) {
+            return { kind: 'skip-edge' as const, index: i, edge: 'start' as const }
+          }
+          if (Math.abs(pxX - bPx) <= EDGE_PX) {
+            return { kind: 'skip-edge' as const, index: i, edge: 'end' as const }
+          }
+          if (pxX >= lo + EDGE_PX && pxX <= hi - EDGE_PX) {
+            return { kind: 'skip-band' as const, index: i }
+          }
+        }
+        return null
+      }
 
       const onPointerDown = (ev: PointerEvent) => {
         if (ev.button !== 0) return
@@ -1861,6 +2157,28 @@ function EventsSweepViewer({
             over.style.cursor = 'move'
           } else {
             drag = { kind: 'cursor-edge', edge: ch.edge }
+            over.style.cursor = 'ew-resize'
+          }
+          over.setPointerCapture(ev.pointerId)
+          ev.preventDefault()
+          return
+        }
+
+        // Priority 1b: skip-region band / edge. Checked AFTER baseline
+        // cursor so baseline cursor hits always win when both overlap
+        // — users reach for the blue band more often.
+        const sh = findSkipHit(pxX)
+        if (sh) {
+          const skips = paramsRef.current.skipRegions ?? []
+          const r = skips[sh.index]
+          if (sh.kind === 'skip-band') {
+            drag = {
+              kind: 'skip-band', index: sh.index,
+              startPxX: pxX, startStart: r.startS, startEnd: r.endS,
+            }
+            over.style.cursor = 'move'
+          } else {
+            drag = { kind: 'skip-edge', index: sh.index, edge: sh.edge }
             over.style.cursor = 'ew-resize'
           }
           over.setPointerCapture(ev.pointerId)
@@ -1914,6 +2232,15 @@ function EventsSweepViewer({
         const pxX = ev.clientX - rect.left
         const pxY = ev.clientY - rect.top
         if (!drag) {
+          // Hover-cursor-shape hint: edge→resize, band→move. Check
+          // skip regions first so you see the ew-resize cursor when
+          // hovering a skip edge (otherwise it'd fall through to no
+          // cursor and users wouldn't realise they can drag).
+          const sHit = findSkipHit(pxX)
+          if (sHit) {
+            over.style.cursor = sHit.kind === 'skip-edge' ? 'ew-resize' : 'move'
+            return
+          }
           const hit = findCursorHit(pxX)
           over.style.cursor = !hit ? '' : (hit.kind === 'cursor-edge' ? 'ew-resize' : 'move')
           return
@@ -1930,6 +2257,36 @@ function EventsSweepViewer({
           updateCursorsRef.current({
             baselineStart: drag.startStart + dx,
             baselineEnd: drag.startEnd + dx,
+          })
+          return
+        }
+        if (drag.kind === 'skip-edge') {
+          const x = pxToX(pxX)
+          const idx = drag.index
+          const edge = drag.edge
+          setParamsRef.current((p) => {
+            const next = [...(p.skipRegions ?? [])]
+            if (!next[idx]) return p
+            if (edge === 'start') {
+              // Prevent start from crossing end — clamp to end-ε.
+              next[idx] = { ...next[idx], startS: Math.min(x, next[idx].endS - 1e-4) }
+            } else {
+              next[idx] = { ...next[idx], endS: Math.max(x, next[idx].startS + 1e-4) }
+            }
+            return { ...p, skipRegions: next }
+          })
+          return
+        }
+        if (drag.kind === 'skip-band') {
+          const dx = pxToX(pxX) - pxToX(drag.startPxX)
+          const idx = drag.index
+          const ns = drag.startStart + dx
+          const ne = drag.startEnd + dx
+          setParamsRef.current((p) => {
+            const next = [...(p.skipRegions ?? [])]
+            if (!next[idx]) return p
+            next[idx] = { ...next[idx], startS: ns, endS: ne }
+            return { ...p, skipRegions: next }
           })
           return
         }
@@ -2122,7 +2479,10 @@ function EventsSummaryBar({ entry }: { entry: EventsData | undefined }) {
   for (let i = 1; i < entry.events.length; i++) {
     iei.push(entry.events[i].peakTimeS - entry.events[i - 1].peakTimeS)
   }
-  const freqHz = entry.sweepLengthS > 0 ? entry.events.length / entry.sweepLengthS : NaN
+  // Use totalLengthS for cross-sweep rates — in single-sweep mode it
+  // equals sweepLengthS, so there's no behaviour change there.
+  const denomS = entry.totalLengthS || entry.sweepLengthS
+  const freqHz = denomS > 0 ? entry.events.length / denomS : NaN
   const u = entry.units
   const fmt = (v: number, p = 2) => (Number.isFinite(v) ? v.toFixed(p) : '—')
   const cell: React.CSSProperties = {
@@ -2480,6 +2840,292 @@ function EventRatePlot({
   )
 }
 
+// ---------------------------------------------------------------------------
+// Amplitude-vs-time scatter — one dot per event, x = peak time, y =
+// amplitude. Reveals rundown / washout / drug effects at a glance.
+// ---------------------------------------------------------------------------
+
+function AmpVsTimeScatter({
+  entry, heightSignal,
+}: {
+  entry: EventsData | undefined
+  heightSignal: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+
+  const data = useMemo(() => {
+    if (!entry || entry.events.length === 0) return null
+    const xs: number[] = []
+    const ys: number[] = []
+    for (const e of entry.events) {
+      xs.push(e.peakTimeS)
+      ys.push(e.amplitude)
+    }
+    return { xs, ys }
+  }, [entry])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!data) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: { x: { time: false }, y: { auto: true } },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: 'Time (s)', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 55, label: `Amplitude (${entry?.units ?? ''})`,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        // No connecting line — draw dots directly in hooks.draw.
+        series: [{}, { points: { show: false }, stroke: 'rgba(0,0,0,0)' }],
+        hooks: {
+          draw: [(u) => {
+            const ctx = u.ctx
+            const dpr = devicePixelRatio || 1
+            ctx.save()
+            ctx.fillStyle = 'rgba(100,181,246,0.7)'
+            for (let i = 0; i < data.xs.length; i++) {
+              const px = u.valToPos(data.xs[i], 'x', true)
+              const py = u.valToPos(data.ys[i], 'y', true)
+              if (!isFinite(px) || !isFinite(py)) continue
+              ctx.beginPath()
+              ctx.arc(px, py, 2.5 * dpr, 0, 2 * Math.PI)
+              ctx.fill()
+            }
+            ctx.restore()
+          }],
+        },
+      }
+      plotRef.current = new uPlot(opts, [data.xs, data.ys], container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [data, entry?.units])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      gap: 6, padding: 6, minHeight: 0,
+    }}>
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+        fontFamily: 'var(--font-mono)',
+      }}>
+        {data
+          ? <span>n = {data.xs.length}</span>
+          : <span style={{ color: 'var(--text-muted)' }}>Run detection first.</span>}
+      </div>
+      <div ref={containerRef} style={{
+        flex: 1, minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+      }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// IEI histogram — distribution of inter-event intervals (ms). Bimodal
+// distributions or long-tail shapes reveal bursting / refractory
+// effects that mean rate alone can't show.
+// ---------------------------------------------------------------------------
+
+function IEIHistogram({
+  entry, heightSignal,
+}: {
+  entry: EventsData | undefined
+  heightSignal: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const [binMs, setBinMs] = useState<number | null>(null)  // null = auto
+
+  const stats = useMemo(() => {
+    if (!entry || entry.events.length < 2) return null
+    const iei: number[] = []
+    for (let i = 1; i < entry.events.length; i++) {
+      iei.push((entry.events[i].peakTimeS - entry.events[i - 1].peakTimeS) * 1000)
+    }
+    if (iei.length === 0) return null
+    const lo = 0
+    const hi = Math.max(...iei) * 1.05
+    const n = iei.length
+    // Freedman–Diaconis would be nicer; √n is close enough for a
+    // quick-look tab and doesn't need sorting.
+    const nBins = Math.max(8, Math.min(60, Math.round(Math.sqrt(n))))
+    const autoBw = (hi - lo) / nBins
+    const bw = binMs && binMs > 0 ? binMs : autoBw
+    const nBinsFinal = Math.max(1, Math.ceil((hi - lo) / bw))
+    const counts = new Array<number>(nBinsFinal).fill(0)
+    for (const v of iei) {
+      const k = Math.max(0, Math.min(nBinsFinal - 1, Math.floor((v - lo) / bw)))
+      counts[k]++
+    }
+    const centers = new Array<number>(nBinsFinal)
+    for (let i = 0; i < nBinsFinal; i++) centers[i] = lo + (i + 0.5) * bw
+    const meanIei = iei.reduce((s, v) => s + v, 0) / iei.length
+    return { centers, counts, bw, n, meanIei }
+  }, [entry, binMs])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!stats) return
+    const frame = requestAnimationFrame(() => {
+      const w = Math.max(container.clientWidth, 200)
+      const h = Math.max(container.clientHeight, 120)
+      const opts: uPlot.Options = {
+        width: w, height: h,
+        legend: { show: false },
+        scales: {
+          x: { time: false },
+          y: { range: (_u, _dmin, dmax) => [0, Math.max(1, dmax * 1.1)] },
+        },
+        axes: [
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            label: 'IEI (ms)', labelSize: 14,
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+          { stroke: cssVar('--chart-axis'),
+            grid: { stroke: cssVar('--chart-grid'), width: 1 },
+            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+            size: 50, label: 'count',
+            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
+          },
+        ],
+        cursor: { drag: { x: false, y: false } },
+        series: [{}, { points: { show: false }, stroke: 'rgba(0,0,0,0)' }],
+        hooks: {
+          draw: [(u) => {
+            const ctx = u.ctx
+            const dpr = devicePixelRatio || 1
+            ctx.save()
+            ctx.fillStyle = 'rgba(100,181,246,0.4)'
+            for (let i = 0; i < stats.centers.length; i++) {
+              const x0 = u.valToPos(stats.centers[i] - stats.bw / 2, 'x', true)
+              const x1 = u.valToPos(stats.centers[i] + stats.bw / 2, 'x', true)
+              const y0 = u.valToPos(0, 'y', true)
+              const y1 = u.valToPos(stats.counts[i], 'y', true)
+              ctx.fillRect(Math.min(x0, x1), y1, Math.abs(x1 - x0), y0 - y1)
+            }
+            // Vertical line at the mean IEI — quick anchor for
+            // comparing against 1 / rate.
+            const mx = u.valToPos(stats.meanIei, 'x', true)
+            ctx.strokeStyle = '#e57373'
+            ctx.lineWidth = 1.5 * dpr
+            ctx.setLineDash([4 * dpr, 3 * dpr])
+            ctx.beginPath()
+            ctx.moveTo(mx, u.bbox.top)
+            ctx.lineTo(mx, u.bbox.top + u.bbox.height)
+            ctx.stroke()
+            ctx.restore()
+          }],
+        },
+      }
+      plotRef.current = new uPlot(opts, [stats.centers, stats.counts], container)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [stats])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
+        u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => {
+    const u = plotRef.current, el = containerRef.current
+    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
+      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+  }, [heightSignal])
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      gap: 6, padding: 6, minHeight: 0,
+    }}>
+      <div style={{
+        display: 'flex', gap: 8, alignItems: 'center',
+        fontSize: 'var(--font-size-label)', flexShrink: 0,
+      }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Bin (ms)</span>
+          <NumInput value={binMs ?? 0} step={5} min={0}
+            onChange={(v) => setBinMs(v <= 0 ? null : v)} />
+          <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+            {binMs == null ? '(auto)' : ''}
+          </span>
+        </label>
+        {stats && (
+          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            n = {stats.n} · mean = {stats.meanIei.toFixed(1)} ms
+          </span>
+        )}
+      </div>
+      <div ref={containerRef} style={{
+        flex: 1, minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+      }}>
+        {(!entry || entry.events.length < 2) && (
+          <div style={{
+            padding: 16, textAlign: 'center',
+            color: 'var(--text-muted)', fontStyle: 'italic',
+            fontSize: 'var(--font-size-label)',
+          }}>
+            Need ≥ 2 events to form intervals.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 
 // ---------------------------------------------------------------------------
 // Results table
@@ -2507,6 +3153,17 @@ function EventsResultsTable({
     )
   }
   const unit = entry.units
+  // Cross-sweep detection → show a Sweep column so rows are
+  // unambiguously placed. Single-sweep skips the column to keep the
+  // table compact.
+  const multiSweep = (entry.sweepsAnalysed?.length ?? 1) > 1
+  const headers = multiSweep
+    ? ['#', 'Sweep', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
+        'τ rise (ms)', 'τ decay (ms)',
+        'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '']
+    : ['#', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
+        'τ rise (ms)', 'τ decay (ms)',
+        'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '']
   return (
     <table style={{
       width: '100%', borderCollapse: 'collapse',
@@ -2514,9 +3171,7 @@ function EventsResultsTable({
     }}>
       <thead>
         <tr>
-          {['#', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
-            'τ decay (ms)', 'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)',
-            ''].map((h, i) => (
+          {headers.map((h, i) => (
             <th key={i} style={{
               padding: '3px 6px', textAlign: 'left',
               borderBottom: '1px solid var(--border)',
@@ -2529,9 +3184,12 @@ function EventsResultsTable({
       </thead>
       <tbody>
         {entry.events.map((e: EventRow, i: number) => {
-          const iei = i === 0
-            ? null
-            : (e.peakTimeS - entry.events[i - 1].peakTimeS) * 1000
+          // IEI only meaningful within the same sweep — don't span
+          // the sweep boundary in multi-sweep mode.
+          const prev = i === 0 ? null : entry.events[i - 1]
+          const iei = prev && (!multiSweep || prev.sweep === e.sweep)
+            ? (e.peakTimeS - prev.peakTimeS) * 1000
+            : null
           return (
             <tr key={i}
               onClick={() => onSelect(i)}
@@ -2543,10 +3201,12 @@ function EventsResultsTable({
                 fontStyle: e.manual ? 'italic' : 'normal',
               }}>
               <td style={td}>{i + 1}{e.manual ? ' *' : ''}</td>
+              {multiSweep && <td style={td}>{e.sweep + 1}</td>}
               <td style={td}>{e.peakTimeS.toFixed(4)}</td>
               <td style={td}>{e.amplitude.toFixed(2)}</td>
               <td style={td}>{e.riseTimeMs != null ? e.riseTimeMs.toFixed(2) : '—'}</td>
               <td style={td}>{e.decayTimeMs != null ? e.decayTimeMs.toFixed(2) : '—'}</td>
+              <td style={td}>{e.biexpTauRiseMs != null ? e.biexpTauRiseMs.toFixed(2) : '—'}</td>
               <td style={td}>{e.decayTauMs != null ? e.decayTauMs.toFixed(2) : '—'}</td>
               <td style={td}>{e.halfWidthMs != null ? e.halfWidthMs.toFixed(2) : '—'}</td>
               <td style={td}>{e.auc != null ? e.auc.toFixed(4) : '—'}</td>
@@ -2582,7 +3242,9 @@ function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
   const header = [
     '#', 'Sweep', 'Time_s', 'Foot_time_s',
     `Peak_${unit}`, `Baseline_${unit}`, `Amplitude_${unit}`,
-    'Rise_ms', 'Decay_ms', 'DecayTau_ms', 'FWHM_ms', `AUC_${unit}·s`,
+    'Rise_ms', 'Decay_ms',
+    'BiexpTauRise_ms', 'BiexpTauDecay_ms', 'Biexp_b0', 'Biexp_b1',
+    'DecayTau_ms', 'FWHM_ms', `AUC_${unit}·s`,
     'IEI_ms',
     'Manual',
   ]
@@ -2595,6 +3257,8 @@ function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
       e.peakTimeS.toFixed(6), e.footTimeS.toFixed(6),
       e.peakVal.toFixed(4), e.baselineVal.toFixed(4), e.amplitude.toFixed(4),
       e.riseTimeMs ?? '', e.decayTimeMs ?? '',
+      e.biexpTauRiseMs ?? '', e.biexpTauDecayMs ?? '',
+      e.biexpB0 ?? '', e.biexpB1 ?? '',
       e.decayTauMs ?? '', e.halfWidthMs ?? '',
       e.auc ?? '',
       iei,

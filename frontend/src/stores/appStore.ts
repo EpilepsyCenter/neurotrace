@@ -468,6 +468,8 @@ export function defaultEventsParams(): EventsParams {
     riseMaxMs: null,
     decayMaxMs: null,
     fwhmMaxMs: null,
+    sweepMode: 'current',
+    skipRegions: [],
   }
 }
 
@@ -1128,6 +1130,20 @@ export interface EventsParams {
   riseMaxMs: number | null
   decayMaxMs: number | null
   fwhmMaxMs: number | null
+  /** Cross-sweep detection mode. ``'current'`` (default) runs on the
+   *  single sweep the user is looking at. ``'all'`` loops over every
+   *  sweep in the current series, concatenating events into a single
+   *  table. Each event's ``sweep`` field identifies its origin, and
+   *  main-viewer markers / Browser window already filter by sweep so
+   *  navigating between sweeps shows only that sweep's events. */
+  sweepMode: 'current' | 'all'
+  /** Manual "skip" regions — up to 5 time ranges where detection is
+   *  suppressed (stimulus artifacts, perfusion switches, junk). Each
+   *  region has its own enable flag so the user can A/B-compare with
+   *  and without skipping. Drawn as red translucent bands on the
+   *  main events viewer; draggable by the user like the baseline
+   *  cursors. */
+  skipRegions: { enabled: boolean; startS: number; endS: number }[]
   // Common
   minIeiMs: number
 }
@@ -1153,6 +1169,14 @@ export interface EventRow {
    *  ``y = baseline + a·exp(-t/τ)`` from peak to decay-endpoint.
    *  Null when the fit couldn't converge (short window, noisy tail). */
   decayTauMs: number | null
+  /** Per-event biexponential fit — same model as the template.
+   *  Gives a τ_rise per event that the percent-threshold rise time
+   *  can't deliver on noisy events. All four coefficients null
+   *  together when the fit couldn't run. */
+  biexpTauRiseMs: number | null
+  biexpTauDecayMs: number | null
+  biexpB0: number | null
+  biexpB1: number | null
   manual: boolean
 }
 
@@ -1173,6 +1197,14 @@ export interface EventsData {
   }
   samplingRate: number
   sweepLengthS: number
+  /** Total recording time that contributed to this analysis. Equals
+   *  ``sweepLengthS`` for single-sweep detection; for cross-sweep,
+   *  sum of the analysed sweeps' durations. Used by the Rate / IEI
+   *  tabs to compute Hz across the whole run. */
+  totalLengthS: number
+  /** Sweep indices that contributed to this analysis. Length = 1 in
+   *  single-sweep mode. */
+  sweepsAnalysed: number[]
   units: string
   /** Populated when `params.showDetectionMeasure` was true on the
    *  last run. Drives the stacked detection-measure subplot. */
@@ -3711,8 +3743,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       const addedTimes = existing?.manualEdits?.addedTimes ?? []
       const removedTimes = existing?.manualEdits?.removedTimes ?? []
 
+      // Cross-sweep mode: build the sweep list from the current
+      // recording's series. Skip excluded sweeps (same convention as
+      // other analyses). For 'current' mode, leave `sweeps` off and
+      // the backend runs just `sweep`.
+      let sweepsArr: number[] | undefined
+      if (params.sweepMode === 'all') {
+        const rec = get().recording
+        const totalSweeps = rec?.groups?.[group]?.series?.[series]?.sweepCount ?? 0
+        const excluded = new Set(get().excludedSweeps[`${group}:${series}`] ?? [])
+        sweepsArr = []
+        for (let i = 0; i < totalSweeps; i++) {
+          if (!excluded.has(i)) sweepsArr.push(i)
+        }
+        if (sweepsArr.length === 0) sweepsArr = [sweep]
+      }
       const body: Record<string, any> = {
         group, series, sweep, trace: channel,
+        ...(sweepsArr ? { sweeps: sweepsArr } : {}),
         method: params.method,
         direction: params.peakDirection,
         filter_enabled: params.filterEnabled,
@@ -3736,6 +3784,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         rise_max_ms: params.riseMaxMs,
         decay_max_ms: params.decayMaxMs,
         fwhm_max_ms: params.fwhmMaxMs,
+        // Ship only enabled skip regions (disabled ones are kept in
+        // state so users can A/B by ticking the checkbox).
+        skip_regions: (params.skipRegions ?? [])
+          .filter((r) => r.enabled && r.endS > r.startS)
+          .map((r) => [r.startS, r.endS]),
         manual_added_times: addedTimes,
         manual_removed_times: removedTimes,
         return_detection_measure: params.showDetectionMeasure
@@ -3813,6 +3866,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         auc: e.auc == null ? null : Number(e.auc),
         decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
         decayTauMs: e.decay_tau_ms == null ? null : Number(e.decay_tau_ms),
+        biexpTauRiseMs: e.biexp_tau_rise_ms == null ? null : Number(e.biexp_tau_rise_ms),
+        biexpTauDecayMs: e.biexp_tau_decay_ms == null ? null : Number(e.biexp_tau_decay_ms),
+        biexpB0: e.biexp_b0 == null ? null : Number(e.biexp_b0),
+        biexpB1: e.biexp_b1 == null ? null : Number(e.biexp_b1),
         manual: Boolean(e.manual),
       }))
 
@@ -3835,6 +3892,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         manualEdits: { addedTimes, removedTimes },
         samplingRate: Number(data.sampling_rate ?? 0),
         sweepLengthS: Number(data.sweep_length_s ?? 0),
+        totalLengthS: Number(data.total_length_s ?? data.sweep_length_s ?? 0),
+        sweepsAnalysed: Array.isArray(data.sweeps_analysed)
+          ? data.sweeps_analysed.map((n: any) => Number(n))
+          : [sweep],
         units: String(data.units ?? ''),
         detectionMeasure,
       }
@@ -4066,6 +4127,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           auc: e.auc == null ? null : Number(e.auc),
           decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
           decayTauMs: e.decay_tau_ms == null ? null : Number(e.decay_tau_ms),
+          biexpTauRiseMs: e.biexp_tau_rise_ms == null ? null : Number(e.biexp_tau_rise_ms),
+          biexpTauDecayMs: e.biexp_tau_decay_ms == null ? null : Number(e.biexp_tau_decay_ms),
+          biexpB0: e.biexp_b0 == null ? null : Number(e.biexp_b0),
+          biexpB1: e.biexp_b1 == null ? null : Number(e.biexp_b1),
           manual: true,
         }
       }

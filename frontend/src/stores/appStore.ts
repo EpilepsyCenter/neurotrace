@@ -447,7 +447,12 @@ export function defaultEventsParams(): EventsParams {
     linearThreshold: -15,
     baselineSearchMs: 10,
     avgBaselineMs: 1,
-    avgPeakMs: 1,
+    // Default 0 → skip boxcar peak smoothing. See backend comment in
+    // `measure_event_kinetics` for why this matters: the boxcar is
+    // symmetric but EPSC/IPSC shapes aren't, so smoothing biases peak
+    // position toward the decay side. Opt in (> 0) only for very
+    // noisy recordings where raw-sample peak jitter is a problem.
+    avgPeakMs: 0,
     riseLowPct: 10,
     riseHighPct: 90,
     decayPct: 37,

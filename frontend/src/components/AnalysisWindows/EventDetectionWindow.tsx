@@ -133,6 +133,42 @@ export function EventDetectionWindow({
     })
   }, [sweepDurationS])
 
+  // ---- Cross-window navigate ("Zoom to" + table-click from the
+  // detached Browser window). The browser sends
+  // { type: 'events-navigate-to', timeS, windowS } and we centre our
+  // viewport on that timestamp. A small default window (60 ms) lets
+  // the user see rise + decay without having to zoom manually.
+  useEffect(() => {
+    try {
+      const ch = new BroadcastChannel('neurotrace-sync')
+      ch.onmessage = (ev) => {
+        if (ev.data?.type !== 'events-navigate-to') return
+        const t = Number(ev.data.timeS)
+        const w = Number(ev.data.windowS ?? 0.06)
+        if (!isFinite(t) || !isFinite(w) || w <= 0) return
+        setViewport((cur) => {
+          // Preserve the user's current zoom level when sensible: if
+          // the request's window fits in the current viewport, just
+          // re-centre; otherwise override with the requested window.
+          const curLen = cur ? cur.tEnd - cur.tStart : 0
+          const useLen = curLen > 0 && curLen <= 2 * w ? curLen : w
+          const dur = sweepDurationS
+          let start = t - useLen / 2
+          let end = t + useLen / 2
+          if (dur > 0) {
+            if (start < 0) { end -= start; start = 0 }
+            if (end > dur) { start -= (end - dur); end = dur }
+            start = Math.max(0, start)
+          } else {
+            start = Math.max(0, start)
+          }
+          return { tStart: start, tEnd: end }
+        })
+      }
+      return () => ch.close()
+    } catch { /* ignore */ }
+  }, [sweepDurationS])
+
   // ---- Form state ----
   const [params, setParams] = useState<EventsParams>(() => defaultEventsParams())
   const key = `${group}:${series}`
@@ -799,7 +835,33 @@ export function EventDetectionWindow({
                 <div style={{ height: '100%', overflow: 'auto' }}>
                   <EventsResultsTable
                     entry={entry}
-                    onSelect={(idx) => selectEvent(group, series, idx)}
+                    onSelect={(idx) => {
+                      // Mark selected for marker-highlighting in the
+                      // viewer AND re-centre the viewport on that
+                      // event so clicking a row becomes a quick
+                      // "show me this one in context" action. Same
+                      // behaviour as the detached browser's
+                      // zoom-to-event message, but we set viewport
+                      // directly since we're in the same window.
+                      selectEvent(group, series, idx)
+                      const e = entry?.events[idx]
+                      if (e) {
+                        const useLen = viewport
+                          && viewport.tEnd - viewport.tStart > 0
+                          && viewport.tEnd - viewport.tStart <= 0.12
+                            ? viewport.tEnd - viewport.tStart
+                            : 0.06
+                        let start = e.peakTimeS - useLen / 2
+                        let end = e.peakTimeS + useLen / 2
+                        const dur = sweepDurationS
+                        if (dur > 0) {
+                          if (start < 0) { end -= start; start = 0 }
+                          if (end > dur) { start -= (end - dur); end = dur }
+                          start = Math.max(0, start)
+                        } else { start = Math.max(0, start) }
+                        setViewport({ tStart: start, tEnd: end })
+                      }
+                    }}
                     onDiscard={(idx) => onDiscardEvent(idx)}
                   />
                 </div>

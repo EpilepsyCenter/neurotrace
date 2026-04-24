@@ -713,7 +713,14 @@ def measure_event_kinetics(
     direction: str = "negative",
     baseline_search_ms: float = 10.0,
     avg_baseline_ms: float = 1.0,
-    avg_peak_ms: float = 1.0,
+    # Default 0 → no boxcar smoothing on peak refinement. A uniform
+    # kernel is SYMMETRIC but the EPSC / IPSC shape is NOT — fast
+    # rise, slow decay — so convolving with a 1 ms kernel shifts the
+    # extremum toward the decay side by ~½ kernel width and the
+    # reported peak lands a couple of samples late. Opt in by setting
+    # avg_peak_ms > 0 when you WANT the denoised position (e.g. very
+    # noisy recordings where the raw sample argmin jitters).
+    avg_peak_ms: float = 0.0,
     rise_low_pct: float = 10.0,
     rise_high_pct: float = 90.0,
     decay_pct: float = 37.0,
@@ -751,35 +758,61 @@ def measure_event_kinetics(
 
     # ---- Refine peak ----
     #
-    # EE's two-pass approach: detect on raw, then smooth a small
-    # window around the raw peak and find the new peak (argmax/argmin
-    # in the smoothed data). Reporting BOTH a smoothed peak_idx AND a
-    # smoothed peak_val keeps the marker dot visually on the apparent
-    # peak of the trace — otherwise the reported peak_val sits
-    # halfway up the noise envelope and the dot renders off-trace.
-    avg_peak_samples = max(1, int(round(avg_peak_ms / 1000.0 * sr)))
-    # Search ±3× the smoothing window around the raw peak for the
-    # smoothed extremum — matches EE. Stays out of neighbouring
-    # events because min-IEI enforces peak separation upstream.
-    search = max(avg_peak_samples, 1) * 3
-    s_a = max(0, peak_idx - search)
-    s_b = min(n, peak_idx + search + 1)
-    if s_b - s_a > 2 * avg_peak_samples:
-        # Smooth via uniform window then pick the extremum.
-        k = 2 * avg_peak_samples + 1
-        pad = s_a
-        # np.convolve 'same' keeps alignment. Uniform kernel of k samples.
-        local = np.asarray(values[s_a:s_b], dtype=float)
-        if k >= local.size:
-            smoothed = np.full_like(local, float(np.mean(local)))
+    # Two paths depending on ``avg_peak_ms``:
+    #
+    # (a) ``avg_peak_ms > 0`` — boxcar-smooth a ± avg_peak window
+    #     around the raw peak, take the argmin/max of the smoothed
+    #     segment. Matches EE's original behaviour for noisy data
+    #     where the raw-sample extremum jitters. CAUTION: the
+    #     uniform kernel is symmetric but the event shape is not, so
+    #     this biases the peak toward the decay side by ≈½ kernel
+    #     width. Leave off unless recordings are very noisy.
+    #
+    # (b) ``avg_peak_ms == 0`` (default) — keep the raw-sample
+    #     extremum index and parabola-interpolate peak_val across the
+    #     three samples around it. Gives sub-sample-accurate peak
+    #     value without the asymmetric-smoothing lag. peak_idx stays
+    #     on the nearest integer sample; the stored peak_val is the
+    #     parabola vertex.
+    avg_peak_samples = int(round(avg_peak_ms / 1000.0 * sr)) if avg_peak_ms > 0 else 0
+    if avg_peak_samples >= 1:
+        # (a) smoothed-window refinement
+        search = avg_peak_samples * 3
+        s_a = max(0, peak_idx - search)
+        s_b = min(n, peak_idx + search + 1)
+        if s_b - s_a > 2 * avg_peak_samples:
+            k = 2 * avg_peak_samples + 1
+            pad = s_a
+            local = np.asarray(values[s_a:s_b], dtype=float)
+            if k >= local.size:
+                smoothed = np.full_like(local, float(np.mean(local)))
+            else:
+                kernel = np.ones(k) / float(k)
+                smoothed = np.convolve(local, kernel, mode="same")
+            rel = int(np.argmin(smoothed)) if sign < 0 else int(np.argmax(smoothed))
+            peak_idx = pad + rel
+            peak_val = float(smoothed[rel])
         else:
-            kernel = np.ones(k) / float(k)
-            smoothed = np.convolve(local, kernel, mode="same")
-        rel = int(np.argmin(smoothed)) if sign < 0 else int(np.argmax(smoothed))
-        peak_idx = pad + rel
-        peak_val = float(smoothed[rel])
+            peak_val = float(values[peak_idx])
     else:
-        peak_val = float(values[peak_idx])
+        # (b) parabolic sub-sample refinement — unbiased on
+        # asymmetric events.
+        if 0 < peak_idx < n - 1:
+            y0 = float(values[peak_idx - 1])
+            y1 = float(values[peak_idx])
+            y2 = float(values[peak_idx + 1])
+            denom = y0 - 2.0 * y1 + y2
+            if denom != 0.0:
+                # Vertex offset in samples, in (-0.5, 0.5) for a real peak.
+                dx = 0.5 * (y0 - y2) / denom
+                if -1.0 < dx < 1.0:
+                    peak_val = y1 - 0.25 * (y0 - y2) * dx
+                else:
+                    peak_val = y1
+            else:
+                peak_val = y1
+        else:
+            peak_val = float(values[peak_idx])
 
     # ---- Rough pre-event baseline (Jonas step 1) ----
     bl_samples = max(1, int(round(baseline_search_ms / 1000.0 * sr)))

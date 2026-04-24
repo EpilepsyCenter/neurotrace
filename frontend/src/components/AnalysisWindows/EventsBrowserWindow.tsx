@@ -463,42 +463,58 @@ function EventBrowserPanel({
               const hxL = u.valToPos(halfLeft, 'x', true)
               const hxR = u.valToPos(halfRight, 'x', true)
               ctx.strokeStyle = '#ffeb3b'
-              ctx.setLineDash([3 * dpr, 3 * dpr])
-              ctx.lineWidth = 1 * dpr
+              ctx.setLineDash([4 * dpr, 3 * dpr])
+              ctx.lineWidth = 1.25 * dpr
               ctx.beginPath()
               ctx.moveTo(hxL, hyPos); ctx.lineTo(hxR, hyPos)
               ctx.stroke()
               ctx.setLineDash([])
+              // FWHM crossing dots — sit on the trace, so keep them a
+              // touch smaller than the foot/peak anchors but still
+              // clearly visible (matching the 20/80 rise dots).
               ctx.fillStyle = '#ffeb3b'
-              ctx.beginPath(); ctx.arc(hxL, hyPos, 2.5 * dpr, 0, 2 * Math.PI); ctx.fill()
-              ctx.beginPath(); ctx.arc(hxR, hyPos, 2.5 * dpr, 0, 2 * Math.PI); ctx.fill()
+              ctx.strokeStyle = '#ffffff'
+              ctx.lineWidth = 1 * dpr
+              ctx.beginPath(); ctx.arc(hxL, hyPos, 4 * dpr, 0, 2 * Math.PI)
+              ctx.fill(); ctx.stroke()
+              ctx.beginPath(); ctx.arc(hxR, hyPos, 4 * dpr, 0, 2 * Math.PI)
+              ctx.fill(); ctx.stroke()
             }
-            const drawDot = (x: number, y: number, color: string, r: number = 3.5) => {
+            // Radii in CSS pixels (multiplied by dpr inside drawDot).
+            // Matches the burst markers on the main TraceViewer so the
+            // browser doesn't feel visually secondary. Peak is biggest
+            // (the event's primary anchor); kinetic markers a touch
+            // smaller; rise 20 / 80 and half-amplitude crossings are
+            // fine dots because they're on the already-visible trace
+            // rather than the baseline reference line.
+            const drawDot = (x: number, y: number, color: string, r: number = 5) => {
               if (!isFinite(x) || !isFinite(y)) return
               ctx.fillStyle = color
               ctx.beginPath(); ctx.arc(x, y, r * dpr, 0, 2 * Math.PI); ctx.fill()
-              ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1 * dpr; ctx.stroke()
+              ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5 * dpr; ctx.stroke()
             }
-            // Foot (gray)
-            drawDot(u.valToPos(footOff, 'x', true), byPos, '#9e9e9e', 3)
-            // 20/80 rise (cyan / teal) on the rising edge
+            // Foot (gray) — same size as burst baseline dots.
+            drawDot(u.valToPos(footOff, 'x', true), byPos, '#9e9e9e', 5)
+            // 20/80 rise (cyan / teal) on the rising edge. Slightly
+            // smaller because they sit ON the trace line — too big and
+            // they'd obscure the rising edge shape.
             if (rise20Off != null && amp !== 0) {
               const t20 = ev.baselineVal + 0.20 * amp
               drawDot(u.valToPos(rise20Off, 'x', true),
-                      u.valToPos(t20, 'y', true), '#4dd0e1', 2.5)
+                      u.valToPos(t20, 'y', true), '#4dd0e1', 4)
             }
             if (rise80Off != null && amp !== 0) {
               const t80 = ev.baselineVal + 0.80 * amp
               drawDot(u.valToPos(rise80Off, 'x', true),
-                      u.valToPos(t80, 'y', true), '#26a69a', 2.5)
+                      u.valToPos(t80, 'y', true), '#26a69a', 4)
             }
-            // Peak (red) at (0, peak_val)
+            // Peak (red) — biggest, primary anchor for the event.
             const pxPos = u.valToPos(0, 'x', true)
             const pyPos = u.valToPos(ev.peakVal, 'y', true)
-            drawDot(pxPos, pyPos, '#e57373', 4)
+            drawDot(pxPos, pyPos, '#e57373', 6)
             // Decay endpoint (purple)
             if (decayOff != null) {
-              drawDot(u.valToPos(decayOff, 'x', true), byPos, '#ab47bc', 3)
+              drawDot(u.valToPos(decayOff, 'x', true), byPos, '#ab47bc', 5)
             }
             ctx.restore()
           }],
@@ -570,6 +586,31 @@ function EventBrowserPanel({
           <span>Filter{entry.params.filterEnabled
             ? '' : ' (off in detection)'}</span>
         </label>
+        {ev && (
+          <button className="btn"
+            onClick={() => {
+              // Tell the main events window to re-centre its viewer
+              // on this event. Keeps the detached browser useful
+              // for QC: poke through events here, hit "Go to event"
+              // to see the same event in the main window's context
+              // (cursors, markers, trace neighbours). The main
+              // window's BroadcastChannel listener consumes this.
+              if (!ev) return
+              try {
+                const ch = new BroadcastChannel('neurotrace-sync')
+                ch.postMessage({
+                  type: 'events-navigate-to',
+                  timeS: ev.peakTimeS,
+                  windowS: 0.06,
+                })
+                ch.close()
+              } catch { /* ignore */ }
+            }}
+            style={{ padding: '3px 10px' }}
+            title="Recentre the main Events window's viewer on this event">
+            Go to event
+          </button>
+        )}
         {ev && (
           <button className="btn" onClick={() => idx != null && onDiscard(idx)}
             style={{ padding: '3px 10px' }} title="Remove this event">

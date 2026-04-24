@@ -144,7 +144,8 @@ export function TreeNavigator() {
                       flexShrink: 0,
                     }} />
 
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span className="tree-node-label"
+                      style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {series.label || `Series ${series.index + 1}`}
                     </span>
 
@@ -266,7 +267,8 @@ export function TreeNavigator() {
                         }}
                         className="tree-row"
                       >
-                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span className="tree-node-label"
+                          style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {sweep.label || `Sweep ${sweep.index + 1}`}
                         </span>
                         {(isExcluded || isHovered) && (
@@ -378,6 +380,7 @@ export function TreeNavigator() {
                           />
                         ) : (
                           <span
+                            className="tree-node-label"
                             onDoubleClick={(e) => { e.stopPropagation(); setEditingAvg(avg.id) }}
                             title={`Sources: sweeps ${avg.sourceSweepIndices.map((i) => i + 1).join(', ')} — double-click to rename`}
                             style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}

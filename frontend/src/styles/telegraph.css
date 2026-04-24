@@ -195,6 +195,15 @@ span[style*="font-weight: 600"] {
   letter-spacing: 0.06em;
 }
 
+/* Series / sweep / averaged-sweep name labels in the file-tree
+   navigator on the left sidebar. Group labels already read as mono
+   + UPPERCASE via the ``fontWeight: 600`` attribute rule above, so
+   this just covers the remaining tree rows. Kept in regular case so
+   user-chosen sweep names stay legible; only the FONT changes. */
+.tree-node-label {
+  font-family: var(--font-mono);
+}
+
 /* Table headers — <th> is always a label, so they belong in UI sans
    even though their default inline style hits the selector above via
    surrounding spans. Explicit reset keeps column headers readable. */

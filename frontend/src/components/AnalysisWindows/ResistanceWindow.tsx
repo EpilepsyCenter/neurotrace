@@ -45,6 +45,10 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
 
   const [currentGroup, setCurrentGroup] = useState(0)
   const [currentSeries, setCurrentSeries] = useState(0)
+  // Channel (trace index) selector — previously hard-coded to 0.
+  // Kept in sync with the current series so multi-channel recordings
+  // can pick which amplifier channel feeds the resistance fit.
+  const [currentChannel, setCurrentChannel] = useState(0)
   const [vStep, setVStep] = useState(5)
   const [avgFrom, setAvgFrom] = useState(1)
   const [avgTo, setAvgTo] = useState(1)
@@ -53,11 +57,12 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Unified run-scope dropdown (all / range-averaged / single), same
-  // pattern as AP/FPsp/IV. "range" is uniquely "averaged over the
+  // Unified run-scope dropdown. "range" is uniquely "averaged over the
   // range" for Resistance — the underlying action is runAveraged(from,
-  // to), distinct from running each sweep individually.
-  type RunMode = 'all' | 'range' | 'one'
+  // to), distinct from running each sweep individually. "selected"
+  // only appears when the user has multi-selected sweeps in the tree
+  // navigator, same convention as every other analysis window.
+  type RunMode = 'all' | 'selected' | 'range' | 'one'
   const [runMode, setRunMode] = useState<RunMode>('all')
   const [sweepOne, setSweepOne] = useState(1)
 
@@ -156,6 +161,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   // layout pattern.
   const onRun = () => {
     if (runMode === 'all') runAllSweeps()
+    else if (runMode === 'selected') runSelected()
     else if (runMode === 'range') runAveraged()
     else {
       const idx = Math.max(0, Math.min(totalSweeps - 1, sweepOne - 1))
@@ -170,6 +176,30 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   const totalSweeps = currentSeriesInfo?.sweepCount ?? 0
   const stimulus: StimulusInfo | null = currentSeriesInfo?.stimulus ?? null
   const filePath = fileInfo?.filePath || ''
+  // Channel list mirrors whatever the current series has. Resistance
+  // traditionally runs on trace 0 but multi-channel rigs can have the
+  // test pulse on a specific amplifier channel.
+  const channels = currentSeriesInfo?.channels || []
+  // Clamp channel to the current series' channel count so switching
+  // series never leaves the picker pointing at a non-existent channel.
+  useEffect(() => {
+    if (channels.length > 0 && currentChannel >= channels.length) {
+      setCurrentChannel(0)
+    }
+  }, [channels, currentChannel])
+
+  // Sweeps multi-selected in the tree navigator, for the "Selected
+  // sweeps" run-mode option. Empty when no multi-selection exists;
+  // the dropdown option is hidden in that case.
+  const selectedSweepsList = useAppStore((s) =>
+    s.selectedSweeps[`${currentGroup}:${currentSeries}`] ?? [])
+  // If the user had "Selected" picked and then cleared the selection,
+  // fall back to "all" so the Run button stays actionable.
+  useEffect(() => {
+    if (runMode === 'selected' && selectedSweepsList.length === 0) {
+      setRunMode('all')
+    }
+  }, [runMode, selectedSweepsList.length])
 
   // Exclusion state — mirror from store so we can show a tiny badge on
   // the preview sweep when it's excluded (run on it is still allowed).
@@ -312,7 +342,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           analysis_type: 'resistance',
-          group: currentGroup, series: currentSeries, sweep: sweepIdx, trace: 0,
+          group: currentGroup, series: currentSeries, sweep: sweepIdx, trace: currentChannel,
           cursors, params: analysisParams(),
         }),
       })
@@ -341,7 +371,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
       }
 
       const trResp = await fetch(
-        `${backendUrl}/api/traces/average?group=${currentGroup}&series=${currentSeries}&trace=0&sweeps=${indices.join(',')}&max_points=0`
+        `${backendUrl}/api/traces/average?group=${currentGroup}&series=${currentSeries}&trace=${currentChannel}&sweeps=${indices.join(',')}&max_points=0`
       )
       if (trResp.ok) {
         const td = await trResp.json()
@@ -353,7 +383,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           analysis_type: 'resistance',
-          group: currentGroup, series: currentSeries, trace: 0,
+          group: currentGroup, series: currentSeries, trace: currentChannel,
           sweep_indices: indices, cursors, params: analysisParams(),
         }),
       })
@@ -363,6 +393,40 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
       setMeasurements((prev) => [...prev, row])
       await storeRows([row])
       applyFit(data.measurement)
+    } catch (err: any) { setError(err.message) }
+    setLoading(false)
+  }
+
+  // ---- API: selected sweeps (tree multi-selection → per-sweep rows) ----
+  // Same endpoint as runAllSweeps but restricts to the user's current
+  // multi-selection in the tree. Cheaper than asking the backend to
+  // accept a sparse `sweep_indices` list — we just iterate here so
+  // excluded sweeps are still honoured if the user ticks some of the
+  // selected ones as excluded.
+  const runSelected = async () => {
+    if (selectedSweepsList.length === 0) return
+    setLoading(true); setError(null)
+    try {
+      const excluded = new Set(useAppStore.getState()
+        .excludedSweeps[`${currentGroup}:${currentSeries}`] ?? [])
+      const rows: MeasurementRow[] = []
+      for (const swIdx of selectedSweepsList) {
+        if (excluded.has(swIdx)) continue
+        const resp = await fetch(`${backendUrl}/api/analysis/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            analysis_type: 'resistance',
+            group: currentGroup, series: currentSeries, sweep: swIdx, trace: currentChannel,
+            cursors, params: analysisParams(),
+          }),
+        })
+        if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
+        const data = await resp.json()
+        rows.push(toRow(data.measurement, `sweep ${swIdx + 1}`, swIdx + 1))
+      }
+      setMeasurements((prev) => [...prev, ...rows])
+      await storeRows(rows)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -378,7 +442,7 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           analysis_type: 'resistance',
-          group: currentGroup, series: currentSeries, trace: 0,
+          group: currentGroup, series: currentSeries, trace: currentChannel,
           sweep_start: 0, sweep_end: totalSweeps,
           excluded_sweeps: excluded.length > 0 ? excluded : undefined,
           cursors, params: analysisParams(),
@@ -866,9 +930,10 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
       display: 'flex', flexDirection: 'column', height: '100%',
       padding: 10, gap: 10, minHeight: 0,
     }}>
-      {/* Selectors — thin top row, always visible. Wrapped in the
-          bg-secondary chrome tone so the window's top row + left
-          panel read as one cohesive region. */}
+      {/* Selectors — Group / Series / Channel / Sweep, same shape as
+          AP, FPsp, Event Detection, etc. Wrapped in bg-secondary so
+          the window's "chrome" (selectors + left panel) reads as one
+          cohesive region, matching the main-window tree sidebar. */}
       <div style={{
         display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
         flexShrink: 0,
@@ -877,36 +942,62 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         borderRadius: 4,
         border: '1px solid var(--border)',
       }}>
-        <label style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>Series:</label>
-        <select
-          value={`${currentGroup}-${currentSeries}`}
-          onChange={(e) => { const [g, s] = e.target.value.split('-').map(Number); setCurrentGroup(g); setCurrentSeries(s); setFitTime(null); setFitValues(null) }}
-          style={{ flex: 1, minWidth: 200 }}
-        >
-          {groups.map((g: any) => g.series.map((s: any) => (
-            <option key={`${g.index}-${s.index}`} value={`${g.index}-${s.index}`}>
-              {g.label} / {s.label} ({s.sweepCount} sw)
-            </option>
-          )))}
-        </select>
-        {/* Sweep navigator */}
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-          <button
-            className="btn" onClick={goPrev}
-            disabled={previewSweep <= 0 || totalSweeps === 0}
-            title="Previous sweep"
-            style={{ padding: '2px 8px' }}
-          >←</button>
-          <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', minWidth: 58, textAlign: 'center' }}>
-            {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
+        <Field label="Group">
+          <select value={currentGroup}
+            onChange={(e) => {
+              setCurrentGroup(Number(e.target.value))
+              setCurrentSeries(0)
+              setFitTime(null); setFitValues(null)
+            }}
+            disabled={groups.length === 0}>
+            {groups.map((g: any, i: number) => (
+              <option key={i} value={i}>{g.label || `G${i + 1}`}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Series">
+          <select value={currentSeries}
+            onChange={(e) => {
+              setCurrentSeries(Number(e.target.value))
+              setFitTime(null); setFitValues(null)
+            }}
+            disabled={seriesList.length === 0}>
+            {seriesList.map((s: any, i: number) => (
+              <option key={i} value={i}>
+                {s.label || `S${i + 1}`} ({s.sweepCount} sw)
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Channel">
+          <select value={currentChannel}
+            onChange={(e) => setCurrentChannel(Number(e.target.value))}
+            disabled={channels.length === 0}>
+            {channels.map((c: any) => (
+              <option key={c.index} value={c.index}>
+                {c.label} ({c.units})
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Sweep (preview)">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            <button className="btn" onClick={goPrev}
+              disabled={previewSweep <= 0 || totalSweeps === 0}
+              title="Previous sweep"
+              style={{ padding: '2px 8px' }}>←</button>
+            <span style={{
+              minWidth: 58, textAlign: 'center',
+              fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
+            }}>
+              {totalSweeps > 0 ? `${previewSweep + 1} / ${totalSweeps}` : '— / —'}
+            </span>
+            <button className="btn" onClick={goNext}
+              disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
+              title="Next sweep"
+              style={{ padding: '2px 8px' }}>→</button>
           </span>
-          <button
-            className="btn" onClick={goNext}
-            disabled={previewSweep >= totalSweeps - 1 || totalSweeps === 0}
-            title="Next sweep"
-            style={{ padding: '2px 8px' }}
-          >→</button>
-        </span>
+        </Field>
       </div>
 
       {/* Main body: two-column flex. LEFT = params; RIGHT = viewer +
@@ -1017,7 +1108,14 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
               <select value={runMode}
                 onChange={(e) => setRunMode(e.target.value as RunMode)}
                 style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
-                <option value="all">All sweeps</option>
+                <option value="all">
+                  All sweeps ({totalSweeps})
+                </option>
+                {selectedSweepsList.length > 0 && (
+                  <option value="selected">
+                    Selected ({selectedSweepsList.length})
+                  </option>
+                )}
                 <option value="range">Averaged range</option>
                 <option value="one">Single sweep</option>
               </select>
@@ -1226,5 +1324,19 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         </div>{/* close RIGHT panel */}
       </div>{/* close two-column body */}
     </div>
+  )
+}
+
+/** Small label / child wrapper used in the top selector row so
+ *  Group / Series / Channel / Sweep all lay out the same way across
+ *  analysis windows. The span gets ``className="selector-label"`` so
+ *  the Telegraph palette's uppercase-mono treatment picks it up. */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
+      <span className="selector-label"
+        style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
+      {children}
+    </label>
   )
 }

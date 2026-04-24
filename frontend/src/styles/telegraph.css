@@ -124,6 +124,45 @@
 }
 
 /* ============================================================
+   Mono-leaning surfaces — the Telegraph aesthetic wants numeric
+   readouts, form controls, and tabular data in JetBrains Mono so
+   the UI reads like a scientific instrument. Titles, menus, body
+   copy keep the UI sans (IBM Plex Sans) via the global default.
+
+   Rules stay low-specificity so component-level font overrides
+   (e.g. explicit ``fontFamily: 'var(--font-ui)'`` in a React
+   style prop) still win where needed.
+   ============================================================ */
+
+/* All form controls — the text inside an <input>, <select>, or
+   <textarea> is almost always machine-oriented data (numbers,
+   file names, code, parameters). */
+input,
+select,
+textarea,
+button.num-stepper {
+  font-family: var(--font-mono);
+}
+
+/* Table bodies — numeric / tabular by default. Headers stay UI sans
+   (they're labels, not data). */
+table tbody,
+table td {
+  font-family: var(--font-mono);
+}
+
+/* Common “readout” classes in the codebase — sweep counters,
+   viewport indicators, coordinate tooltips. Everything that
+   displays a value should read as one. */
+.readout,
+.num-readout,
+.mono,
+.monospace,
+code, kbd, samp {
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
    .led — status-bar pill with a small glowing indicator dot.
    Base class gives the pill chrome; the ``ok`` / ``err`` / ``off``
    modifiers colour the dot. Plain ``.led`` with no modifier is

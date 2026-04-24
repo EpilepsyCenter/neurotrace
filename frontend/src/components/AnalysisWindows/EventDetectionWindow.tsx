@@ -1120,6 +1120,12 @@ function Card({
    *  still toggles collapse. */
   rightAdornment?: React.ReactNode
 }) {
+  // One header span per card, arrow pinned to the right via
+  // `margin-left: auto` rather than a phantom spacer + flex:1 on the
+  // arrow itself. The old layout rendered the arrow in a flex-row as
+  // the growing child which, when combined with CSS transform on
+  // collapse, sometimes produced half-redrawn "leftover" glyphs next
+  // to the title after repeated open/close cycles.
   const header = (
     <div
       onClick={collapsible ? onToggle : undefined}
@@ -1129,15 +1135,17 @@ function Card({
         userSelect: 'none',
       }}>
       <span style={{ fontWeight: 600, color: 'var(--text-muted)' }}>{title}</span>
-      {rightAdornment && <span style={{ flex: 1 }} />}
       {rightAdornment}
       {collapsible && (
-        <span style={{
-          color: 'var(--text-muted)', flex: rightAdornment ? 0 : 1,
-          textAlign: 'right',
-          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
-          transition: 'transform 0.15s',
+        <span aria-hidden="true" style={{
+          marginLeft: 'auto',
+          color: 'var(--text-muted)',
           display: 'inline-block',
+          width: 10, textAlign: 'center',
+          lineHeight: 1,
+          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+          transformOrigin: 'center',
+          transition: 'transform 0.15s',
         }}>▾</span>
       )}
     </div>

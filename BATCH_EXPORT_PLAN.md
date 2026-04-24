@@ -13,7 +13,7 @@ Prism-ready file.
 | **Series role tagging** | Each series in each cell carries a free-text role (`TP_pre`, `IV`, `events_baseline`, `events_drug`, `TP_post`, …). Stored in sidecar `meta.series_roles`. Export references roles, not series indices — so protocols at different positions across cells still line up. |
 | **Number of experimental groups** | Arbitrary. `group_tag` is a string; any distinct values become columns in the export. |
 | **Per-cell unit** | One file = one cell for the first milestone. Upgradable to one-HEKA-group-per-cell later (multi-cell-per-file recordings). |
-| **Export format** | `.xlsx` workbook, **one sheet per metric**, sheet name prefixed by analysis type so all events metrics cluster alphabetically (`events__baseline__rate_hz`, `ap__rheobase_pa`, …). Prism imports a sheet via New Table → Paste. |
+| **Export format** | **One `.xlsx` per analysis type** (events.xlsx, ap.xlsx, iv.xlsx, …) dropped into a chosen output folder, plus a `_cells.xlsx` metadata file. Keeps each workbook to ≤ 30 sheets; scales cleanly as analyses grow. User picks the inner layout: **(a) Prism-ready** = one sheet per metric × role, 3-column grouped-table shape ready to paste into Prism, or **(b) Excel-friendly** = one sheet per role with all metrics as column groups. Default = Prism-ready; toggle persisted in prefs. |
 | **Future export formats** | `.pzfx` (Prism native XML) — phase 4. Multi-file CSV zip — not planned unless someone asks. |
 | **Scope** | End-to-end MVP in one session: sidecar metadata → summariser backend → batch dialog → xlsx writer. PZFX deferred. |
 
@@ -179,13 +179,25 @@ Click **Export…** → save-as dialog → writes `.xlsx`.
 
 `backend/export/prism_xlsx.py`. Uses `openpyxl`.
 
-- One workbook.
-- Sheet name: `<analysis>__<role>__<metric>` (e.g. `events__baseline__rate_hz`).
-  Role omitted if the metric isn't role-filtered.
-- Sheet layout: row 1 = group names (columns), row 2+ = cell values
-  sorted by cell_id within each group.
+### File layout
 
-Example sheet `events__baseline__rate_hz`:
+User picks a destination FOLDER. The writer creates one workbook per
+analysis type, each named after the analysis (`events.xlsx`,
+`ap.xlsx`, `iv.xlsx`, `resistance.xlsx`, `bursts.xlsx`, `fpsp.xlsx`).
+Files without matching data in the selection are skipped entirely.
+
+Always also writes `_cells.xlsx` in the same folder: one row per
+included cell, columns = file path, cell_id, group_tag, notes,
+available series roles. Self-documents the export.
+
+### Inside each workbook — two modes
+
+**Mode A — Prism-ready (default)**
+
+One sheet per `<role>__<metric>` pair (role omitted for analyses
+without roles, like resistance).
+
+Sheet layout:
 
 | WT          | HET         | KO          |
 |-------------|-------------|-------------|
@@ -194,11 +206,48 @@ Example sheet `events__baseline__rate_hz`:
 | 11.2        | 8.8         |             |
 | 13.8        |             |             |
 
-Paste directly into Prism's Grouped table.
+Row 1 = group names (ordered). Row 2+ = cell values, sorted by
+`cell_id` within each group. Blanks = missing (either the cell has
+no matching role, or the metric couldn't be computed).
 
-Also include a `__cells` sheet at position 0 listing every included
-cell with its metadata (cell_id, group, file path, notes, included/
-excluded status) so the export is self-documenting.
+Paste directly into Prism → New Table → Grouped.
+
+Typical count: 10–30 sheets per file. Sorted alphabetically:
+
+```
+baseline__amp_mean
+baseline__decay_mean_ms
+baseline__fwhm_mean_ms
+baseline__rate_hz
+baseline__rise_mean_ms
+drug__amp_mean
+drug__decay_mean_ms
+...
+```
+
+**Mode B — Excel-friendly**
+
+One sheet per role. Within the sheet, ALL metrics laid out as column
+groups. Layout:
+
+| rate_hz (WT) | rate_hz (HET) | rate_hz (KO) | amp_mean (WT) | amp_mean (HET) | … |
+|--------------|---------------|---------------|----------------|-----------------|---|
+
+Same cell → row relationship; easier to scan / pivot in Excel; Prism
+paste works but requires selecting a sub-column-range per metric.
+
+### Format toggle
+
+Persisted in prefs under `batchExport.layout = 'prism' | 'excel'`.
+Defaults to `prism`. Lives in the export dialog's step 3.
+
+### Always-on safety rails
+
+- Missing values → blank cell (Prism's "no data" convention).
+- Unicode-safe cell values; units in sheet names rather than cell
+  values so numerics stay numeric.
+- `_cells.xlsx` flags any row whose sidecar lacked the requested
+  role — user sees exactly which cells were partially excluded.
 
 ## Phased delivery (all in one session)
 
@@ -220,6 +269,9 @@ excluded status) so the export is self-documenting.
 
 ## Deferred (not in this sprint)
 
+- **"Combine into single xlsx"** toggle — concatenates all analysis
+  workbooks into one for email-a-cohort scenarios. Easy to add
+  later; skip until someone asks.
 - `.pzfx` direct Prism-XML export
 - "Save batch config" → reusable for repeat exports
 - Summary-plot preview (mean ± SEM bar chart per metric/group)

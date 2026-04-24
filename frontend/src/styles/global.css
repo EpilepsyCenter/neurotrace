@@ -527,10 +527,9 @@ select:focus {
   background: var(--bg-tertiary);
 }
 
-/* ============================================================
-   Telegraph theme overrides — pulled in AT THE END so its token
-   values win over the defaults defined above. Component code
-   keeps referencing the same --token names; only the RESOLVED
-   values (fonts, colour palette, LED accents) change.
-   ============================================================ */
-@import './telegraph.css';
+/* Telegraph theme is imported AFTER this stylesheet from
+   ``frontend/src/main.tsx`` so its :root token values win. Doing
+   the cascade ordering in JS rather than via a bottom-of-file
+   @import here sidesteps the CSS spec rule that @import must
+   appear before any other rule — if the @import lived at the
+   bottom of this file, the parser would silently drop it. */

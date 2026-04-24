@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 /* ============================================================
    Theme-independent tokens (shared by dark & light)
    ============================================================ */
@@ -524,3 +526,11 @@ select:focus {
 .font-size-row button:hover:not(.active) {
   background: var(--bg-tertiary);
 }
+
+/* ============================================================
+   Telegraph theme overrides — pulled in AT THE END so its token
+   values win over the defaults defined above. Component code
+   keeps referencing the same --token names; only the RESOLVED
+   values (fonts, colour palette, LED accents) change.
+   ============================================================ */
+@import './telegraph.css';

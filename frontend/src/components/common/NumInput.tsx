@@ -23,6 +23,7 @@ export function NumInput({
   disabled,
   title,
   className,
+  decimals,
 }: {
   value: number
   onChange: (v: number) => void
@@ -35,13 +36,32 @@ export function NumInput({
   disabled?: boolean
   title?: string
   className?: string
+  /** When set, the displayed value is formatted via ``.toFixed(decimals)``
+   *  so long floats (e.g. 0.12345678) don't spill outside the input
+   *  box. Applies only when the input isn't focused — the user can
+   *  still type any precision they want. Trailing zeros are trimmed
+   *  to avoid showing "1.5000" when the user typed "1.5". */
+  decimals?: number
 }) {
-  const [local, setLocal] = useState(String(value))
+  // Format a number for display. Respects `decimals` if provided,
+  // else uses JavaScript's default String(n) (no truncation).
+  const fmt = (n: number): string => {
+    if (decimals == null) return String(n)
+    if (!isFinite(n)) return String(n)
+    let s = n.toFixed(decimals)
+    // Trim trailing zeros after the decimal point ("1.5000" → "1.5").
+    // Also trim a trailing bare dot left behind ("1." → "1").
+    if (s.includes('.')) {
+      s = s.replace(/0+$/, '').replace(/\.$/, '')
+    }
+    return s
+  }
+  const [local, setLocal] = useState(fmt(value))
   const [focused, setFocused] = useState(false)
 
   // Sync from external value when NOT focused (store changed elsewhere)
   useEffect(() => {
-    if (!focused) setLocal(String(value))
+    if (!focused) setLocal(fmt(value))
   }, [value, focused])
 
   const commit = () => {
@@ -53,9 +73,9 @@ export function NumInput({
       if (max != null) clamped = Math.min(max, clamped)
       onChange(clamped)
       // Snap the displayed value to the canonical dot form.
-      setLocal(String(clamped))
+      setLocal(fmt(clamped))
     } else {
-      setLocal(String(value))
+      setLocal(fmt(value))
     }
   }
 

@@ -617,40 +617,66 @@ export function EventDetectionWindow({
               {/* Rise-time convention — standard presets (10–90 is the
                   classic e-phys default, 20–80 is less noise-sensitive,
                   37–63 is the "1 τ" span). Custom unlocks the two
-                  number fields. Whatever pair is active feeds the per-
-                  event `rise_time_ms` calculation. */}
-              <Row label="Rise convention">
-                <select style={{ width: '100%' }}
-                  value={(() => {
-                    const lo = params.riseLowPct, hi = params.riseHighPct
-                    if (lo === 10 && hi === 90) return '10-90'
-                    if (lo === 20 && hi === 80) return '20-80'
-                    if (lo === 37 && hi === 63) return '37-63'
-                    return 'custom'
-                  })()}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    if (v === '10-90') setParams((p) => ({ ...p, riseLowPct: 10, riseHighPct: 90 }))
-                    else if (v === '20-80') setParams((p) => ({ ...p, riseLowPct: 20, riseHighPct: 80 }))
-                    else if (v === '37-63') setParams((p) => ({ ...p, riseLowPct: 37, riseHighPct: 63 }))
-                    // 'custom' leaves the current values in place — user
-                    // edits the two fields below, which show inline once
-                    // the preset no longer matches.
-                  }}>
-                  <option value="10-90">10–90 % (default)</option>
-                  <option value="20-80">20–80 % (noise-robust)</option>
-                  <option value="37-63">37–63 % (1 τ span)</option>
-                  <option value="custom">Custom…</option>
-                </select>
-              </Row>
-              <Row label="Rise low %">
-                <NumInput value={params.riseLowPct} step={5} min={0} max={100}
-                  onChange={(v) => setParams((p) => ({ ...p, riseLowPct: v }))} />
-              </Row>
-              <Row label="Rise high %">
-                <NumInput value={params.riseHighPct} step={5} min={0} max={100}
-                  onChange={(v) => setParams((p) => ({ ...p, riseHighPct: v }))} />
-              </Row>
+                  number fields below. Whatever pair is active feeds
+                  the per-event `rise_time_ms` calculation. */}
+              {(() => {
+                const lo = params.riseLowPct, hi = params.riseHighPct
+                const preset =
+                  (lo === 10 && hi === 90) ? '10-90'
+                  : (lo === 20 && hi === 80) ? '20-80'
+                  : (lo === 37 && hi === 63) ? '37-63'
+                  : 'custom'
+                return (
+                  <>
+                    <Row label="Rise convention">
+                      {/* Drop `width:100%` on the select — `Row` already
+                          constrains the right-hand column to 80 px, so
+                          the select now matches the sibling NumInputs
+                          instead of stretching. */}
+                      <select value={preset}
+                        style={{ width: '100%' }}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          if (v === '10-90') setParams((p) => ({ ...p, riseLowPct: 10, riseHighPct: 90 }))
+                          else if (v === '20-80') setParams((p) => ({ ...p, riseLowPct: 20, riseHighPct: 80 }))
+                          else if (v === '37-63') setParams((p) => ({ ...p, riseLowPct: 37, riseHighPct: 63 }))
+                          else {
+                            // Entering Custom — seed with the current
+                            // pair if they're already off-preset;
+                            // otherwise default to 10–90 which the user
+                            // can tweak. Prevents "Custom" from keeping
+                            // a preset's exact values (which would
+                            // snap the dropdown back to that preset on
+                            // the next re-render).
+                            if (preset !== 'custom') {
+                              setParams((p) => ({ ...p, riseLowPct: 15, riseHighPct: 85 }))
+                            }
+                          }
+                        }}>
+                        <option value="10-90">10–90 %</option>
+                        <option value="20-80">20–80 %</option>
+                        <option value="37-63">37–63 %</option>
+                        <option value="custom">Custom…</option>
+                      </select>
+                    </Row>
+                    {/* Only surface the raw % fields when Custom is
+                        selected — keeps the Kinetics card tight for
+                        the 95 % of users who want a preset. */}
+                    {preset === 'custom' && (
+                      <>
+                        <Row label="Rise low %">
+                          <NumInput value={params.riseLowPct} step={5} min={0} max={100}
+                            onChange={(v) => setParams((p) => ({ ...p, riseLowPct: v }))} />
+                        </Row>
+                        <Row label="Rise high %">
+                          <NumInput value={params.riseHighPct} step={5} min={0} max={100}
+                            onChange={(v) => setParams((p) => ({ ...p, riseHighPct: v }))} />
+                        </Row>
+                      </>
+                    )}
+                  </>
+                )
+              })()}
               <Row label="Decay %">
                 <NumInput value={params.decayPct} step={1} min={1} max={99}
                   onChange={(v) => setParams((p) => ({ ...p, decayPct: v }))} />
@@ -1163,15 +1189,32 @@ function SkipRegionsCard({
                   style={{ padding: '1px 6px', fontSize: 10 }}
                   title="Remove this region">✕</button>
               </div>
-              <div style={{ display: 'flex', gap: 4 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 3, flex: 1 }}>
-                  <span style={{ color: 'var(--text-muted)' }}>Start (s)</span>
+              {/* Start / end pinned to 4 decimals + a hard maxWidth so
+                  they don't grow past the card's right border when the
+                  drag resolution pushes a long float into the field
+                  (the flex container would happily let them expand
+                  and overflow). */}
+              <div style={{
+                display: 'flex', gap: 4, minWidth: 0,
+              }}>
+                <label style={{
+                  display: 'flex', alignItems: 'center', gap: 3,
+                  flex: 1, minWidth: 0,
+                }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Start</span>
                   <NumInput value={r.startS} step={0.1} min={0}
+                    decimals={4}
+                    style={{ width: '100%', minWidth: 0, maxWidth: 72 }}
                     onChange={(v) => update(i, { startS: v })} />
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 3, flex: 1 }}>
-                  <span style={{ color: 'var(--text-muted)' }}>End (s)</span>
+                <label style={{
+                  display: 'flex', alignItems: 'center', gap: 3,
+                  flex: 1, minWidth: 0,
+                }}>
+                  <span style={{ color: 'var(--text-muted)' }}>End</span>
                   <NumInput value={r.endS} step={0.1} min={0}
+                    decimals={4}
+                    style={{ width: '100%', minWidth: 0, maxWidth: 72 }}
                     onChange={(v) => update(i, { endS: v })} />
                 </label>
               </div>
@@ -2547,6 +2590,10 @@ function AmplitudeHistogram({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  // Bin width in amplitude units. `null` → auto (√n bins clamped to
+  // [8, 40]). Non-null overrides the auto sizing; matches the IEI
+  // histogram's UX.
+  const [binW, setBinW] = useState<number | null>(null)
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 5) return null
@@ -2554,11 +2601,13 @@ function AmplitudeHistogram({
     const n = amps.length
     const m = mean(amps)
     const s = sd(amps) || 1
-    const nBins = Math.max(8, Math.min(40, Math.round(Math.sqrt(n))))
     const lo = Math.min(...amps), hi = Math.max(...amps)
     const pad = (hi - lo) * 0.05 || 1
     const minE = lo - pad, maxE = hi + pad
-    const bw = (maxE - minE) / nBins
+    const autoBins = Math.max(8, Math.min(40, Math.round(Math.sqrt(n))))
+    const autoBw = (maxE - minE) / autoBins
+    const bw = binW && binW > 0 ? binW : autoBw
+    const nBins = Math.max(1, Math.ceil((maxE - minE) / bw))
     const counts = new Array<number>(nBins).fill(0)
     for (const a of amps) {
       const k = Math.max(0, Math.min(nBins - 1, Math.floor((a - minE) / bw)))
@@ -2570,8 +2619,8 @@ function AmplitudeHistogram({
     const peakCount = Math.max(...counts) || 1
     const gauss = centers.map((x) =>
       peakCount * Math.exp(-0.5 * ((x - m) / s) ** 2))
-    return { centers, counts, gauss, mean: m, sd: s, n }
-  }, [entry])
+    return { centers, counts, gauss, mean: m, sd: s, n, bw, autoBw }
+  }, [entry, binW])
 
   useEffect(() => {
     const container = containerRef.current
@@ -2672,17 +2721,34 @@ function AmplitudeHistogram({
       <div style={{
         display: 'flex', gap: 12, alignItems: 'center',
         fontSize: 'var(--font-size-label)', flexShrink: 0,
-        fontFamily: 'var(--font-mono)',
       }}>
-        {stats
-          ? (
-            <>
-              <span>n = {stats.n}</span>
-              <span>μ = {stats.mean.toFixed(2)} {entry?.units}</span>
-              <span>σ = {stats.sd.toFixed(2)} {entry?.units}</span>
-            </>
-          )
-          : <span style={{ color: 'var(--text-muted)' }}>Need ≥ 5 events.</span>}
+        {/* Bin width — selectable like the IEI histogram. Unit is the
+            amplitude unit (pA in VC, mV in CC); value 0 resets to the
+            auto sqrt-N binning. */}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: 'var(--text-muted)' }}>
+            Bin ({entry?.units ?? ''})
+          </span>
+          <NumInput value={binW ?? 0} step={0.5} min={0}
+            decimals={3}
+            style={{ width: 72 }}
+            onChange={(v) => setBinW(v <= 0 ? null : v)} />
+          {binW == null && (
+            <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+              (auto)
+            </span>
+          )}
+        </label>
+        <span style={{ fontFamily: 'var(--font-mono)' }}>
+          {stats
+            ? (
+              <>
+                n = {stats.n} · μ = {stats.mean.toFixed(2)} {entry?.units}
+                {' · '}σ = {stats.sd.toFixed(2)} {entry?.units}
+              </>
+            )
+            : <span style={{ color: 'var(--text-muted)' }}>Need ≥ 5 events.</span>}
+        </span>
       </div>
       <div ref={containerRef} style={{
         flex: 1, minHeight: 0,

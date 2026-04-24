@@ -1,6 +1,13 @@
 import { create } from 'zustand'
 
 export type ThemeName = 'dark' | 'light'
+/** Colour palette — independent of ``ThemeName``. Each palette has
+ *  its own dark and light sub-theme, selected via ``ThemeName``.
+ *
+ *    classic   — the original bluish / neutral-grey palette
+ *    telegraph — warm amber-on-near-black dark / vellum-paper light,
+ *                with mono-heavy typography and uppercase titles. */
+export type PaletteName = 'classic' | 'telegraph'
 
 // Telegraph-branch dropdowns — IBM Plex Sans / JetBrains Mono first so
 // they're the defaults for new installs. ``Theme default`` is a magic
@@ -28,12 +35,14 @@ export const FONT_SIZES = [11, 12, 13, 14, 15] as const
 
 interface ThemeState {
   theme: ThemeName
+  palette: PaletteName
   fontFamily: string
   monoFont: string
   fontSize: number
 
   setTheme: (t: ThemeName) => void
   toggleTheme: () => void
+  setPalette: (p: PaletteName) => void
   setFontFamily: (f: string) => void
   setMonoFont: (f: string) => void
   setFontSize: (s: number) => void
@@ -44,6 +53,7 @@ const LS_KEY = 'neurotrace-theme-prefs'
 
 interface PersistedPrefs {
   theme?: ThemeName
+  palette?: PaletteName
   fontFamily?: string
   monoFont?: string
   fontSize?: number
@@ -80,6 +90,7 @@ async function loadPrefsAsync(): Promise<PersistedPrefs> {
 function savePrefs(state: ThemeState) {
   const data: PersistedPrefs = {
     theme: state.theme,
+    palette: state.palette,
     fontFamily: state.fontFamily,
     monoFont: state.monoFont,
     fontSize: state.fontSize,
@@ -104,6 +115,10 @@ function savePrefs(state: ThemeState) {
 function applyToDOM(state: ThemeState) {
   const root = document.documentElement
   root.dataset.theme = state.theme
+  // ``data-palette`` gates the Telegraph overrides in telegraph.css.
+  // When set to 'classic', none of telegraph.css's rules match and
+  // the baseline tokens from global.css take over.
+  root.dataset.palette = state.palette
   if (state.fontFamily) {
     root.style.setProperty('--font-ui', state.fontFamily)
   } else {
@@ -122,6 +137,9 @@ function applyToDOM(state: ThemeState) {
 
 const defaults = {
   theme: 'dark' as ThemeName,
+  // Default palette on this branch is Telegraph — users can flip to
+  // the classic blueish palette from the settings popover.
+  palette: 'telegraph' as PaletteName,
   // Empty string = "Theme default" — let the stylesheet decide. New
   // installs on the Telegraph branch get IBM Plex Sans / JetBrains
   // Mono from telegraph.css; old themes get their own defaults.
@@ -145,6 +163,10 @@ function validateTheme(t: unknown): ThemeName {
   return t === 'light' || t === 'dark' ? t : defaults.theme
 }
 
+function validatePalette(p: unknown): PaletteName {
+  return p === 'classic' || p === 'telegraph' ? p : defaults.palette
+}
+
 function validateFontSize(s: unknown): number {
   const n = typeof s === 'number' ? s : defaults.fontSize
   return (FONT_SIZES as readonly number[]).includes(n) ? n : defaults.fontSize
@@ -166,6 +188,7 @@ function validateMonoFont(f: unknown): string {
 
 export const useThemeStore = create<ThemeState>((set, get) => ({
   theme: validateTheme(saved.theme),
+  palette: validatePalette(saved.palette),
   fontFamily: validateFontFamily(saved.fontFamily),
   monoFont: validateMonoFont(saved.monoFont),
   fontSize: validateFontSize(saved.fontSize),
@@ -178,6 +201,11 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   toggleTheme: () => {
     const next = get().theme === 'dark' ? 'light' : 'dark'
     set({ theme: next })
+    const s = get(); applyToDOM(s); savePrefs(s)
+  },
+
+  setPalette: (p) => {
+    set({ palette: p })
     const s = get(); applyToDOM(s); savePrefs(s)
   },
 
@@ -210,6 +238,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     if (filePrefs && Object.keys(filePrefs).length > 0) {
       set({
         theme: validateTheme(filePrefs.theme),
+        palette: validatePalette(filePrefs.palette),
         fontFamily: validateFontFamily(filePrefs.fontFamily),
         monoFont: validateMonoFont(filePrefs.monoFont),
         fontSize: validateFontSize(filePrefs.fontSize),
@@ -220,6 +249,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
       try {
         localStorage.setItem(LS_KEY, JSON.stringify({
           theme: s.theme,
+          palette: s.palette,
           fontFamily: s.fontFamily,
           monoFont: s.monoFont,
           fontSize: s.fontSize,

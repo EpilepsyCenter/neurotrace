@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { useAppStore } from '../../stores/appStore'
-import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES } from '../../stores/themeStore'
+import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES, PaletteName } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { TracesDropdown } from '../TraceViewer/TracesDropdown'
 
@@ -30,6 +30,7 @@ export function Toolbar() {
 
   const {
     theme, setTheme,
+    palette, setPalette,
     fontFamily, setFontFamily,
     monoFont, setMonoFont,
     fontSize, setFontSize,
@@ -363,6 +364,25 @@ export function Toolbar() {
 
         {showSettings && (
           <div className="settings-popover">
+            {/* Palette — two full colour sets, each with its own
+                dark / light sub-theme. Switching here flips the
+                ``data-palette`` attribute on <html>, which scopes the
+                Telegraph overrides in telegraph.css on or off. */}
+            <div className="settings-section">
+              <div className="settings-label">Palette</div>
+              <div className="theme-toggle">
+                {(['classic', 'telegraph'] as const).map((p) => (
+                  <button key={p}
+                    className={palette === p ? 'active' : ''}
+                    onClick={() => setPalette(p as PaletteName)}
+                    title={p === 'classic'
+                      ? 'Original blueish / neutral-grey palette'
+                      : 'Warm amber-on-near-black, mono-heavy, uppercase titles'}>
+                    {p === 'classic' ? 'Classic' : 'Telegraph'}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="settings-section">
               <div className="settings-label">Theme</div>
               <div className="theme-toggle">

@@ -1,19 +1,21 @@
 /* ============================================================
-   Telegraph theme — drop-in replacement for global.css tokens
-   ------------------------------------------------------------
-   Same variable names and selectors as frontend/src/styles/global.css.
-   Only the VALUES change. No component code needs to be touched.
+   Telegraph theme — opt-in palette.
 
-   Requires Google Fonts:
-     @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+   Every rule below is scoped to ``[data-palette="telegraph"]`` so
+   this stylesheet can live in the bundle alongside the classic
+   palette defined in global.css. The root ``<html>`` element gets
+   ``data-palette="telegraph" | "classic"`` from the theme store;
+   when "classic", none of these rules match and the baseline
+   tokens / typography from global.css win on their own.
 
-   Apply by either:
-     (a) replacing the token blocks in global.css with the blocks below, or
-     (b) importing this file AFTER global.css so these values win.
+   Requires Google Fonts (loaded by main.tsx-side @import in
+   global.css):
+     IBM Plex Sans (400/500/600/700)
+     JetBrains Mono (400/500/600/700)
    ============================================================ */
 
 /* ---------- Theme-independent tokens ---------- */
-:root {
+:root[data-palette="telegraph"] {
   /* Fonts — swapped to Telegraph pair */
   --font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, monospace;
@@ -46,7 +48,7 @@
 }
 
 /* ---------- Dark theme: warm near-black, amber accent ---------- */
-[data-theme="dark"] {
+[data-palette="telegraph"][data-theme="dark"] {
   --bg-primary:    #0c0b08;
   --bg-secondary:  #12110d;
   --bg-tertiary:   #1a1812;
@@ -85,7 +87,7 @@
 }
 
 /* ---------- Light theme: vellum paper, warm ink ---------- */
-[data-theme="light"] {
+[data-palette="telegraph"][data-theme="light"] {
   --bg-primary:    #fbf9f4;
   --bg-secondary:  #f1ede2;
   --bg-tertiary:   #e6e0cf;
@@ -129,97 +131,79 @@
    the UI reads like a scientific instrument. Titles, menus, body
    copy keep the UI sans (IBM Plex Sans) via the global default.
 
-   Rules stay low-specificity so component-level font overrides
-   (e.g. explicit ``fontFamily: 'var(--font-ui)'`` in a React
-   style prop) still win where needed.
+   Every rule below is scoped to ``[data-palette="telegraph"]`` so
+   the classic palette stays untouched by the typography changes.
    ============================================================ */
 
-/* All form controls — the text inside an <input>, <select>, or
-   <textarea> is almost always machine-oriented data (numbers,
-   file names, code, parameters). */
-input,
-select,
-textarea,
-button.num-stepper {
+/* Form controls — the text inside an <input>, <select>, or
+   <textarea> is almost always machine-oriented data. */
+[data-palette="telegraph"] input,
+[data-palette="telegraph"] select,
+[data-palette="telegraph"] textarea,
+[data-palette="telegraph"] button.num-stepper {
   font-family: var(--font-mono);
 }
 
-/* Buttons — mono + UPPERCASE for Telegraph's instrument-panel feel.
-   Matches the all-caps treatment on card titles and section labels
-   below. */
-button {
+/* Buttons — mono + UPPERCASE for Telegraph's instrument-panel feel. */
+[data-palette="telegraph"] button {
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-/* Table bodies — numeric / tabular by default. Headers stay UI sans
-   (they're labels, not data). */
-table tbody,
-table td {
+/* Table bodies — numeric / tabular by default. Column headers stay
+   UI sans via the override below. */
+[data-palette="telegraph"] table tbody,
+[data-palette="telegraph"] table td {
   font-family: var(--font-mono);
 }
 
-/* Common “readout” classes in the codebase — sweep counters,
-   viewport indicators, coordinate tooltips. Everything that
-   displays a value should read as one. */
-.readout,
-.num-readout,
-.mono,
-.monospace,
-code, kbd, samp {
+/* Common readout / code classes. */
+[data-palette="telegraph"] .readout,
+[data-palette="telegraph"] .num-readout,
+[data-palette="telegraph"] .mono,
+[data-palette="telegraph"] .monospace,
+[data-palette="telegraph"] code,
+[data-palette="telegraph"] kbd,
+[data-palette="telegraph"] samp {
   font-family: var(--font-mono);
 }
 
-/* Card titles + section labels. The codebase stamps these as inline
-   ``fontWeight: 600`` on spans (Card title, "Library", "Cursors
-   (event region)", "Filter", "Fit", etc.). An attribute selector
-   catches all of them in one rule rather than retrofitting a
-   className to dozens of call sites. Only spans — so buttons with
-   ``font-weight: 600`` stay UI sans. */
-span[style*="font-weight: 600"] {
+/* Card titles + section labels — catches every inline
+   ``fontWeight: 600`` on a <span> (card headers, "Library", "Fit",
+   etc.) without having to retrofit a className across dozens of
+   call sites. Spans only — buttons with bold text stay separate. */
+[data-palette="telegraph"] span[style*="font-weight: 600"] {
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-/* Analysis-window Group / Series / Channel / Sweep selectors —
-   label text sitting above a <select>. The shared ``Field`` helper
-   tags its <span> with ``.selector-label`` so Telegraph can treat
-   it as a nav label (all caps) without touching the parameter rows
-   rendered by ``Row`` (those keep their regular-case, lowercase
-   parameter names). */
-.selector-label {
+/* Analysis-window Group / Series / Channel / Sweep selector
+   labels — tagged with .selector-label in the shared Field helper. */
+[data-palette="telegraph"] .selector-label {
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-/* Series / sweep / averaged-sweep name labels in the file-tree
-   navigator on the left sidebar. Group labels already read as mono
-   + UPPERCASE via the ``fontWeight: 600`` attribute rule above, so
-   this just covers the remaining tree rows. Kept in regular case so
-   user-chosen sweep names stay legible; only the FONT changes. */
-.tree-node-label {
+/* Tree navigator series / sweep / averaged-sweep name labels. */
+[data-palette="telegraph"] .tree-node-label {
   font-family: var(--font-mono);
 }
 
-/* Table headers — <th> is always a label, so they belong in UI sans
-   even though their default inline style hits the selector above via
-   surrounding spans. Explicit reset keeps column headers readable. */
-table th {
+/* Table column headers stay UI sans even though surrounding spans
+   may match the font-weight rule above. */
+[data-palette="telegraph"] table th {
   font-family: var(--font-ui);
 }
 
 /* ============================================================
    .led — status-bar pill with a small glowing indicator dot.
-   Base class gives the pill chrome; the ``ok`` / ``err`` / ``off``
-   modifiers colour the dot. Plain ``.led`` with no modifier is
-   a neutral info readout (recording name, sample count, etc.).
-   Designed to fit the Telegraph aesthetic — subtle glow, monospace
-   type, warm near-black chrome on dark, vellum on light.
+   Only active under the Telegraph palette; the classic palette
+   falls back to plain text status items.
    ============================================================ */
-.led {
+[data-palette="telegraph"] .led {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -235,7 +219,7 @@ table th {
   white-space: nowrap;
 }
 
-.led::before {
+[data-palette="telegraph"] .led::before {
   content: '';
   display: inline-block;
   width: 6px;
@@ -246,33 +230,28 @@ table th {
   flex-shrink: 0;
 }
 
-/* Operational / happy-path — amber on dark (matches --accent), green
-   cast on light so it reads as "go" without fighting the vellum. */
-.led.ok::before {
+[data-palette="telegraph"] .led.ok::before {
   background: var(--success);
   box-shadow:
     0 0 0 1px color-mix(in oklab, var(--success) 40%, transparent),
     0 0 6px color-mix(in oklab, var(--success) 55%, transparent);
 }
 
-/* Fault / disconnected / error. */
-.led.err::before {
+[data-palette="telegraph"] .led.err::before {
   background: var(--error);
   box-shadow:
     0 0 0 1px color-mix(in oklab, var(--error) 40%, transparent),
     0 0 6px color-mix(in oklab, var(--error) 55%, transparent);
 }
-.led.err {
+[data-palette="telegraph"] .led.err {
   color: var(--error);
 }
 
-/* Dim / idle / not-yet-wired. No glow — the dot is purely a
-   placeholder so the pill reads as "this slot is empty right now". */
-.led.off::before {
+[data-palette="telegraph"] .led.off::before {
   background: var(--text-muted);
   opacity: 0.6;
   box-shadow: none;
 }
-.led.off {
+[data-palette="telegraph"] .led.off {
   opacity: 0.75;
 }

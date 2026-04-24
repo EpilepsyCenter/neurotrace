@@ -52,7 +52,7 @@ export function StatusBar() {
         <span className={hostClass}>
           {window.electronAPI ? 'Electron' : 'Browser'}
         </span>
-        <span className="led">NeuroTrace v0.1.0</span>
+        <span className="led">NeuroTrace v0.3.0</span>
       </div>
     </div>
   )

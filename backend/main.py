@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     print("NeuroTrace backend shutting down...")
 
 
-app = FastAPI(title="NeuroTrace Backend", version="0.2.3", lifespan=lifespan)
+app = FastAPI(title="NeuroTrace Backend", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,7 +54,7 @@ app.include_router(events_router, prefix="/api/events", tags=["events"])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.2.3"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 if __name__ == "__main__":

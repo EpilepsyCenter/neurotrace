@@ -137,9 +137,9 @@ function applyToDOM(state: ThemeState) {
 
 const defaults = {
   theme: 'dark' as ThemeName,
-  // Default palette on this branch is Telegraph — users can flip to
-  // the classic blueish palette from the settings popover.
-  palette: 'telegraph' as PaletteName,
+  // Default palette is Classic (the original blueish look). Users
+  // opt in to the warm Telegraph palette from the settings popover.
+  palette: 'classic' as PaletteName,
   // Empty string = "Theme default" — let the stylesheet decide. New
   // installs on the Telegraph branch get IBM Plex Sans / JetBrains
   // Mono from telegraph.css; old themes get their own defaults.

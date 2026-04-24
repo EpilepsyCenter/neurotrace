@@ -10,6 +10,7 @@ import { APWindow } from './components/AnalysisWindows/APWindow'
 import { EventDetectionWindow } from './components/AnalysisWindows/EventDetectionWindow'
 import { EventsTemplateGeneratorWindow } from './components/AnalysisWindows/EventsTemplateGeneratorWindow'
 import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/EventsTemplateRefinementWindow'
+import { EventsBrowserWindow } from './components/AnalysisWindows/EventsBrowserWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -201,6 +202,7 @@ export function AnalysisWindow({ view }: { view: string }) {
     events: 'Event Detection',
     events_template_generator: 'Events — Template Generator',
     events_template_refinement: 'Events — Refine Template',
+    events_browser: 'Events — Browser & Overlay',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
     field_potential: 'Field PSP',
@@ -323,6 +325,11 @@ export function AnalysisWindow({ view }: { view: string }) {
           />
         ) : view === 'events_template_refinement' ? (
           <EventsTemplateRefinementWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+          />
+        ) : view === 'events_browser' ? (
+          <EventsBrowserWindow
             backendUrl={backendUrl}
             fileInfo={fileInfo}
           />

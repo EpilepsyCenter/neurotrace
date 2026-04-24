@@ -68,6 +68,10 @@ export function TraceViewer() {
   // entry exists for the current group/series; toggle could be added
   // later mirroring the bursts checkbox.
   const apAnalysesRef = useRef(useAppStore.getState().apAnalyses)
+  // Event-marker refs — foot / peak / decay dots for detected events
+  // from the event-detection module. Same lazy-ref pattern as bursts.
+  const eventsAnalysesRef = useRef(useAppStore.getState().eventsAnalyses)
+  const showEventMarkersRef = useRef(useAppStore.getState().showEventMarkers)
   // Latest traceData snapshot — read from drawCursors when painting
   // counting-only (no kinetics) AP markers, so we can look up the
   // y-value at a peak time without relying on react render cycles.
@@ -98,6 +102,8 @@ export function TraceViewer() {
     fieldBursts,
     showBurstMarkers,
     apAnalyses,
+    eventsAnalyses,
+    showEventMarkers,
     showCoordinates,
     toggleCoordinates,
   } = useAppStore()
@@ -136,6 +142,8 @@ export function TraceViewer() {
   currentSweepRef.current = currentSweep
   showBurstMarkersRef.current = showBurstMarkers
   apAnalysesRef.current = apAnalyses
+  eventsAnalysesRef.current = eventsAnalyses
+  showEventMarkersRef.current = showEventMarkers
   traceDataRef.current = traceData
   showCoordinatesRef.current = showCoordinates
 
@@ -467,6 +475,56 @@ export function TraceViewer() {
             const px = u.valToPos(t, 'x', true) / dpr
             const py = u.valToPos(y, 'y', true) / dpr
             drawAPDot(px, py, '#e57373', false)
+          }
+        }
+      }
+    }
+
+    // ---- Event (mEPSC / mIPSC) markers ----
+    // Same pattern as bursts/APs: independent layer gated by its own
+    // checkbox. Renders the currently-analysed series' event markers
+    // for the current sweep — peak (red dot), foot (gray dot), decay
+    // endpoint (purple dot). Gives a quick glance-verification that
+    // a series has been analysed, right on the main viewer, without
+    // opening the events analysis window.
+    if (showEventMarkersRef.current) {
+      const evKey = `${st.currentGroup}:${st.currentSeries}`
+      const ev = eventsAnalysesRef.current[evKey]
+      if (ev && ev.events.length > 0 && ev.sweep === currentSweepRef.current) {
+        const xScale3 = u.scales.x
+        const xMin3 = xScale3?.min ?? -Infinity
+        const xMax3 = xScale3?.max ?? Infinity
+        const sr = ev.samplingRate || 1
+        const drawEvDot = (px: number, py: number, color: string, r: number = 3.5) => {
+          if (!isFinite(px) || !isFinite(py)) return
+          ctx.beginPath()
+          ctx.arc(px, py, r, 0, 2 * Math.PI)
+          ctx.fillStyle = color
+          ctx.fill()
+          ctx.strokeStyle = '#ffffff'
+          ctx.lineWidth = 1
+          ctx.stroke()
+        }
+        for (let i = 0; i < ev.events.length; i++) {
+          const e = ev.events[i]
+          if (e.peakTimeS < xMin3 || e.peakTimeS > xMax3) continue
+          // Peak (red, larger for selected)
+          const selected = i === ev.selectedIdx
+          const px = u.valToPos(e.peakTimeS, 'x', true) / dpr
+          const py = u.valToPos(e.peakVal - yOffset, 'y', true) / dpr
+          drawEvDot(px, py, e.manual ? '#ffb74d' : '#e57373', selected ? 5 : 3.5)
+          // Foot (gray) at (footTimeS, baselineVal)
+          const fpx = u.valToPos(e.footTimeS, 'x', true) / dpr
+          const fpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
+          drawEvDot(fpx, fpy, '#9e9e9e', 2.5)
+          // Decay endpoint (purple) at (endpointT, baselineVal) — the
+          // endpoint is where the trace returned to baseline, so the
+          // y-value is the event baseline.
+          if (e.decayEndpointIdx != null) {
+            const endpointT = e.decayEndpointIdx / sr
+            const dpx = u.valToPos(endpointT, 'x', true) / dpr
+            const dpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
+            drawEvDot(dpx, dpy, '#ab47bc', 2.5)
           }
         }
       }
@@ -1076,7 +1134,7 @@ export function TraceViewer() {
   // ================================================================
   useEffect(() => {
     drawCursors()
-  }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers, apAnalyses])
+  }, [cursors, showCursors, cursorVisibility, fieldBursts, currentSweep, zeroOffset, showBurstMarkers, apAnalyses, eventsAnalyses, showEventMarkers])
 
   // Hide the coordinate tooltip immediately when the toggle flips off.
   useEffect(() => {

@@ -765,6 +765,16 @@ class OverlayRequest(BaseModel):
     window_after_ms: float = 50.0
     baseline_subtract: bool = True   # subtract each event's baseline so
                                      # overlays share a common zero line
+    # Optional pre-detection filter — when on, the sweep is filtered
+    # with the same Butterworth settings the detector used, so the
+    # overlay window matches the signal the detector saw. Off → raw
+    # unfiltered trace. Lets users A/B compare raw vs filtered shapes
+    # from the browser and overlay tabs.
+    filter_enabled: bool = False
+    filter_type: str = "bandpass"
+    filter_low: float = 1.0
+    filter_high: float = 1000.0
+    filter_order: int = 1
 
 
 @router.post("/overlay")
@@ -780,6 +790,17 @@ async def overlay(req: OverlayRequest):
     skipped rather than zero-padded — padding would bias the mean.
     """
     values, sr, _units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    if req.filter_enabled:
+        try:
+            values = _apply_pre_detection_filter(values, sr, {
+                "filter_enabled": True,
+                "filter_type": req.filter_type,
+                "filter_low": req.filter_low,
+                "filter_high": req.filter_high,
+                "filter_order": req.filter_order,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
     n_before = max(0, int(round(req.window_before_ms / 1000.0 * sr)))
     n_after = max(1, int(round(req.window_after_ms / 1000.0 * sr)))
     n_total = n_before + n_after + 1

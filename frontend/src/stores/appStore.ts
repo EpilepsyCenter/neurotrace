@@ -349,6 +349,35 @@ function _broadcastAP(apAnalyses: Record<string, APData>) {
   } catch { /* ignore */ }
 }
 
+/** Per-recording persistence of event-detection results. Same pattern
+ *  as bursts / APs: keyed filePath → `${group}:${series}` → EventsData.
+ *  The main trace viewer reads this back on file open so users see
+ *  their previous detections as dots without having to re-run. */
+async function _loadPersistedEvents(filePath: string): Promise<Record<string, EventsData> | null> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !filePath) return null
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = prefs.savedEventsAnalyses as Record<string, any> | undefined
+    return store?.[filePath] ?? null
+  } catch { return null }
+}
+
+async function _savePersistedEvents(filePath: string, events: Record<string, EventsData>) {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const store = (prefs.savedEventsAnalyses as Record<string, any>) ?? {}
+    if (Object.keys(events).length === 0) {
+      delete store[filePath]
+    } else {
+      store[filePath] = events
+    }
+    await api.setPreferences({ ...prefs, savedEventsAnalyses: store })
+  } catch { /* ignore */ }
+}
+
 function _broadcastEvents(eventsAnalyses: Record<string, EventsData>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
@@ -394,10 +423,14 @@ export function defaultEventsParams(): EventsParams {
     peakDirection: 'negative',
     showDetectionMeasure: false,
     filterEnabled: false,
+    // Defaults chosen to match EE's out-of-the-box mEPSC pipeline:
+    // a gentle wide bandpass (1–1000 Hz, order 1) that rejects slow
+    // drift + supra-kHz noise without introducing ringing on the fast
+    // rising edges event-fits need.
     filterType: 'bandpass',
     filterLow: 1,
-    filterHigh: 500,
-    filterOrder: 4,
+    filterHigh: 1000,
+    filterOrder: 1,
     detrendEnabled: false,
     detrendWindowMs: 500,
     templateId: null,
@@ -1330,6 +1363,11 @@ interface AppState {
   /** Whether burst markers (baseline + threshold lines + per-burst dots)
    *  are drawn on the main TraceViewer overlay. Independent of `showCursors`. */
   showBurstMarkers: boolean
+  /** Whether detected-event markers (peak / foot / decay dots from the
+   *  event-detection module) are drawn on the main TraceViewer overlay.
+   *  Persisted like `showBurstMarkers`. Useful for glancing across a
+   *  recording to see which series have been analysed. */
+  showEventMarkers: boolean
   /** Whether the hover-tooltip showing x/y coordinates is active in the
    *  main TraceViewer. */
   showCoordinates: boolean
@@ -1340,6 +1378,7 @@ interface AppState {
   toggleZoomMode: () => void
   toggleCursors: () => void
   toggleBurstMarkers: () => void
+  toggleEventMarkers: () => void
   toggleCoordinates: () => void
   resetCursorsToDefaults: () => void
   setCursorVisibility: (v: Partial<CursorVisibility>) => void
@@ -1812,6 +1851,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // the user turns them on from the right panel when they need them.
   showCursors: false,
   showBurstMarkers: true,
+  showEventMarkers: true,
   showCoordinates: false,
   loading: false,
   error: null,
@@ -1819,6 +1859,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleZoomMode: () => set((s) => ({ zoomMode: !s.zoomMode })),
   toggleCursors: () => set((s) => ({ showCursors: !s.showCursors })),
   toggleBurstMarkers: () => set((s) => ({ showBurstMarkers: !s.showBurstMarkers })),
+  toggleEventMarkers: () => set((s) => ({ showEventMarkers: !s.showEventMarkers })),
   toggleCoordinates: () => set((s) => ({ showCoordinates: !s.showCoordinates })),
 
   resetCursorsToDefaults: () => {
@@ -2107,6 +2148,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       fpspCurves: {},
       cursorAnalyses: {},
       apAnalyses: {},
+      eventsAnalyses: {},
       excludedSweeps: {},
       selectedSweeps: {},
       averagedSweeps: {},
@@ -2189,6 +2231,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           try {
             const ch = new BroadcastChannel('neurotrace-sync')
             ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
+            ch.close()
+          } catch { /* ignore */ }
+        }
+        // Event-detection analyses.
+        const savedEvents = await _loadPersistedEvents(recording.filePath)
+        if (savedEvents) {
+          set({ eventsAnalyses: savedEvents })
+          try {
+            const ch = new BroadcastChannel('neurotrace-sync')
+            ch.postMessage({ type: 'events-update', eventsAnalyses: savedEvents })
             ch.close()
           } catch { /* ignore */ }
         }
@@ -4203,6 +4255,16 @@ useAppStore.subscribe((state) => {
   _lastPersistedAPRef = state.apAnalyses
   if (state.recording?.filePath) {
     _savePersistedAP(state.recording.filePath, state.apAnalyses)
+  }
+})
+
+// Events-analyses persistence subscribe — same shape as APs.
+let _lastPersistedEventsRef: Record<string, EventsData> | null = null
+useAppStore.subscribe((state) => {
+  if (state.eventsAnalyses === _lastPersistedEventsRef) return
+  _lastPersistedEventsRef = state.eventsAnalyses
+  if (state.recording?.filePath) {
+    _savePersistedEvents(state.recording.filePath, state.eventsAnalyses)
   }
 })
 

@@ -182,7 +182,9 @@ export function CursorPanel() {
     filter, setFilter,
     zeroOffset, toggleZeroOffset,
     showBurstMarkers, toggleBurstMarkers,
+    showEventMarkers, toggleEventMarkers,
     fieldBursts,
+    eventsAnalyses,
   } = useAppStore()
 
   // Does the CURRENT sweep in the CURRENT series have any detected bursts?
@@ -199,6 +201,19 @@ export function CursorPanel() {
     return s.fieldBursts[key]?.bursts.filter((b) => b.sweepIndex === s.currentSweep).length ?? 0
   })
   void fieldBursts  // subscribe the component to changes
+  // Event analyses: do we have anything for the current series' sweep?
+  // Drives the "Show events" checkbox enabled state.
+  const hasEventsInCurrentSweep = useAppStore((s) => {
+    const key = `${s.currentGroup}:${s.currentSeries}`
+    const entry = s.eventsAnalyses[key]
+    return !!entry && entry.events.length > 0 && entry.sweep === s.currentSweep
+  })
+  const currentSeriesEventCount = useAppStore((s) => {
+    const key = `${s.currentGroup}:${s.currentSeries}`
+    const entry = s.eventsAnalyses[key]
+    return entry && entry.sweep === s.currentSweep ? entry.events.length : 0
+  })
+  void eventsAnalyses
 
   const measurements = useMemo(() => {
     if (!traceData) return null
@@ -416,13 +431,54 @@ export function CursorPanel() {
             disabled={!hasBurstsInCurrentSweep}
             style={{ margin: 0, accentColor: 'var(--accent)' }}
           />
-          Show/hide detected events
+          Show/hide detected bursts
           {hasBurstsInCurrentSweep && (
             <span style={{
               marginLeft: 4, fontWeight: 400, letterSpacing: 0,
               textTransform: 'none',
             }}>
               ({currentSeriesBurstCount})
+            </span>
+          )}
+        </label>
+        {/* Event-detection markers — independent toggle, same pattern
+            as bursts. Disabled when there are no events for the
+            current sweep. */}
+        <label
+          title={
+            hasEventsInCurrentSweep
+              ? 'Toggle peak / foot / decay markers for detected events (mEPSC / mIPSC)'
+              : 'No events detected for the current sweep — run detection in the Events window'
+          }
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            marginTop: 4,
+            cursor: hasEventsInCurrentSweep ? 'pointer' : 'not-allowed',
+            userSelect: 'none',
+            fontSize: 'var(--font-size-label)',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: 0.4,
+            color: hasEventsInCurrentSweep ? 'var(--text-muted)' : 'var(--text-disabled, #666)',
+            opacity: hasEventsInCurrentSweep ? 1 : 0.5,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showEventMarkers}
+            onChange={toggleEventMarkers}
+            disabled={!hasEventsInCurrentSweep}
+            style={{ margin: 0, accentColor: 'var(--accent)' }}
+          />
+          Show/hide detected events
+          {hasEventsInCurrentSweep && (
+            <span style={{
+              marginLeft: 4, fontWeight: 400, letterSpacing: 0,
+              textTransform: 'none',
+            }}>
+              ({currentSeriesEventCount})
             </span>
           )}
         </label>

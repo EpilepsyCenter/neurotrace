@@ -215,6 +215,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   // unique view names so they don't collide).
   events_template_generator: 'Events — Template Generator',
   events_template_refinement: 'Events — Refine Template',
+  events_browser: 'Events — Browser & Overlay',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',

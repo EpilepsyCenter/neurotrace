@@ -169,8 +169,12 @@ export function EventDetectionWindow({
   // Bottom-pane tab — "table" (events results), "overlay" (all events
   // aligned on peak/foot), or "histogram" (amplitude distribution).
   // Matches EE's tab row below the viewer.
+  // Bottom pane is now just the quick-reference views that belong
+  // next to the detection controls. The heavy per-event browser + the
+  // all-events overlay moved to their own Electron window (see the
+  // "Open browser window" button in the results header).
   const [bottomTab, setBottomTab] = useState<
-    'table' | 'browser' | 'overlay' | 'histogram' | 'rate'
+    'table' | 'histogram' | 'rate'
   >('table')
   useEffect(() => {
     let cancelled = false
@@ -330,6 +334,16 @@ export function EventDetectionWindow({
     const api = window.electronAPI
     if (api?.openAnalysisWindow) {
       await api.openAnalysisWindow('events_template_refinement')
+    }
+  }
+  const openEventsBrowser = async () => {
+    if (!entry || entry.events.length === 0) {
+      setError('Run detection first to open the browser.')
+      return
+    }
+    const api = window.electronAPI
+    if (api?.openAnalysisWindow) {
+      await api.openAnalysisWindow('events_browser')
     }
   }
 
@@ -747,7 +761,7 @@ export function EventDetectionWindow({
               flexShrink: 0,
               padding: '2px 2px 0 2px',
             }}>
-              {(['table', 'browser', 'overlay', 'histogram', 'rate'] as const).map((k) => (
+              {(['table', 'histogram', 'rate'] as const).map((k) => (
                 <button key={k} className="btn"
                   onClick={() => setBottomTab(k)}
                   style={{
@@ -760,12 +774,25 @@ export function EventDetectionWindow({
                     borderRadius: '3px 3px 0 0',
                   }}>
                   {k === 'table' ? 'Results'
-                    : k === 'browser' ? 'Browser'
-                    : k === 'overlay' ? 'Overlay'
                     : k === 'histogram' ? 'Histogram'
                     : 'Rate'}
                 </button>
               ))}
+              <span style={{ flex: 1 }} />
+              {/* Open the detached Browser + Overlay window. Lives
+                  flush-right on the tab bar for easy one-click access
+                  once the user has run detection. */}
+              <button className="btn"
+                onClick={openEventsBrowser}
+                disabled={!entry || entry.events.length === 0}
+                title="Open the detached Browser & Overlay window"
+                style={{
+                  padding: '3px 10px', marginBottom: 2,
+                  fontSize: 'var(--font-size-label)',
+                  alignSelf: 'center',
+                }}>
+                Open browser + overlay…
+              </button>
             </div>
             <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
               {bottomTab === 'table' && (
@@ -777,32 +804,9 @@ export function EventDetectionWindow({
                   />
                 </div>
               )}
-              {bottomTab === 'browser' && (
-                <EventBrowser
-                  backendUrl={backendUrl}
-                  entry={entry}
-                  heightSignal={plotHeight}
-                  onSelect={(idx) => selectEvent(group, series, idx)}
-                  onDiscard={(idx) => onDiscardEvent(idx)}
-                  onZoomTo={(timeS) => {
-                    // Centre a 50 ms window on the selected event's
-                    // peak in the main viewer — user's "show me that
-                    // one" shortcut. Clamps to sweep bounds.
-                    const w = 0.050
-                    const start = Math.max(0, timeS - w / 2)
-                    const end = Math.min(sweepDurationS || (timeS + w),
-                      timeS + w / 2)
-                    setViewport({ tStart: start, tEnd: end })
-                  }}
-                />
-              )}
-              {bottomTab === 'overlay' && (
-                <AllEventsOverlay
-                  backendUrl={backendUrl}
-                  entry={entry}
-                  heightSignal={plotHeight}
-                />
-              )}
+              {/* Browser + Overlay tabs were moved to a dedicated
+                  Electron window — see the "Open browser + overlay"
+                  button on this tab bar. */}
               {bottomTab === 'histogram' && (
                 <AmplitudeHistogram
                   entry={entry}
@@ -2105,230 +2109,6 @@ function EventsSummaryBar({ entry }: { entry: EventsData | undefined }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// All-events overlay — every detected event aligned on peak, drawn as
-// faint grey traces with the mean in red and a ±1 SD envelope. Fetches
-// a short window of the raw trace around each event's peak via a
-// single backend call (/api/events/overlay).
-// ---------------------------------------------------------------------------
-
-function AllEventsOverlay({
-  backendUrl, entry, heightSignal,
-}: {
-  backendUrl: string
-  entry: EventsData | undefined
-  heightSignal: number
-}) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const plotRef = useRef<uPlot | null>(null)
-  const [data, setData] = useState<{
-    time: number[]; traces: (number | null)[][]
-    mean: (number | null)[]; sdLo: (number | null)[]; sdHi: (number | null)[]
-    nIncluded: number
-  } | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  const [alignMode, setAlignMode] = useState<'peak' | 'foot'>('peak')
-  const [beforeMs, setBeforeMs] = useState(5)
-  const [afterMs, setAfterMs] = useState(50)
-
-  // Fetch when the events list changes. Small debounce so rapid edits
-  // (manual adds / discards) don't hammer the backend.
-  useEffect(() => {
-    if (!backendUrl || !entry || entry.events.length === 0) {
-      setData(null); return
-    }
-    const t = setTimeout(() => {
-      setLoading(true); setErr(null)
-      fetch(`${backendUrl}/api/events/overlay`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          group: entry.group, series: entry.series,
-          sweep: entry.sweep, trace: entry.channel,
-          events: entry.events.map((e) => ({
-            peak_idx: e.peakIdx, foot_idx: e.footIdx,
-            baseline_val: e.baselineVal,
-          })),
-          align: alignMode,
-          window_before_ms: beforeMs,
-          window_after_ms: afterMs,
-          baseline_subtract: true,
-        }),
-      }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
-        .then((d) => {
-          setData({
-            time: (d.time_s ?? []).map((x: any) => Number(x)),
-            traces: (d.traces ?? []).map((row: any[]) =>
-              row.map((x) => x == null ? null : Number(x))),
-            mean: (d.mean ?? []).map((x: any) => x == null ? null : Number(x)),
-            sdLo: (d.sd_lo ?? []).map((x: any) => x == null ? null : Number(x)),
-            sdHi: (d.sd_hi ?? []).map((x: any) => x == null ? null : Number(x)),
-            nIncluded: Number(d.n_included ?? 0),
-          })
-          setLoading(false)
-        })
-        .catch((e) => { setErr(String(e)); setLoading(false); setData(null) })
-    }, 150)
-    return () => clearTimeout(t)
-  }, [backendUrl, entry, alignMode, beforeMs, afterMs])
-
-  // Build / rebuild uPlot when data or container size changes.
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!data || data.time.length === 0) return
-    const frame = requestAnimationFrame(() => {
-      const w = Math.max(container.clientWidth, 200)
-      const h = Math.max(container.clientHeight, 120)
-      // Build the uPlot aligned-data: x + each individual trace + mean.
-      const aligned: uPlot.AlignedData = [
-        data.time as any,
-        ...(data.traces.map((row) => row as any) as any[]),
-        data.mean as any,
-      ]
-      // Series: x + N faint grey + 1 red mean + SD envelope as 2 series.
-      const seriesDefs: uPlot.Series[] = [{}]
-      for (let i = 0; i < data.traces.length; i++) {
-        seriesDefs.push({
-          stroke: 'rgba(128,128,128,0.35)', width: 0.8, spanGaps: false,
-        })
-      }
-      seriesDefs.push({ stroke: '#e57373', width: 2, spanGaps: false })
-      const opts: uPlot.Options = {
-        width: w, height: h,
-        legend: { show: false },
-        scales: {
-          x: { time: false },
-          y: { auto: true },
-        },
-        axes: [
-          { stroke: cssVar('--chart-axis'),
-            grid: { stroke: cssVar('--chart-grid'), width: 1 },
-            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-            label: `Time (ms, 0 = ${alignMode})`, labelSize: 14,
-            values: (_u, vals) => vals.map((v) => (v * 1000).toFixed(0)),
-            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-          },
-          { stroke: cssVar('--chart-axis'),
-            grid: { stroke: cssVar('--chart-grid'), width: 1 },
-            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-            size: 55,
-            label: 'Δ baseline',
-            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-          },
-        ],
-        cursor: { drag: { x: false, y: false } },
-        series: seriesDefs,
-        hooks: {
-          draw: [(u) => {
-            // ±1 SD envelope behind the mean.
-            if (data.sdLo.length === data.time.length
-                && data.sdHi.length === data.time.length) {
-              const ctx = u.ctx
-              ctx.save()
-              ctx.fillStyle = 'rgba(229, 115, 115, 0.18)'
-              ctx.beginPath()
-              let started = false
-              for (let i = 0; i < data.time.length; i++) {
-                const v = data.sdHi[i]
-                if (v == null) continue
-                const px = u.valToPos(data.time[i], 'x', true)
-                const py = u.valToPos(v, 'y', true)
-                if (!started) { ctx.moveTo(px, py); started = true }
-                else ctx.lineTo(px, py)
-              }
-              for (let i = data.time.length - 1; i >= 0; i--) {
-                const v = data.sdLo[i]
-                if (v == null) continue
-                const px = u.valToPos(data.time[i], 'x', true)
-                const py = u.valToPos(v, 'y', true)
-                ctx.lineTo(px, py)
-              }
-              ctx.closePath()
-              ctx.fill()
-              ctx.restore()
-            }
-          }],
-        },
-      }
-      plotRef.current = new uPlot(opts, aligned, container)
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [data, alignMode])
-
-  // ResizeObserver to match container size.
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const ro = new ResizeObserver(() => {
-      const u = plotRef.current
-      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
-        u.setSize({ width: el.clientWidth, height: el.clientHeight })
-      }
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  useEffect(() => {
-    const u = plotRef.current, el = containerRef.current
-    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
-      u.setSize({ width: el.clientWidth, height: el.clientHeight })
-    }
-  }, [heightSignal])
-
-  return (
-    <div style={{
-      height: '100%', display: 'flex', flexDirection: 'column',
-      minHeight: 0, gap: 6, padding: 6,
-    }}>
-      <div style={{
-        display: 'flex', gap: 8, alignItems: 'center',
-        fontSize: 'var(--font-size-label)', flexShrink: 0,
-      }}>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ color: 'var(--text-muted)' }}>Align</span>
-          <select value={alignMode}
-            onChange={(e) => setAlignMode(e.target.value as 'peak' | 'foot')}>
-            <option value="peak">peak</option>
-            <option value="foot">foot</option>
-          </select>
-        </label>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ color: 'var(--text-muted)' }}>Before (ms)</span>
-          <NumInput value={beforeMs} step={1} min={1} onChange={setBeforeMs} />
-        </label>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ color: 'var(--text-muted)' }}>After (ms)</span>
-          <NumInput value={afterMs} step={5} min={5} onChange={setAfterMs} />
-        </label>
-        {data && (
-          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-            {data.nIncluded} / {entry?.events.length ?? 0} events
-          </span>
-        )}
-        {loading && <span style={{ color: 'var(--text-muted)' }}>loading…</span>}
-        {err && <span style={{ color: '#e57373' }}>⚠ {err}</span>}
-      </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
-        {(!entry || entry.events.length === 0) && (
-          <div style={{
-            padding: 16, textAlign: 'center',
-            color: 'var(--text-muted)', fontStyle: 'italic',
-            fontSize: 'var(--font-size-label)',
-          }}>
-            Run detection to see the event overlay.
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Amplitude histogram — distribution of event amplitudes with a
@@ -2638,311 +2418,6 @@ function EventRatePlot({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Event-by-event browser — single selected event, prev/next nav with
-// keyboard shortcuts, per-event kinetics card, zoomed mini-plot showing
-// the selected event with foot/peak/decay markers, and buttons to
-// discard / zoom-to in the main viewer.
-// ---------------------------------------------------------------------------
-
-function EventBrowser({
-  backendUrl, entry, heightSignal,
-  onSelect, onDiscard, onZoomTo,
-}: {
-  backendUrl: string
-  entry: EventsData | undefined
-  heightSignal: number
-  onSelect: (idx: number) => void
-  onDiscard: (idx: number) => void
-  onZoomTo: (timeS: number) => void
-}) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const plotRef = useRef<uPlot | null>(null)
-  const [winMs, setWinMs] = useState(60)   // total window around peak
-  const [preMs, setPreMs] = useState(10)
-
-  const idx = entry?.selectedIdx ?? (entry && entry.events.length > 0 ? 0 : null)
-  const ev: EventRow | null = entry && idx != null && idx >= 0 && idx < entry.events.length
-    ? entry.events[idx]
-    : null
-
-  // Keyboard ← / → advance selection. Attach to window so table/tab
-  // focus isn't required. Ignore when typing in inputs.
-  useEffect(() => {
-    if (!entry) return
-    const handler = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT'
-                || t.tagName === 'TEXTAREA')) return
-      if (e.key === 'ArrowRight') {
-        const cur = entry.selectedIdx ?? -1
-        const next = Math.min(entry.events.length - 1, cur + 1)
-        if (next !== cur) onSelect(next)
-        e.preventDefault()
-      } else if (e.key === 'ArrowLeft') {
-        const cur = entry.selectedIdx ?? 0
-        const next = Math.max(0, cur - 1)
-        if (next !== cur) onSelect(next)
-        e.preventDefault()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [entry, onSelect])
-
-  // Fetch the single event's window via /overlay. Re-fetch on
-  // selection / window change.
-  const [winData, setWinData] = useState<{
-    time: number[]; values: (number | null)[]
-  } | null>(null)
-  useEffect(() => {
-    if (!backendUrl || !entry || !ev) { setWinData(null); return }
-    const after = Math.max(1, winMs - preMs)
-    fetch(`${backendUrl}/api/events/overlay`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        group: entry.group, series: entry.series,
-        sweep: entry.sweep, trace: entry.channel,
-        events: [{
-          peak_idx: ev.peakIdx, foot_idx: ev.footIdx,
-          baseline_val: ev.baselineVal,
-        }],
-        align: 'peak',
-        window_before_ms: preMs,
-        window_after_ms: after,
-        baseline_subtract: false,   // keep absolute units for markers
-      }),
-    }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
-      .then((d) => {
-        const row = (d.traces?.[0] ?? []) as (number | null)[]
-        setWinData({
-          time: (d.time_s ?? []).map((x: any) => Number(x)),
-          values: row.map((x) => x == null ? null : Number(x)),
-        })
-      })
-      .catch(() => setWinData(null))
-  }, [backendUrl, entry, ev, preMs, winMs])
-
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!winData || winData.time.length === 0 || !ev || !entry) return
-    const frame = requestAnimationFrame(() => {
-      const w = Math.max(container.clientWidth, 200)
-      const h = Math.max(container.clientHeight, 120)
-      // Compute marker offsets relative to peak in seconds (because
-      // the window's x-axis is centred on peak = 0).
-      const sr = entry.samplingRate || 1
-      const footOff = (ev.footIdx - ev.peakIdx) / sr
-      const decayOff = ev.decayEndpointIdx != null
-        ? (ev.decayEndpointIdx - ev.peakIdx) / sr : null
-      const opts: uPlot.Options = {
-        width: w, height: h,
-        legend: { show: false },
-        scales: {
-          x: { time: false },
-          y: { auto: true },
-        },
-        axes: [
-          { stroke: cssVar('--chart-axis'),
-            grid: { stroke: cssVar('--chart-grid'), width: 1 },
-            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-            values: (_u, vals) => vals.map((v) => (v * 1000).toFixed(0)),
-            label: 'Time (ms, 0 = peak)', labelSize: 14,
-            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-          },
-          { stroke: cssVar('--chart-axis'),
-            grid: { stroke: cssVar('--chart-grid'), width: 1 },
-            ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-            size: 55,
-            label: entry.units,
-            font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-          },
-        ],
-        cursor: { drag: { x: false, y: false } },
-        series: [{}, {
-          stroke: cssVar('--trace-color-1'), width: 1.5, spanGaps: false,
-        }],
-        hooks: {
-          draw: [(u) => {
-            const ctx = u.ctx
-            const dpr = devicePixelRatio || 1
-            // Baseline line (gray, horizontal at baseline_val).
-            const byPos = u.valToPos(ev.baselineVal, 'y', true)
-            ctx.save()
-            ctx.strokeStyle = 'rgba(158,158,158,0.7)'
-            ctx.setLineDash([4 * dpr, 3 * dpr])
-            ctx.lineWidth = 1 * dpr
-            ctx.beginPath()
-            ctx.moveTo(u.bbox.left, byPos)
-            ctx.lineTo(u.bbox.left + u.bbox.width, byPos)
-            ctx.stroke()
-            ctx.setLineDash([])
-            // Foot dot — gray
-            const fx = u.valToPos(footOff, 'x', true)
-            ctx.fillStyle = '#9e9e9e'
-            ctx.beginPath()
-            ctx.arc(fx, byPos, 3 * dpr, 0, 2 * Math.PI)
-            ctx.fill()
-            // Peak dot — red, at (0, peak_val)
-            const px = u.valToPos(0, 'x', true)
-            const py = u.valToPos(ev.peakVal, 'y', true)
-            ctx.fillStyle = '#e57373'
-            ctx.beginPath()
-            ctx.arc(px, py, 4 * dpr, 0, 2 * Math.PI)
-            ctx.fill()
-            // Decay endpoint — purple
-            if (decayOff != null) {
-              const dx = u.valToPos(decayOff, 'x', true)
-              ctx.fillStyle = '#ab47bc'
-              ctx.beginPath()
-              ctx.arc(dx, byPos, 3 * dpr, 0, 2 * Math.PI)
-              ctx.fill()
-            }
-            ctx.restore()
-          }],
-        },
-      }
-      const payload: uPlot.AlignedData = [
-        winData.time as any, winData.values as any,
-      ]
-      plotRef.current = new uPlot(opts, payload, container)
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [winData, ev, entry])
-
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const ro = new ResizeObserver(() => {
-      const u = plotRef.current
-      if (u && el.clientWidth > 0 && el.clientHeight > 0) {
-        u.setSize({ width: el.clientWidth, height: el.clientHeight })
-      }
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  useEffect(() => {
-    const u = plotRef.current, el = containerRef.current
-    if (u && el && el.clientWidth > 0 && el.clientHeight > 0) {
-      u.setSize({ width: el.clientWidth, height: el.clientHeight })
-    }
-  }, [heightSignal])
-
-  if (!entry || entry.events.length === 0) {
-    return (
-      <div style={{
-        padding: 16, textAlign: 'center',
-        color: 'var(--text-muted)', fontStyle: 'italic',
-        fontSize: 'var(--font-size-label)',
-      }}>
-        Run detection to browse events one by one.
-      </div>
-    )
-  }
-
-  const unit = entry.units
-  const cur = (idx ?? 0) + 1
-  return (
-    <div style={{
-      height: '100%', display: 'flex', flexDirection: 'column',
-      gap: 6, padding: 6, minHeight: 0,
-    }}>
-      {/* Top control strip — prev/next, counter, zoom-to, discard. */}
-      <div style={{
-        display: 'flex', gap: 6, alignItems: 'center',
-        fontSize: 'var(--font-size-label)', flexShrink: 0,
-      }}>
-        <button className="btn" onClick={() => onSelect(Math.max(0, (idx ?? 0) - 1))}
-          disabled={(idx ?? 0) <= 0}
-          style={{ padding: '2px 8px' }} title="Previous event (←)">← Prev</button>
-        <span style={{
-          fontFamily: 'var(--font-mono)', minWidth: 60, textAlign: 'center',
-        }}>{cur} / {entry.events.length}</span>
-        <button className="btn" onClick={() => onSelect(Math.min(entry.events.length - 1, (idx ?? 0) + 1))}
-          disabled={(idx ?? 0) >= entry.events.length - 1}
-          style={{ padding: '2px 8px' }} title="Next event (→)">Next →</button>
-        <span style={{ flex: 1 }} />
-        {ev && (
-          <button className="btn" onClick={() => onZoomTo(ev.peakTimeS)}
-            style={{ padding: '2px 8px' }}
-            title="Center the main viewer on this event">
-            Zoom to
-          </button>
-        )}
-        {ev && (
-          <button className="btn" onClick={() => idx != null && onDiscard(idx)}
-            style={{ padding: '2px 8px' }}
-            title="Remove this event from the results">
-            Discard
-          </button>
-        )}
-      </div>
-
-      {/* Kinetics card + mini plot side-by-side. */}
-      <div style={{
-        display: 'flex', gap: 8, flex: 1, minHeight: 0,
-      }}>
-        <div style={{
-          width: 180, flexShrink: 0,
-          padding: 6, border: '1px solid var(--border)', borderRadius: 4,
-          background: 'var(--bg-primary)',
-          fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)',
-          lineHeight: 1.7, overflow: 'auto',
-        }}>
-          {ev ? (
-            <>
-              <div>t<sub>peak</sub> = {ev.peakTimeS.toFixed(4)} s</div>
-              <div>amp = {ev.amplitude.toFixed(2)} {unit}</div>
-              <div>baseline = {ev.baselineVal.toFixed(2)} {unit}</div>
-              <div>peak = {ev.peakVal.toFixed(2)} {unit}</div>
-              <div style={{
-                marginTop: 4, paddingTop: 4, borderTop: '1px solid var(--border)',
-              }} />
-              <div>rise = {ev.riseTimeMs != null ? ev.riseTimeMs.toFixed(2) : '—'} ms</div>
-              <div>decay = {ev.decayTimeMs != null ? ev.decayTimeMs.toFixed(2) : '—'} ms</div>
-              <div>τ decay = {ev.decayTauMs != null ? ev.decayTauMs.toFixed(2) : '—'} ms</div>
-              <div>FWHM = {ev.halfWidthMs != null ? ev.halfWidthMs.toFixed(2) : '—'} ms</div>
-              <div>AUC = {ev.auc != null ? ev.auc.toFixed(3) : '—'} {unit}·s</div>
-              <div style={{
-                marginTop: 4, color: ev.manual ? '#ffb74d' : 'var(--text-muted)',
-                fontStyle: 'italic',
-              }}>{ev.manual ? 'manual' : 'auto-detected'}</div>
-            </>
-          ) : <span style={{ color: 'var(--text-muted)' }}>No event selected.</span>}
-        </div>
-        <div style={{
-          flex: 1, minWidth: 0,
-          display: 'flex', flexDirection: 'column', gap: 4,
-        }}>
-          <div style={{
-            display: 'flex', gap: 8, alignItems: 'center',
-            fontSize: 'var(--font-size-label)', flexShrink: 0,
-          }}>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ color: 'var(--text-muted)' }}>Before (ms)</span>
-              <NumInput value={preMs} step={1} min={1}
-                onChange={(v) => setPreMs(Math.max(1, Math.min(winMs - 1, v)))} />
-            </label>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ color: 'var(--text-muted)' }}>Total (ms)</span>
-              <NumInput value={winMs} step={5} min={10}
-                onChange={(v) => setWinMs(Math.max(preMs + 1, v))} />
-            </label>
-          </div>
-          <div ref={containerRef} style={{
-            flex: 1, minHeight: 0,
-            border: '1px solid var(--border)', borderRadius: 4,
-            background: 'var(--bg-primary)',
-          }} />
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Results table

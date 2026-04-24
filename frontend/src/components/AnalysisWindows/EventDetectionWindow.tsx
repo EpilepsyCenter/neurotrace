@@ -1089,7 +1089,7 @@ export function EventDetectionWindow({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-      <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
+      <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
       {children}
     </label>
   )

@@ -2597,7 +2597,7 @@ function APSweepViewer({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-      <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
+      <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
       {children}
     </label>
   )
@@ -2619,7 +2619,7 @@ function ParamRow({
   // actual typed values are 3–4 digits.
   return (
     <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-      <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
+      <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
       <NumInput value={value} step={step} min={min} max={max} onChange={onChange}
         style={{ width: 110 }} />
     </label>

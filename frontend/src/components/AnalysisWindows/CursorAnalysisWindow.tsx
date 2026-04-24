@@ -980,7 +980,7 @@ export function CursorAnalysisWindow({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-      <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
+      <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{label}</span>
       {children}
     </label>
   )
@@ -1729,8 +1729,11 @@ function MiniViewer({
           Reset zoom
         </button>
       </div>
+      {/* Scroll/zoom/drag cheat-sheet — pinned to the BOTTOM of the
+          plot frame so it doesn't crowd the zero-offset button in the
+          top toolbar. pointerEvents:none so it's non-interactive. */}
       <span style={{
-        position: 'absolute', top: 6, left: 10, zIndex: 2,
+        position: 'absolute', bottom: 6, left: 10, zIndex: 2,
         fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',
         fontStyle: 'italic', pointerEvents: 'none',
       }}>

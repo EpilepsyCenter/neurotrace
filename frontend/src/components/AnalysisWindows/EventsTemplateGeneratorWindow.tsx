@@ -362,7 +362,7 @@ export function EventsTemplateGeneratorWindow({
         border: '1px solid var(--border)',
       }}>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-          <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Group</span>
+          <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Group</span>
           <select value={group} onChange={(e) => setGroup(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups ?? []).map((g: any, i: number) => (
               <option key={i} value={i}>{g.label || `G${i + 1}`}</option>
@@ -370,7 +370,7 @@ export function EventsTemplateGeneratorWindow({
           </select>
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-          <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Series</span>
+          <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Series</span>
           <select value={series} onChange={(e) => setSeries(Number(e.target.value))} disabled={!fileInfo}>
             {(fileInfo?.groups?.[group]?.series ?? []).map((s: any, i: number) => (
               <option key={i} value={i}>{s.label || `S${i + 1}`} ({s.sweepCount} sw)</option>
@@ -378,7 +378,7 @@ export function EventsTemplateGeneratorWindow({
           </select>
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-          <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Channel</span>
+          <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Channel</span>
           <select value={channel} onChange={(e) => setChannel(Number(e.target.value))}
                   disabled={channels.length === 0}>
             {channels.map((c: any) => (
@@ -387,7 +387,7 @@ export function EventsTemplateGeneratorWindow({
           </select>
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 'var(--font-size-label)' }}>
-          <span style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Sweep</span>
+          <span className="selector-label" style={{ color: 'var(--text-muted)', marginBottom: 2 }}>Sweep</span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
             <button className="btn" style={{ padding: '2px 8px' }}
               onClick={() => setSweep((s) => Math.max(0, s - 1))}

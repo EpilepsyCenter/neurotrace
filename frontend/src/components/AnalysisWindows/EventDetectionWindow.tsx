@@ -202,6 +202,58 @@ export function EventDetectionWindow({
   // ---- Splitters (persisted under eventsWindowUI) ----
   const [leftPanelWidth, setLeftPanelWidth] = useState(340)
   const [plotHeight, setPlotHeight] = useState(360)
+  // Per-card collapsed state — lets users hide panels they don't
+  // touch often. Keyed by card title. Persisted under
+  // `eventsWindowUI.collapsedCards`. Defaults put the busy panels
+  // (Kinetics / Exclusion) collapsed on first use so the Detection
+  // method / Template panels get prime vertical real estate.
+  const DEFAULT_COLLAPSED: Record<string, boolean> = {
+    'Kinetics': true,
+    'Exclusion': true,
+    // Skip regions is a power-user feature; hidden until the user
+    // adds one. Unchanged from the pre-collapsible-refactor behaviour.
+    'Skip regions': true,
+  }
+  const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(DEFAULT_COLLAPSED)
+  /** Build collapsible-card props for a given card title. Looked up
+   *  against state with the default-collapsed map as fallback. */
+  const cardProps = (title: string) => ({
+    collapsible: true as const,
+    collapsed: collapsedCards[title] ?? DEFAULT_COLLAPSED[title] ?? false,
+    onToggle: () => toggleCard(title),
+  })
+  const toggleCard = useCallback((title: string) => {
+    setCollapsedCards((prev) => {
+      const cur = prev[title] ?? (DEFAULT_COLLAPSED[title] ?? false)
+      const next = { ...prev, [title]: !cur }
+      // Fire-and-forget persistence. Keeps the list tight by
+      // dropping explicit ``false`` entries that match the default —
+      // less churn in the prefs file on repeated open/close cycles.
+      const cleaned: Record<string, boolean> = {}
+      for (const [k, v] of Object.entries(next)) {
+        const def = DEFAULT_COLLAPSED[k] ?? false
+        if (v !== def) cleaned[k] = v
+      }
+      ;(async () => {
+        try {
+          const api = window.electronAPI
+          if (!api?.getPreferences || !api?.setPreferences) return
+          const prefs = (await api.getPreferences()) ?? {}
+          const ui = { ...(prefs.eventsWindowUI ?? {}), collapsedCards: cleaned }
+          await api.setPreferences({ ...prefs, eventsWindowUI: ui })
+        } catch { /* ignore */ }
+      })()
+      return next
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  // Histogram bin sizes — persisted globally under
+  // `eventsWindowUI.ampHistBinW` / `ieiHistBinMs`. Lives here at the
+  // parent so bin choice survives tab switches (the child tabs
+  // unmount when you switch bottom tab). Null = use auto sqrt-N.
+  const [ampHistBinW, setAmpHistBinW] = useState<number | null>(null)
+  const [ieiHistBinMs, setIeiHistBinMs] = useState<number | null>(null)
+  const [rateBinS, setRateBinS] = useState<number>(5)
   // Bottom-pane tab — "table" (events results), "overlay" (all events
   // aligned on peak/foot), or "histogram" (amplitude distribution).
   // Matches EE's tab row below the viewer.
@@ -229,6 +281,21 @@ export function EventDetectionWindow({
             && ui.plotHeight >= 150 && ui.plotHeight <= 800) {
           setPlotHeight(ui.plotHeight)
         }
+        if (ui.collapsedCards && typeof ui.collapsedCards === 'object') {
+          // Merge stored overrides ON TOP of the defaults so adding
+          // new collapsible cards in the future keeps their default
+          // collapsed-ness for existing users.
+          setCollapsedCards((prev) => ({ ...prev, ...ui.collapsedCards }))
+        }
+        if (typeof ui.ampHistBinW === 'number' && ui.ampHistBinW > 0) {
+          setAmpHistBinW(ui.ampHistBinW)
+        }
+        if (typeof ui.ieiHistBinMs === 'number' && ui.ieiHistBinMs > 0) {
+          setIeiHistBinMs(ui.ieiHistBinMs)
+        }
+        if (typeof ui.rateBinS === 'number' && ui.rateBinS > 0) {
+          setRateBinS(ui.rateBinS)
+        }
       } catch { /* ignore */ }
     })()
     return () => { cancelled = true }
@@ -242,6 +309,20 @@ export function EventDetectionWindow({
       await api.setPreferences({ ...prefs, eventsWindowUI: next })
     } catch { /* ignore */ }
   }, [])
+  // Persist bin-size choices on change. Debounced at 300 ms so a
+  // quick succession of Enter-commits doesn't spam setPreferences.
+  useEffect(() => {
+    const id = setTimeout(() => writeUIPref({ ampHistBinW }), 300)
+    return () => clearTimeout(id)
+  }, [ampHistBinW, writeUIPref])
+  useEffect(() => {
+    const id = setTimeout(() => writeUIPref({ ieiHistBinMs }), 300)
+    return () => clearTimeout(id)
+  }, [ieiHistBinMs, writeUIPref])
+  useEffect(() => {
+    const id = setTimeout(() => writeUIPref({ rateBinS }), 300)
+    return () => clearTimeout(id)
+  }, [rateBinS, writeUIPref])
 
   // Session handoff — whenever the main events window's group /
   // series / channel / sweep / viewport / filter changes, we stamp a
@@ -470,7 +551,7 @@ export function EventDetectionWindow({
             paddingRight: 4,
           }}>
             {/* Method card */}
-            <Card title="Detection method">
+            <Card title="Detection method" {...cardProps('Detection method')}>
               <Row label="Method">
                 <select value={params.method} style={{ width: '100%' }}
                   onChange={(e) => setParams((p) => ({
@@ -493,7 +574,8 @@ export function EventDetectionWindow({
             </Card>
 
             {/* Filter card */}
-            <FilterCard params={params} setParams={setParams} />
+            <FilterCard params={params} setParams={setParams}
+              cardProps={cardProps('Pre-detection filter')} />
 
             {/* Template card */}
             {params.method.startsWith('template_') && (
@@ -521,12 +603,13 @@ export function EventDetectionWindow({
                 onOpenGenerator={openTemplateGenerator}
                 onOpenRefinement={openTemplateRefinement}
                 canRefine={(entry?.events.length ?? 0) >= 2}
+                cardProps={cardProps('Template')}
               />
             )}
 
             {/* Detection algorithm cutoff */}
             {params.method === 'template_correlation' && (
-              <Card title="Correlation cutoff">
+              <Card title="Correlation cutoff" {...cardProps('Correlation cutoff')}>
                 <Row label="Cutoff (r)">
                   <NumInput value={params.correlationCutoff} step={0.05} min={-1} max={1}
                     onChange={(v) => setParams((p) => ({ ...p, correlationCutoff: v }))} />
@@ -540,7 +623,7 @@ export function EventDetectionWindow({
               </Card>
             )}
             {params.method === 'template_deconvolution' && (
-              <Card title="Deconvolution cutoff">
+              <Card title="Deconvolution cutoff" {...cardProps('Deconvolution cutoff')}>
                 <Row label="Cutoff (σ)">
                   <NumInput value={params.deconvCutoffSd} step={0.25} min={0.5}
                     onChange={(v) => setParams((p) => ({ ...p, deconvCutoffSd: v }))} />
@@ -573,6 +656,7 @@ export function EventDetectionWindow({
                 onParamsChange={setParams}
                 cursors={cursors}
                 onBringCursorsToView={bringCursorsToView}
+                cardProps={cardProps('Threshold')}
                 onComputeRms={async () => {
                   if (cursors.baselineEnd <= cursors.baselineStart) {
                     setError('Cursor region is empty — use "Cursors to view" first.')
@@ -601,7 +685,7 @@ export function EventDetectionWindow({
             )}
 
             {/* Kinetics card */}
-            <Card title="Kinetics">
+            <Card title="Kinetics" {...cardProps('Kinetics')}>
               <Row label="Baseline search (ms)">
                 <NumInput value={params.baselineSearchMs} step={1} min={1}
                   onChange={(v) => setParams((p) => ({ ...p, baselineSearchMs: v }))} />
@@ -691,7 +775,7 @@ export function EventDetectionWindow({
                 outside any of these bounds get dropped from the table.
                 Null = filter off. Manual-added events bypass these
                 guards, so users can force-include a marginal event. */}
-            <Card title="Exclusion">
+            <Card title="Exclusion" {...cardProps('Exclusion')}>
               <Row label="Min |amp|">
                 <NumInput value={params.amplitudeMinAbs} step={1} min={0}
                   onChange={(v) => setParams((p) => ({ ...p, amplitudeMinAbs: v }))} />
@@ -734,6 +818,7 @@ export function EventDetectionWindow({
               setParams={setParams}
               sweepDurationS={sweepDurationS}
               viewport={viewport}
+              cardProps={cardProps('Skip regions')}
             />
           </div>
 
@@ -966,12 +1051,14 @@ export function EventDetectionWindow({
                 <AmplitudeHistogram
                   entry={entry}
                   heightSignal={plotHeight}
+                  binW={ampHistBinW} setBinW={setAmpHistBinW}
                 />
               )}
               {bottomTab === 'rate' && (
                 <EventRatePlot
                   entry={entry}
                   heightSignal={plotHeight}
+                  binS={rateBinS} setBinS={setRateBinS}
                 />
               )}
               {bottomTab === 'ampvstime' && (
@@ -984,6 +1071,7 @@ export function EventDetectionWindow({
                 <IEIHistogram
                   entry={entry}
                   heightSignal={plotHeight}
+                  binMs={ieiHistBinMs} setBinMs={setIeiHistBinMs}
                 />
               )}
             </div>
@@ -1007,7 +1095,53 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+/** Left-panel card with an optional collapsible header.
+ *
+ * When ``collapsible`` is true and ``collapsed`` is passed, clicking
+ * the header toggles the pane via ``onToggle``. The parent is
+ * responsible for persisting the collapsed state (the main window
+ * stores it under ``eventsWindowUI.collapsedCards`` keyed by ``title``).
+ * Non-collapsible cards render the same as before, no disclosure
+ * affordance shown. */
+function Card({
+  title, children,
+  collapsible = false,
+  collapsed = false,
+  onToggle,
+  rightAdornment,
+}: {
+  title: string
+  children: React.ReactNode
+  collapsible?: boolean
+  collapsed?: boolean
+  onToggle?: () => void
+  /** Optional inline control(s) that live on the header to the right
+   *  of the title (e.g. a count badge). Not clickable — header click
+   *  still toggles collapse. */
+  rightAdornment?: React.ReactNode
+}) {
+  const header = (
+    <div
+      onClick={collapsible ? onToggle : undefined}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        cursor: collapsible ? 'pointer' : 'default',
+        userSelect: 'none',
+      }}>
+      <span style={{ fontWeight: 600, color: 'var(--text-muted)' }}>{title}</span>
+      {rightAdornment && <span style={{ flex: 1 }} />}
+      {rightAdornment}
+      {collapsible && (
+        <span style={{
+          color: 'var(--text-muted)', flex: rightAdornment ? 0 : 1,
+          textAlign: 'right',
+          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+          transition: 'transform 0.15s',
+          display: 'inline-block',
+        }}>▾</span>
+      )}
+    </div>
+  )
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', gap: 6,
@@ -1015,8 +1149,8 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
       background: 'var(--bg-primary)',
       fontSize: 'var(--font-size-label)',
     }}>
-      <span style={{ fontWeight: 600, color: 'var(--text-muted)' }}>{title}</span>
-      {children}
+      {header}
+      {!collapsed && children}
     </div>
   )
 }
@@ -1088,19 +1222,18 @@ function HelpText({ children }: { children: React.ReactNode }) {
 const MAX_SKIP_REGIONS = 5
 
 function SkipRegionsCard({
-  params, setParams, sweepDurationS, viewport,
+  params, setParams, sweepDurationS, viewport, cardProps,
 }: {
   params: EventsParams
   setParams: React.Dispatch<React.SetStateAction<EventsParams>>
   sweepDurationS: number
   viewport: Viewport
+  cardProps?: CollapsibleCardProps
 }) {
   const regions = params.skipRegions ?? []
-  const [collapsed, setCollapsed] = useState(true)
   const { cursors } = useAppStore()
-  // Collapsed by default — skip regions are a power-user feature, no
-  // need to take sidebar space until the user cares. Count badge on
-  // the header tells them at a glance whether any are configured.
+  // Count badge on the header tells the user at a glance whether any
+  // regions are configured even when the card is collapsed.
   const enabledCount = regions.filter((r) => r.enabled).length
 
   const update = (i: number, patch: Partial<typeof regions[number]>) => {
@@ -1125,7 +1258,9 @@ function SkipRegionsCard({
         skipRegions: [...prev, { enabled: true, startS, endS }],
       }
     })
-    setCollapsed(false)
+    // Force-open the card so the user sees the region they just
+    // added, even if they had it collapsed.
+    if (cardProps?.collapsed) cardProps.onToggle()
   }
   const removeRegion = (i: number) => {
     setParams((p) => ({
@@ -1134,30 +1269,14 @@ function SkipRegionsCard({
     }))
   }
 
+  // Card now shared with the other collapsible cards in the left
+  // panel — centralised collapsed state, persisted via prefs.
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', gap: 6,
-      padding: 8, border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-      fontSize: 'var(--font-size-label)',
-    }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        cursor: 'pointer',
-      }} onClick={() => setCollapsed((v) => !v)}>
-        <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>
-          Skip regions {enabledCount > 0 ? `(${enabledCount})` : ''}
-        </span>
-        <span style={{ flex: 1 }} />
-        <span style={{
-          color: 'var(--text-muted)',
-          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
-          transition: 'transform 0.15s',
-          display: 'inline-block',
-        }}>▾</span>
-      </div>
-      {!collapsed && (
-        <>
+    <Card
+      title={`Skip regions${enabledCount > 0 ? ` (${enabledCount})` : ''}`}
+      {...(cardProps ?? { collapsible: true as const, collapsed: true,
+                          onToggle: () => {} })}>
+      <>
           {regions.length === 0 && (
             <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
               Detection is never suppressed. Add a region to exclude a
@@ -1229,9 +1348,8 @@ function SkipRegionsCard({
               : 'Add a new skip region centred in the current view'}>
             + Add region ({regions.length}/{MAX_SKIP_REGIONS})
           </button>
-        </>
-      )}
-    </div>
+      </>
+    </Card>
   )
 }
 
@@ -1239,14 +1357,23 @@ function SkipRegionsCard({
 // Filter card (same shape as AP / Burst)
 // ---------------------------------------------------------------------------
 
+/** Shared shape for the collapsible-Card props that parent cards
+ *  thread through to their internal ``Card`` wrapper. */
+type CollapsibleCardProps = {
+  collapsible: true
+  collapsed: boolean
+  onToggle: () => void
+}
+
 function FilterCard({
-  params, setParams,
+  params, setParams, cardProps,
 }: {
   params: EventsParams
   setParams: React.Dispatch<React.SetStateAction<EventsParams>>
+  cardProps?: CollapsibleCardProps
 }) {
   return (
-    <Card title="Pre-detection filter">
+    <Card title="Pre-detection filter" {...(cardProps ?? {})}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <input type="checkbox" checked={params.filterEnabled}
           onChange={(e) => setParams((p) => ({ ...p, filterEnabled: e.target.checked }))} />
@@ -1358,6 +1485,7 @@ function TemplatePanel({
   onPickAdditional,
   onOpenGenerator, onOpenRefinement,
   canRefine,
+  cardProps,
 }: {
   templates: Record<string, EventsTemplate>
   activeTemplateId: string | null
@@ -1371,6 +1499,7 @@ function TemplatePanel({
   onOpenGenerator: () => void
   onOpenRefinement: () => void
   canRefine: boolean
+  cardProps?: CollapsibleCardProps
 }) {
   // Main-window template panel is READ-ONLY: library picker + a
   // compact coefficient readout + buttons to open the dedicated
@@ -1386,7 +1515,7 @@ function TemplatePanel({
   const slot2 = additionalTemplateIds[0] ?? null
   const slot3 = additionalTemplateIds[1] ?? null
   return (
-    <Card title="Template">
+    <Card title="Template" {...(cardProps ?? {})}>
       <Row label="Primary">
         <select value={activeTemplateId ?? ''} style={{ width: '100%' }}
           onChange={(e) => { if (e.target.value) onPickTemplate(e.target.value) }}>
@@ -1546,15 +1675,17 @@ function importTemplatesJSON() {
 
 function ThresholdPanel({
   params, onParamsChange, cursors, onBringCursorsToView, onComputeRms,
+  cardProps,
 }: {
   params: EventsParams
   onParamsChange: React.Dispatch<React.SetStateAction<EventsParams>>
   cursors: CursorPositions
   onBringCursorsToView: () => void
   onComputeRms: () => void
+  cardProps?: CollapsibleCardProps
 }) {
   return (
-    <Card title="Threshold">
+    <Card title="Threshold" {...(cardProps ?? {})}>
       <Row label="Mode">
         <select value={params.thresholdMode} style={{ width: '100%' }}
           onChange={(e) => onParamsChange((p) => ({
@@ -2584,16 +2715,18 @@ function EventsSummaryBar({ entry }: { entry: EventsData | undefined }) {
 
 function AmplitudeHistogram({
   entry, heightSignal,
+  binW, setBinW,
 }: {
   entry: EventsData | undefined
   heightSignal: number
+  /** Bin width in amplitude units, lifted to the parent so it
+   *  persists across bottom-tab switches and is written to prefs.
+   *  ``null`` → auto (√n bins clamped to [8, 40]). */
+  binW: number | null
+  setBinW: React.Dispatch<React.SetStateAction<number | null>>
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  // Bin width in amplitude units. `null` → auto (√n bins clamped to
-  // [8, 40]). Non-null overrides the auto sizing; matches the IEI
-  // histogram's UX.
-  const [binW, setBinW] = useState<number | null>(null)
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 5) return null
@@ -2767,13 +2900,16 @@ function AmplitudeHistogram({
 
 function EventRatePlot({
   entry, heightSignal,
+  binS, setBinS,
 }: {
   entry: EventsData | undefined
   heightSignal: number
+  /** Bin width in seconds, lifted to parent for prefs persistence. */
+  binS: number
+  setBinS: React.Dispatch<React.SetStateAction<number>>
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  const [binS, setBinS] = useState(5)
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length === 0 || entry.sweepLengthS <= 0) return null
@@ -3033,13 +3169,17 @@ function AmpVsTimeScatter({
 
 function IEIHistogram({
   entry, heightSignal,
+  binMs, setBinMs,
 }: {
   entry: EventsData | undefined
   heightSignal: number
+  /** Bin width in ms, lifted to parent for prefs persistence.
+   *  ``null`` → auto (sqrt-N binning). */
+  binMs: number | null
+  setBinMs: React.Dispatch<React.SetStateAction<number | null>>
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  const [binMs, setBinMs] = useState<number | null>(null)  // null = auto
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 2) return null

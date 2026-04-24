@@ -162,6 +162,24 @@ code, kbd, samp {
   font-family: var(--font-mono);
 }
 
+/* Card titles + section labels. The codebase stamps these as inline
+   ``fontWeight: 600`` on spans (Card title, "Library", "Cursors
+   (event region)", "Filter", "Fit", etc.). An attribute selector
+   catches all of them in one rule rather than retrofitting a
+   className to dozens of call sites. Only spans — so buttons with
+   ``font-weight: 600`` stay UI sans. */
+span[style*="font-weight: 600"] {
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+/* Table headers — <th> is always a label, so they belong in UI sans
+   even though their default inline style hits the selector above via
+   surrounding spans. Explicit reset keeps column headers readable. */
+table th {
+  font-family: var(--font-ui);
+}
+
 /* ============================================================
    .led — status-bar pill with a small glowing indicator dot.
    Base class gives the pill chrome; the ``ok`` / ``err`` / ``off``

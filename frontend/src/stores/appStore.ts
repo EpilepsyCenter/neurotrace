@@ -378,6 +378,92 @@ async function _savePersistedEvents(filePath: string, events: Record<string, Eve
   } catch { /* ignore */ }
 }
 
+// ---------------------------------------------------------------------------
+// Per-recording sidecar (.neurotrace JSON next to the recording file)
+// ---------------------------------------------------------------------------
+//
+// All analysis params + results get round-tripped through this one file so
+// closing and re-opening a recording restores the full workspace state.
+// The Electron main process owns the file I/O (read-sidecar / write-sidecar
+// IPC channels with atomic writes); this module just produces / consumes
+// the JSON payload.
+//
+// Shape of the payload is flat, slice-keyed, and intentionally stable —
+// future schema changes bump ``version`` and add a migration block here.
+
+const SIDECAR_VERSION = 1
+const SIDECAR_DEBOUNCE_MS = 1000
+
+type SidecarPayload = {
+  format: 'neurotrace-sidecar'
+  version: number
+  saved_at?: string
+  app_version?: string
+  recording_name?: string
+  analyses?: {
+    events?: Record<string, EventsData>
+    bursts?: Record<string, FieldBurstsData>
+    ap?: Record<string, APData>
+    iv_curves?: Record<string, IVCurveData>
+    fpsp_curves?: Record<string, FPspData>
+    cursor_analyses?: Record<string, CursorAnalysisData>
+  }
+  /** Form / preference state per analysis that doesn't live inside
+   *  a per-(group,series) results blob. Flat so future analyses can
+   *  plug in without reshaping the schema. */
+  forms?: {
+    resistance?: ResistanceFormState
+  }
+  burst_form_params?: Record<string, FieldBurstsParams>
+  excluded_sweeps?: Record<string, number[]>
+  averaged_sweeps?: Record<string, AveragedSweep[]>
+  cursors?: CursorPositions
+}
+
+async function _loadSidecar(filePath: string): Promise<SidecarPayload | null> {
+  const api = window.electronAPI
+  if (!api?.readSidecar || !filePath) return null
+  try {
+    const parsed = await api.readSidecar(filePath)
+    if (parsed && (parsed as any).format === 'neurotrace-sidecar') {
+      return parsed as unknown as SidecarPayload
+    }
+    return null
+  } catch { return null }
+}
+
+function _sidecarPayloadFromState(state: AppState): SidecarPayload {
+  return {
+    format: 'neurotrace-sidecar',
+    version: SIDECAR_VERSION,
+    app_version: '0.3.0',
+    recording_name: state.recording?.filePath?.split(/[/\\]/).pop(),
+    analyses: {
+      events: state.eventsAnalyses,
+      bursts: state.fieldBursts,
+      ap: state.apAnalyses,
+      iv_curves: state.ivCurves,
+      fpsp_curves: state.fpspCurves,
+      cursor_analyses: state.cursorAnalyses,
+    },
+    forms: {
+      resistance: state.resistanceForm,
+    },
+    burst_form_params: state.burstFormParams,
+    excluded_sweeps: state.excludedSweeps,
+    averaged_sweeps: state.averagedSweeps,
+    cursors: state.cursors,
+  }
+}
+
+async function _saveSidecar(filePath: string, state: AppState): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.writeSidecar || !filePath) return
+  try {
+    await api.writeSidecar(filePath, _sidecarPayloadFromState(state) as unknown as Record<string, unknown>)
+  } catch { /* ignore */ }
+}
+
 function _broadcastEvents(eventsAnalyses: Record<string, EventsData>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
@@ -852,6 +938,25 @@ export interface ResistanceResult {
   source?: string
 }
 
+/** Resistance-window form state — the user-facing params that the
+ *  ResistanceWindow used to hold in local ``useState``. Lifted into
+ *  the store so the sidecar can persist them per recording.
+ *
+ *  Note: ``vStep`` auto-populates from the stimulus protocol when a
+ *  new series is picked, but typed-in user values persist via the
+ *  sidecar (overrides survive across sessions). ``avgFrom`` / ``avgTo``
+ *  are ephemeral per-series defaults; still here so batch analysis
+ *  can reconstruct the exact run. */
+export interface ResistanceFormState {
+  vStep: number
+  nExp: 1 | 2
+  fitDurationMs: number
+  runMode: 'all' | 'selected' | 'range' | 'one'
+  avgFrom: number
+  avgTo: number
+  sweepOne: number
+}
+
 /** Cursor-analysis types: one state blob per recording, mirroring the
  *  pattern used by ivCurves / fpspCurves / fieldBursts. */
 export interface CursorSlotConfig {
@@ -1322,6 +1427,12 @@ interface AppState {
 
   // Resistance analysis
   resistanceResult: ResistanceResult | null
+  /** Resistance-window form state — lifted out of the component so
+   *  the sidecar can persist it per recording. ``vStep`` is also
+   *  auto-populated from the stimulus protocol when a new series is
+   *  picked; users can then override by typing a new value, which
+   *  sticks (sidecar save on change). */
+  resistanceForm: ResistanceFormState
 
   // Field-burst detection, keyed by `${group}:${series}` so markers can
   // persist across series switches.
@@ -1501,6 +1612,7 @@ interface AppState {
   runResistanceOnSweep: (vStep: number) => Promise<void>
   runResistanceOnAverage: (vStep: number, sweepIndices: number[] | null) => Promise<void>
   clearResistanceResult: () => void
+  setResistanceForm: (patch: Partial<ResistanceFormState>) => void
 
   // Field-burst actions
   /** Run on a single sweep. Result REPLACES any existing bursts for that
@@ -1821,6 +1933,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   results: [],
   resistanceResult: null,
+  resistanceForm: {
+    vStep: 5,
+    nExp: 2,
+    fitDurationMs: 5.0,
+    runMode: 'all',
+    avgFrom: 1,
+    avgTo: 1,
+    sweepOne: 1,
+  },
   fieldBursts: {},
   burstFormParams: {},
   ivCurves: {},
@@ -2172,6 +2293,19 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   openFile: async (filePath) => {
     const { backendUrl } = get()
+    // If there's a pending sidecar write for the CURRENT recording,
+    // flush it synchronously before swapping recordings. Otherwise
+    // the debounced save could race with the new file's state and
+    // clobber the OLD file's sidecar with NEW data keyed to the
+    // wrong filePath.
+    const currentFilePath = get().recording?.filePath
+    if (currentFilePath && _sidecarTimer) {
+      clearTimeout(_sidecarTimer)
+      _sidecarTimer = null
+      try {
+        await _saveSidecar(currentFilePath, get())
+      } catch { /* ignore */ }
+    }
     set({
       loading: true,
       error: null,
@@ -2193,6 +2327,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
+      resistanceForm: {
+        vStep: 5, nExp: 2, fitDurationMs: 5.0,
+        runMode: 'all', avgFrom: 1, avgTo: 1, sweepOne: 1,
+      },
     })
     try {
       const recording = await apiFetch(backendUrl, '/api/files/open', {
@@ -2207,7 +2345,44 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentTrace: 0,
         loading: false,
       })
-      // Restore any bursts previously detected on this recording.
+      // Try the per-recording sidecar first. If a ``<file>.neurotrace``
+      // sits next to the recording it carries every analysis slice
+      // in one shot — load-and-broadcast everything, then skip the
+      // legacy prefs loads below. When the sidecar is absent we fall
+      // through to the per-slice prefs loads for back-compat with
+      // users whose results are still stored in the Electron prefs
+      // file from before v0.3.x.
+      if (recording?.filePath) {
+        const sidecar = await _loadSidecar(recording.filePath)
+        if (sidecar) {
+          const bc = new BroadcastChannel('neurotrace-sync')
+          const post = (msg: any) => { try { bc.postMessage(msg) } catch { /* ignore */ } }
+          const a = sidecar.analyses ?? {}
+          const patch: Partial<AppState> = {}
+          if (a.events) { patch.eventsAnalyses = a.events; post({ type: 'events-update', eventsAnalyses: a.events }) }
+          if (a.bursts) { patch.fieldBursts = a.bursts; post({ type: 'bursts-update', fieldBursts: a.bursts }) }
+          if (a.ap) { patch.apAnalyses = a.ap; post({ type: 'ap-update', apAnalyses: a.ap }) }
+          if (a.iv_curves) { patch.ivCurves = a.iv_curves; post({ type: 'iv-update', ivCurves: a.iv_curves }) }
+          if (a.fpsp_curves) { patch.fpspCurves = a.fpsp_curves; post({ type: 'fpsp-update', fpspCurves: a.fpsp_curves }) }
+          if (a.cursor_analyses) { patch.cursorAnalyses = a.cursor_analyses; post({ type: 'cursor-analyses-update', cursorAnalyses: a.cursor_analyses }) }
+          if (sidecar.burst_form_params) { patch.burstFormParams = sidecar.burst_form_params; post({ type: 'burst-form-params-update', burstFormParams: sidecar.burst_form_params }) }
+          if (sidecar.excluded_sweeps) { patch.excludedSweeps = sidecar.excluded_sweeps; post({ type: 'excluded-update', excludedSweeps: sidecar.excluded_sweeps }) }
+          if (sidecar.averaged_sweeps) { patch.averagedSweeps = sidecar.averaged_sweeps; post({ type: 'averaged-update', averagedSweeps: sidecar.averaged_sweeps }) }
+          if (sidecar.cursors) { patch.cursors = { ...get().cursors, ...sidecar.cursors }; post({ type: 'cursor-update', cursors: patch.cursors }) }
+          if (sidecar.forms?.resistance) {
+            patch.resistanceForm = { ...get().resistanceForm, ...sidecar.forms.resistance }
+          }
+          bc.close()
+          if (Object.keys(patch).length > 0) set(patch)
+          // Sidecar hit — skip the legacy prefs-based hydration.
+          await get().selectSweep(0, 0, 0, 0)
+          return
+        }
+      }
+
+      // Legacy hydration path — used when no sidecar exists (fresh
+      // recording or pre-v0.3.x user). Any edits in this session
+      // will write a sidecar on next auto-save, migrating silently.
       if (recording?.filePath) {
         const savedBursts = await _loadPersistedBursts(recording.filePath)
         if (savedBursts) {
@@ -2815,6 +2990,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   clearResistanceResult: () => set({ resistanceResult: null }),
+  setResistanceForm: (patch) => set((s) => ({
+    resistanceForm: { ...s.resistanceForm, ...patch },
+  })),
 
   // ---- Field-burst detection ----
 
@@ -4372,6 +4550,77 @@ useAppStore.subscribe((state) => {
   }).catch(() => { /* ignore */ })
 })
 
+// ---------------------------------------------------------------------------
+// Per-recording sidecar auto-save.
+//
+// One subscriber watches all the slices that belong in the .neurotrace
+// sidecar. On any change it schedules a debounced write — coalescing bursts
+// of updates (typing a param into a NumInput, dragging cursors, etc.) into
+// a single file write. Runs in parallel with the legacy per-slice prefs
+// writers above so existing users don't lose state during the transition.
+// ---------------------------------------------------------------------------
+let _sidecarTimer: ReturnType<typeof setTimeout> | null = null
+let _sidecarRefs = {
+  events: null as any,
+  bursts: null as any,
+  ap: null as any,
+  iv: null as any,
+  fpsp: null as any,
+  cursorAnalyses: null as any,
+  burstFormParams: null as any,
+  excluded: null as any,
+  averaged: null as any,
+  cursors: null as any,
+  resistanceForm: null as any,
+}
+useAppStore.subscribe((state) => {
+  const filePath = state.recording?.filePath
+  if (!filePath) return
+  const next = {
+    events: state.eventsAnalyses,
+    bursts: state.fieldBursts,
+    ap: state.apAnalyses,
+    iv: state.ivCurves,
+    fpsp: state.fpspCurves,
+    cursorAnalyses: state.cursorAnalyses,
+    burstFormParams: state.burstFormParams,
+    excluded: state.excludedSweeps,
+    averaged: state.averagedSweeps,
+    cursors: state.cursors,
+    resistanceForm: state.resistanceForm,
+  }
+  // Reference-equality check across the tracked slices — avoids
+  // re-scheduling on unrelated state churn (e.g. trace fetches).
+  let changed = false
+  for (const k of Object.keys(next) as (keyof typeof next)[]) {
+    if (next[k] !== _sidecarRefs[k]) { changed = true; break }
+  }
+  if (!changed) return
+  _sidecarRefs = next
+  if (_sidecarTimer) clearTimeout(_sidecarTimer)
+  _sidecarTimer = setTimeout(() => {
+    _sidecarTimer = null
+    _saveSidecar(filePath, useAppStore.getState())
+  }, SIDECAR_DEBOUNCE_MS)
+})
+
+// Flush the sidecar on page unload so a quick close-and-quit after a
+// change still writes. synchronous IPC via sendSync isn't available on
+// context-isolated channels, but electron keeps the main process alive
+// briefly during renderer teardown so the async invoke usually makes it
+// through. Best-effort.
+window.addEventListener('beforeunload', () => {
+  const state = useAppStore.getState()
+  const filePath = state.recording?.filePath
+  if (!filePath) return
+  if (_sidecarTimer) {
+    clearTimeout(_sidecarTimer)
+    _sidecarTimer = null
+  }
+  // Fire-and-forget — renderer can't block the unload.
+  void _saveSidecar(filePath, state)
+})
+
 declare global {
   interface Window {
     electronAPI?: {
@@ -4381,6 +4630,8 @@ declare global {
       saveFileDialog: (defaultName: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
       getPreferences: () => Promise<Record<string, unknown>>
       setPreferences: (prefs: Record<string, unknown>) => Promise<boolean>
+      readSidecar: (recordingPath: string) => Promise<Record<string, unknown> | null>
+      writeSidecar: (recordingPath: string, payload: Record<string, unknown>) => Promise<boolean>
       openAnalysisWindow: (type: string) => Promise<boolean>
       closeAnalysisWindow: (type: string) => Promise<boolean>
       getOpenAnalysisWindows: () => Promise<string[]>

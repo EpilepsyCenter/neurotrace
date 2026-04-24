@@ -49,22 +49,22 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
   // Kept in sync with the current series so multi-channel recordings
   // can pick which amplifier channel feeds the resistance fit.
   const [currentChannel, setCurrentChannel] = useState(0)
-  const [vStep, setVStep] = useState(5)
-  const [avgFrom, setAvgFrom] = useState(1)
-  const [avgTo, setAvgTo] = useState(1)
-  const [nExp, setNExp] = useState(2)
-  const [fitDurationMs, setFitDurationMs] = useState(5.0)
+  // Form state lives in the app store so the .neurotrace sidecar can
+  // round-trip it across sessions. ``setForm`` patches only the
+  // fields the caller passes; everything else stays intact.
+  const resistanceForm = useAppStore((s) => s.resistanceForm)
+  const setForm = useAppStore((s) => s.setResistanceForm)
+  const { vStep, nExp, fitDurationMs, runMode, avgFrom, avgTo, sweepOne } = resistanceForm
+  type RunMode = typeof resistanceForm['runMode']
+  const setVStep = (v: number) => setForm({ vStep: v })
+  const setAvgFrom = (v: number) => setForm({ avgFrom: v })
+  const setAvgTo = (v: number) => setForm({ avgTo: v })
+  const setNExp = (v: number) => setForm({ nExp: (v === 1 ? 1 : 2) })
+  const setFitDurationMs = (v: number) => setForm({ fitDurationMs: v })
+  const setRunMode = (v: RunMode) => setForm({ runMode: v })
+  const setSweepOne = (v: number) => setForm({ sweepOne: v })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // Unified run-scope dropdown. "range" is uniquely "averaged over the
-  // range" for Resistance — the underlying action is runAveraged(from,
-  // to), distinct from running each sweep individually. "selected"
-  // only appears when the user has multi-selected sweeps in the tree
-  // navigator, same convention as every other analysis window.
-  type RunMode = 'all' | 'selected' | 'range' | 'one'
-  const [runMode, setRunMode] = useState<RunMode>('all')
-  const [sweepOne, setSweepOne] = useState(1)
 
   const [measurements, setMeasurements] = useState<MeasurementRow[]>([])
 

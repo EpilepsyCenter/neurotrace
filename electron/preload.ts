@@ -39,6 +39,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPreferences: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('get-preferences'),
   setPreferences: (prefs: Record<string, unknown>): Promise<boolean> => ipcRenderer.invoke('set-preferences', prefs),
 
+  // Per-recording sidecar files. Each recording at ``<path>`` has an
+  // optional ``<path>.neurotrace`` JSON next to it carrying all
+  // analysis params + results for that recording. Writes are atomic
+  // (tmp + rename). Reads return null when absent or corrupt.
+  readSidecar: (recordingPath: string): Promise<Record<string, unknown> | null> =>
+    ipcRenderer.invoke('read-sidecar', recordingPath),
+  writeSidecar: (recordingPath: string, payload: Record<string, unknown>): Promise<boolean> =>
+    ipcRenderer.invoke('write-sidecar', recordingPath, payload),
+
   // Analysis windows
   openAnalysisWindow: (type: string): Promise<boolean> => ipcRenderer.invoke('open-analysis-window', type),
   closeAnalysisWindow: (type: string): Promise<boolean> => ipcRenderer.invoke('close-analysis-window', type),

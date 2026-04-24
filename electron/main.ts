@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { join } from 'path'
 import { createServer } from 'net'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 
 // Pin the app name BEFORE the app ready event so the macOS application
 // menu + dock both read "NeuroTrace" instead of "Electron". In packaged
@@ -210,6 +210,64 @@ ipcMain.handle('set-preferences', (_event, prefs: Record<string, unknown>) => {
     return true
   } catch (err) {
     console.error('Failed to save preferences:', err)
+    return false
+  }
+})
+
+// -----------------------------------------------------------------
+// Per-recording sidecar (.neurotrace JSON next to the recording file)
+// -----------------------------------------------------------------
+//
+// Convention: for a recording at ``/path/to/file.dat``, the sidecar
+// lives at ``/path/to/file.dat.neurotrace``. Appending the extension
+// (rather than replacing) keeps things unambiguous when labs have
+// same-stemmed files in different formats.
+//
+// Writes go through a ``*.tmp`` + rename-over so a crash mid-write
+// can't corrupt an existing sidecar. Reads silently return null on
+// any parse / IO error; the caller treats that as "no sidecar".
+
+function sidecarPathFor(recordingPath: string): string {
+  return `${recordingPath}.neurotrace`
+}
+
+ipcMain.handle('read-sidecar', (_event, recordingPath: string) => {
+  try {
+    if (!recordingPath) return null
+    const path = sidecarPathFor(recordingPath)
+    if (!existsSync(path)) return null
+    const raw = readFileSync(path, 'utf-8')
+    const parsed = JSON.parse(raw)
+    // Basic shape guard — reject anything that doesn't look like ours.
+    if (parsed && typeof parsed === 'object'
+        && parsed.format === 'neurotrace-sidecar') {
+      return parsed
+    }
+    return null
+  } catch (err) {
+    console.error('Failed to read sidecar:', err)
+    return null
+  }
+})
+
+ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<string, unknown>) => {
+  try {
+    if (!recordingPath) return false
+    const path = sidecarPathFor(recordingPath)
+    const tmp = `${path}.tmp`
+    // Always stamp format + saved_at so the file is self-describing.
+    const withMeta = {
+      format: 'neurotrace-sidecar',
+      version: 1,
+      saved_at: new Date().toISOString(),
+      ...payload,
+    }
+    writeFileSync(tmp, JSON.stringify(withMeta, null, 2), 'utf-8')
+    renameSync(tmp, path)
+    return true
+  } catch (err) {
+    console.error('Failed to write sidecar:', err)
+    try { unlinkSync(sidecarPathFor(recordingPath) + '.tmp') } catch { /* ignore */ }
     return false
   }
 })

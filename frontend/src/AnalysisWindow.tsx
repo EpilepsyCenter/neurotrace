@@ -7,6 +7,9 @@ import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
 import { FPspWindow } from './components/AnalysisWindows/FPspWindow'
 import { CursorAnalysisWindow } from './components/AnalysisWindows/CursorAnalysisWindow'
 import { APWindow } from './components/AnalysisWindows/APWindow'
+import { EventDetectionWindow } from './components/AnalysisWindows/EventDetectionWindow'
+import { EventsTemplateGeneratorWindow } from './components/AnalysisWindows/EventsTemplateGeneratorWindow'
+import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/EventsTemplateRefinementWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -135,6 +138,12 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.apAnalyses) {
             useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
           }
+          if (ev.data.eventsAnalyses) {
+            useAppStore.setState({ eventsAnalyses: ev.data.eventsAnalyses })
+          }
+          if (ev.data.eventsTemplates) {
+            useAppStore.setState({ eventsTemplates: ev.data.eventsTemplates })
+          }
           if (ev.data.excludedSweeps) {
             useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
           }
@@ -153,6 +162,16 @@ export function AnalysisWindow({ view }: { view: string }) {
         }
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
+        }
+        // Event-detection cross-window sync: sub-windows (template
+        // generator, refine) save/select/delete templates into their
+        // own store instance; the parent main events window listens
+        // for these to keep its Template library dropdown in lockstep.
+        if (ev.data?.type === 'events-templates-update' && ev.data.eventsTemplates) {
+          useAppStore.setState({ eventsTemplates: ev.data.eventsTemplates })
+        }
+        if (ev.data?.type === 'events-update' && ev.data.eventsAnalyses) {
+          useAppStore.setState({ eventsAnalyses: ev.data.eventsAnalyses })
         }
         if (ev.data?.type === 'excluded-update' && ev.data.excludedSweeps) {
           useAppStore.setState({ excludedSweeps: ev.data.excludedSweeps })
@@ -180,6 +199,8 @@ export function AnalysisWindow({ view }: { view: string }) {
     iv: 'I-V Curve',
     action_potential: 'Action Potentials',
     events: 'Event Detection',
+    events_template_generator: 'Events — Template Generator',
+    events_template_refinement: 'Events — Refine Template',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
     field_potential: 'Field PSP',
@@ -281,6 +302,29 @@ export function AnalysisWindow({ view }: { view: string }) {
             mainGroup={mainGroup}
             mainSeries={mainSeries}
             mainTrace={mainTrace}
+          />
+        ) : view === 'events' ? (
+          <EventDetectionWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
+            cursors={cursors}
+          />
+        ) : view === 'events_template_generator' ? (
+          <EventsTemplateGeneratorWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
+            cursors={cursors}
+          />
+        ) : view === 'events_template_refinement' ? (
+          <EventsTemplateRefinementWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
           />
         ) : (
           <div style={{

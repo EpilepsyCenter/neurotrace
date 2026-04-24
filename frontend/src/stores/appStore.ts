@@ -349,6 +349,81 @@ function _broadcastAP(apAnalyses: Record<string, APData>) {
   } catch { /* ignore */ }
 }
 
+function _broadcastEvents(eventsAnalyses: Record<string, EventsData>) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'events-update', eventsAnalyses })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
+async function _saveEventsTemplates(
+  entries: Record<string, EventsTemplate>,
+  selectedId: string | null,
+): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    await api.setPreferences({
+      ...prefs,
+      eventsTemplates: { selectedId, entries },
+    })
+  } catch { /* ignore */ }
+}
+
+function _broadcastEventsTemplates(
+  selectedId: string | null,
+  entries: Record<string, EventsTemplate>,
+) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({
+      type: 'events-templates-update',
+      eventsTemplates: { selectedId, entries },
+    })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
+/** Default params for a fresh event-detection run. Matches the
+ *  `EventsParams` defaults wired into the backend `/detect` endpoint. */
+export function defaultEventsParams(): EventsParams {
+  return {
+    method: 'template_correlation',
+    peakDirection: 'negative',
+    showDetectionMeasure: false,
+    filterEnabled: false,
+    filterType: 'bandpass',
+    filterLow: 1,
+    filterHigh: 500,
+    filterOrder: 4,
+    templateId: null,
+    correlationCutoff: 0.4,
+    deconvCutoffSd: 3.5,
+    deconvLowHz: 1.0,             // EE default (high-pass corner of the Gaussian bandpass)
+    deconvHighHz: 200.0,
+    thresholdMode: 'rms',
+    rmsRegion: null,
+    rmsValue: null,
+    rmsBaselineMean: null,
+    rmsMultiplier: 3.0,
+    linearThreshold: -15,
+    baselineSearchMs: 10,
+    avgBaselineMs: 1,
+    avgPeakMs: 1,
+    riseLowPct: 10,
+    riseHighPct: 90,
+    decayPct: 37,
+    decaySearchMs: 30,
+    amplitudeMinAbs: 5,
+    amplitudeMaxAbs: 2000,
+    minIEIMs: 5,
+    minIeiMs: 5,   // duplicate — backend expects min_iei_ms
+    aucMinAbs: null,
+  }
+}
+
 /** Excluded-sweeps persistence — same per-recording pattern as the
  *  other analysis slices. Stored as nested dict keyed by file path,
  *  with each file's value being `Record<"g:s", number[]>`. */
@@ -904,6 +979,138 @@ export interface APData {
   imSource?: ImSource
 }
 
+// ---------------------------------------------------------------------------
+// Event detection & analysis
+// ---------------------------------------------------------------------------
+
+/** Biexponential template coefficients: the user fits one of these to
+ *  a clean exemplar event, then the backend renders it to a sample
+ *  array and slides it across the data for correlation / deconvolution
+ *  detection. Width_ms is the template window length in ms, separate
+ *  from the biexp coefficients. */
+export interface EventsTemplate {
+  id: string
+  name: string
+  b0: number
+  b1: number                     // sign determines polarity (negative → downward)
+  tauRiseMs: number
+  tauDecayMs: number
+  widthMs: number
+  direction: 'positive' | 'negative'
+}
+
+export type EventsDetectionMethod =
+  | 'template_correlation'
+  | 'template_deconvolution'
+  | 'threshold'
+
+export type EventsThresholdMode = 'rms' | 'linear'
+
+/** Detection-measure payload — the correlation or deconvolution
+ *  trace (decimated) + the horizontal cutoff line that renders as a
+ *  stacked subplot under the main viewer. `values` is a min-max-paired
+ *  array; render with step x = dt_s × i. */
+export interface EventsDetectionMeasure {
+  values: number[]
+  dtS: number
+  tStartS: number
+  method: 'correlation' | 'deconvolution'
+  cutoffLine: number           // y-value of the horizontal cutoff on the trace
+  mu?: number                  // (deconvolution only) histogram Gaussian mean
+  sigma?: number               // (deconvolution only) histogram Gaussian σ
+}
+
+export interface EventsParams {
+  method: EventsDetectionMethod
+  peakDirection: 'negative' | 'positive'
+  // If true, the backend returns + we render the detection-measure
+  // trace (correlation r or deconvolution σ-scaled signal) as a
+  // stacked subplot beneath the main viewer, with a horizontal line
+  // at the cutoff value. Same UX as EE's "Show Deconvolution" /
+  // "Show Correlation" toggles.
+  showDetectionMeasure: boolean
+  // Pre-detection filter (same shape as AP / FieldBurst params). Applied
+  // to the sweep before anything else — so threshold, detection, and
+  // kinetics all see the filtered trace. Off by default; users typically
+  // enable a 1–500 Hz bandpass for noisy VC recordings.
+  filterEnabled: boolean
+  filterType: 'lowpass' | 'highpass' | 'bandpass'
+  filterLow: number
+  filterHigh: number
+  filterOrder: number
+  // Template-method
+  templateId: string | null                 // which template from the library
+  correlationCutoff: number                 // 0-1, default 0.4
+  deconvCutoffSd: number                    // default 3.5 σ
+  deconvLowHz: number
+  deconvHighHz: number
+  // Threshold-method
+  thresholdMode: EventsThresholdMode
+  rmsRegion: { startS: number; endS: number } | null
+  rmsValue: number | null                   // populated after /api/events/rms
+  rmsBaselineMean: number | null
+  rmsMultiplier: number                     // n × RMS (default 3)
+  linearThreshold: number                   // fixed pA/mV value in linear mode
+  // Kinetics
+  baselineSearchMs: number
+  avgBaselineMs: number
+  avgPeakMs: number
+  riseLowPct: number
+  riseHighPct: number
+  decayPct: number
+  decaySearchMs: number
+  // Exclusion
+  amplitudeMinAbs: number                   // abs(amplitude) cutoff
+  amplitudeMaxAbs: number                   // above → rejected as artefact
+  minIEIMs: number
+  aucMinAbs: number | null                  // null = off
+  // Common
+  minIeiMs: number
+}
+
+/** One detected event, hydrated from the backend response. Times are
+ *  in seconds within the containing sweep. Values are in the trace's
+ *  native units (pA in VC, mV in CC). */
+export interface EventRow {
+  sweep: number
+  peakIdx: number
+  peakTimeS: number
+  peakVal: number
+  footIdx: number
+  footTimeS: number
+  baselineVal: number
+  amplitude: number
+  riseTimeMs: number | null
+  decayTimeMs: number | null
+  halfWidthMs: number | null
+  auc: number | null
+  decayEndpointIdx: number | null
+  manual: boolean
+}
+
+export interface EventsData {
+  group: number
+  series: number
+  channel: number
+  sweep: number
+  params: EventsParams
+  events: EventRow[]
+  selectedIdx: number | null
+  /** Manual edits persisted across re-runs. Added entries are inserted
+   *  at the requested time (backend snaps to the local extremum);
+   *  removed times drop any auto-detected peak within tolerance. */
+  manualEdits: {
+    addedTimes: number[]
+    removedTimes: number[]
+  }
+  samplingRate: number
+  sweepLengthS: number
+  units: string
+  /** Populated when `params.showDetectionMeasure` was true on the
+   *  last run. Drives the stacked detection-measure subplot. */
+  detectionMeasure?: EventsDetectionMeasure
+}
+
 export interface CursorAnalysisData {
   group: number
   series: number
@@ -1042,6 +1249,22 @@ interface AppState {
   // detection results survive series switches. The three AP-window
   // tabs (Counting / Kinetics / Phase) all read from the same blob.
   apAnalyses: Record<string, APData>
+
+  // Event-detection analyses — keyed by `${group}:${series}` like AP.
+  // Contains the last run's params + detected events + manual edits.
+  eventsAnalyses: Record<string, EventsData>
+
+  /** Global biexponential template library for event detection.
+   *  Persisted per-user (not per-file) so templates fit on one
+   *  recording can be reused on another. `selectedId` is which
+   *  template the window currently treats as "active" — this is
+   *  the one the detector uses and the one the Refine dialog
+   *  overwrites when the user accepts a refined fit. */
+  eventsTemplates: {
+    selectedId: string | null
+    entries: Record<string, EventsTemplate>
+  }
+
   /** Global (per-user, not per-file) UI prefs for the cursor window:
    *  splitter position, visible columns per tab, active tab. */
   cursorWindowUI: CursorWindowUI
@@ -1288,6 +1511,84 @@ interface AppState {
   /** Highlight one spike row in the per-spike table + on the mini-viewer. */
   selectAPSpike: (group: number, series: number, idx: number | null) => void
 
+  // Event-detection actions — see backend/api/events.py for the
+  // endpoint behavior. Templates live in the global library;
+  // analyses (detected events + params) live per-(group:series).
+  runEvents: (
+    group: number, series: number, channel: number, sweep: number,
+    params: EventsParams,
+    template: EventsTemplate | null,
+  ) => Promise<void>
+  /** Fit a biexponential to (t_start_s, t_end_s) in the specified sweep.
+   *  Returns the fitted coefficients + the data + the fit curve so the
+   *  Template Generator dialog can plot them overlaid. */
+  fitEventsTemplate: (
+    group: number, series: number, channel: number, sweep: number,
+    tStartS: number, tEndS: number,
+    initialRiseMs?: number, initialDecayMs?: number,
+    direction?: 'auto' | 'negative' | 'positive',
+    filter?: { enabled: boolean; type: string; low: number; high: number; order: number } | null,
+  ) => Promise<{
+    b0: number; b1: number; tauRiseMs: number; tauDecayMs: number
+    rSquared: number; timeS: number[]; fitValues: number[]
+    regionValues: number[]; regionTStartS: number
+  }>
+  /** Compute RMS + mean of a user-picked quiet region — used to seed
+   *  the thresholding detector's `baseline ± n × rms` threshold. */
+  computeEventsRms: (
+    group: number, series: number, channel: number, sweep: number,
+    tStartS: number, tEndS: number,
+    filter?: { enabled: boolean; type: string; low: number; high: number; order: number } | null,
+  ) => Promise<{ rms: number; baselineMean: number; nSamples: number }>
+  /** On-demand fetch of the correlation or deconvolution trace for a
+   *  viewport window — full sampling-rate resolution within the
+   *  requested slice. Used by the viewer's overlay series. */
+  fetchEventsDetectionMeasure: (
+    group: number, series: number, channel: number, sweep: number,
+    method: 'template_correlation' | 'template_deconvolution',
+    template: EventsTemplate,
+    cutoff: number,
+    direction: 'negative' | 'positive',
+    deconvLowHz: number, deconvHighHz: number,
+    tStartS: number, tEndS: number,
+    filter?: { enabled: boolean; type: string; low: number; high: number; order: number } | null,
+  ) => Promise<EventsDetectionMeasure>
+  /** Given the current detection events, average them and fit a fresh
+   *  biexp to the average. Returns the averaged event + the fit so the
+   *  Refine Template dialog can display them. */
+  refineEventsTemplate: (
+    group: number, series: number, channel: number, sweep: number,
+    events: EventRow[],
+    align: 'peak' | 'foot' | 'rise_halfwidth',
+    windowBeforeMs: number, windowAfterMs: number,
+    direction: 'negative' | 'positive',
+  ) => Promise<{
+    nAveraged: number
+    averageTimeS: number[]
+    averageValues: number[]
+    footSampleIdx: number
+    fit: {
+      b0: number; b1: number; tauRiseMs: number; tauDecayMs: number
+      rSquared: number; fitTimeS: number[]; fitValues: number[]
+    }
+  }>
+  /** Drop events results for one series (or all when group/series null). */
+  clearEvents: (group?: number, series?: number) => void
+  /** Highlight one event row in the results table + on the viewer. */
+  selectEvent: (group: number, series: number, idx: number | null) => void
+  /** Add a manual event at the given time — inserted into manualEdits
+   *  so it persists across re-runs. Re-runs detection afterwards so
+   *  the backend can snap the added time to the local extremum. */
+  addManualEvent: (group: number, series: number, timeS: number) => Promise<void>
+  /** Remove an event (by table index). Appends its peak time to the
+   *  manual-removed list so re-runs honor the deletion. */
+  removeEvent: (group: number, series: number, idx: number) => Promise<void>
+
+  // Template library actions
+  saveEventsTemplate: (template: EventsTemplate) => void
+  deleteEventsTemplate: (id: string) => void
+  selectEventsTemplate: (id: string | null) => void
+
   // I-V curve actions
   runIVCurve: (
     group: number, series: number, channel: number,
@@ -1420,6 +1721,41 @@ export const useAppStore = create<AppState>((set, get) => ({
   fpspCurves: {},
   cursorAnalyses: {},
   apAnalyses: {},
+  eventsAnalyses: {},
+  eventsTemplates: (() => {
+    // Default templates — one EPSC, one IPSC — seeded from Jonas 1993
+    // defaults (τ_rise 0.5 ms, τ_decay 5 ms). `selectedId` points at
+    // the EPSC by default. User-saved templates are merged in from
+    // Electron prefs on mount below.
+    const epsc: EventsTemplate = {
+      id: 'default-epsc',
+      name: 'Default EPSC',
+      b0: 0, b1: -30,
+      tauRiseMs: 0.5, tauDecayMs: 5.0,
+      widthMs: 30, direction: 'negative',
+    }
+    const ipsc: EventsTemplate = {
+      id: 'default-ipsc',
+      name: 'Default IPSC (slow)',
+      b0: 0, b1: 30,
+      tauRiseMs: 1.0, tauDecayMs: 15.0,
+      widthMs: 80, direction: 'positive',
+    }
+    const defaults = {
+      selectedId: 'default-epsc',
+      entries: { [epsc.id]: epsc, [ipsc.id]: ipsc } as Record<string, EventsTemplate>,
+    }
+    try {
+      const saved = (window as any).electronAPI?.syncPreferences?.eventsTemplates
+      if (saved && typeof saved === 'object') {
+        return {
+          selectedId: typeof saved.selectedId === 'string' ? saved.selectedId : defaults.selectedId,
+          entries: { ...defaults.entries, ...(saved.entries ?? {}) },
+        }
+      }
+    } catch { /* ignore */ }
+    return defaults
+  })(),
   excludedSweeps: {},
   selectedSweeps: {},
   averagedSweeps: {},
@@ -3272,6 +3608,384 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { apAnalyses: { ...s.apAnalyses, [key]: { ...entry, selectedSpikeIdx: idx } } }
     })
     _broadcastAP(get().apAnalyses)
+  },
+
+  // ---- Events ----
+
+  runEvents: async (group, series, channel, sweep, params, template) => {
+    const { backendUrl } = get()
+    if (!backendUrl) return
+    set({ loading: true, error: null })
+    try {
+      // Gather manual edits from the current stored blob (if any) so
+      // re-runs preserve user-added/removed events.
+      const key = `${group}:${series}`
+      const existing = get().eventsAnalyses[key]
+      const addedTimes = existing?.manualEdits?.addedTimes ?? []
+      const removedTimes = existing?.manualEdits?.removedTimes ?? []
+
+      const body: Record<string, any> = {
+        group, series, sweep, trace: channel,
+        method: params.method,
+        direction: params.peakDirection,
+        filter_enabled: params.filterEnabled,
+        filter_type: params.filterType,
+        filter_low: params.filterLow,
+        filter_high: params.filterHigh,
+        filter_order: params.filterOrder,
+        min_iei_ms: params.minIeiMs,
+        baseline_search_ms: params.baselineSearchMs,
+        avg_baseline_ms: params.avgBaselineMs,
+        avg_peak_ms: params.avgPeakMs,
+        rise_low_pct: params.riseLowPct,
+        rise_high_pct: params.riseHighPct,
+        decay_pct: params.decayPct,
+        decay_search_ms: params.decaySearchMs,
+        amplitude_min_abs: params.amplitudeMinAbs,
+        amplitude_max_abs: params.amplitudeMaxAbs,
+        auc_min_abs: params.aucMinAbs,
+        manual_added_times: addedTimes,
+        manual_removed_times: removedTimes,
+        return_detection_measure: params.showDetectionMeasure
+          && params.method.startsWith('template_'),
+      }
+
+      if (params.method === 'template_correlation' || params.method === 'template_deconvolution') {
+        if (!template) throw new Error('Template methods require a selected template')
+        body.template = {
+          b0: template.b0,
+          b1: template.b1,
+          tau_rise_ms: template.tauRiseMs,
+          tau_decay_ms: template.tauDecayMs,
+          width_ms: template.widthMs,
+        }
+        body.cutoff = params.method === 'template_correlation'
+          ? params.correlationCutoff
+          : params.deconvCutoffSd
+        body.deconv_low_hz = params.deconvLowHz
+        body.deconv_high_hz = params.deconvHighHz
+      } else if (params.method === 'threshold') {
+        // Resolve linear vs RMS threshold into a single value.
+        let t: number | null = null
+        if (params.thresholdMode === 'linear') {
+          t = params.linearThreshold
+        } else if (params.thresholdMode === 'rms' && params.rmsValue != null) {
+          const base = params.rmsBaselineMean ?? 0
+          const sign = params.peakDirection === 'negative' ? -1 : 1
+          t = base + sign * params.rmsMultiplier * params.rmsValue
+        }
+        if (t == null || !isFinite(t)) {
+          throw new Error(
+            params.thresholdMode === 'rms'
+              ? 'Select a quiet region first to compute RMS'
+              : 'Set a threshold value',
+          )
+        }
+        body.threshold_value = t
+      }
+
+      const resp = await fetch(`${backendUrl}/api/events/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+      const data = await resp.json()
+
+      const events: EventRow[] = (data.events ?? []).map((e: any) => ({
+        sweep: Number(e.sweep ?? sweep),
+        peakIdx: Number(e.peak_idx ?? 0),
+        peakTimeS: Number(e.peak_time_s ?? 0),
+        peakVal: Number(e.peak_val ?? 0),
+        footIdx: Number(e.foot_idx ?? 0),
+        footTimeS: Number(e.foot_time_s ?? 0),
+        baselineVal: Number(e.baseline_val ?? 0),
+        amplitude: Number(e.amplitude ?? 0),
+        riseTimeMs: e.rise_time_ms == null ? null : Number(e.rise_time_ms),
+        decayTimeMs: e.decay_time_ms == null ? null : Number(e.decay_time_ms),
+        halfWidthMs: e.half_width_ms == null ? null : Number(e.half_width_ms),
+        auc: e.auc == null ? null : Number(e.auc),
+        decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
+        manual: Boolean(e.manual),
+      }))
+
+      const dmRaw = data.detection_measure
+      const detectionMeasure: EventsDetectionMeasure | undefined = dmRaw ? {
+        values: (dmRaw.values ?? []).map((x: any) => Number(x)),
+        dtS: Number(dmRaw.dt_s ?? 1),
+        tStartS: Number(dmRaw.t_start_s ?? 0),
+        method: dmRaw.method as 'correlation' | 'deconvolution',
+        cutoffLine: Number(dmRaw.cutoff_line ?? 0),
+        mu: dmRaw.mu != null ? Number(dmRaw.mu) : undefined,
+        sigma: dmRaw.sigma != null ? Number(dmRaw.sigma) : undefined,
+      } : undefined
+
+      const next: EventsData = {
+        group, series, channel, sweep,
+        params,
+        events,
+        selectedIdx: null,
+        manualEdits: { addedTimes, removedTimes },
+        samplingRate: Number(data.sampling_rate ?? 0),
+        sweepLengthS: Number(data.sweep_length_s ?? 0),
+        units: String(data.units ?? ''),
+        detectionMeasure,
+      }
+      set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: next }, loading: false }))
+      _broadcastEvents(get().eventsAnalyses)
+    } catch (err: any) {
+      set({ error: err.message ?? String(err), loading: false })
+    }
+  },
+
+  fitEventsTemplate: async (group, series, channel, sweep, tStartS, tEndS,
+                             initialRiseMs = 0.5, initialDecayMs = 5.0,
+                             direction = 'auto', filter = null) => {
+    const { backendUrl } = get()
+    if (!backendUrl) throw new Error('Backend not connected')
+    const resp = await fetch(`${backendUrl}/api/events/template/fit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group, series, sweep, trace: channel,
+        t_start_s: tStartS, t_end_s: tEndS,
+        initial_rise_ms: initialRiseMs,
+        initial_decay_ms: initialDecayMs,
+        direction,
+        filter_enabled: filter?.enabled ?? false,
+        filter_type: filter?.type ?? 'bandpass',
+        filter_low: filter?.low ?? 1,
+        filter_high: filter?.high ?? 500,
+        filter_order: filter?.order ?? 4,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+    const d = await resp.json()
+    return {
+      b0: Number(d.b0),
+      b1: Number(d.b1),
+      tauRiseMs: Number(d.tau_rise_ms),
+      tauDecayMs: Number(d.tau_decay_ms),
+      rSquared: Number(d.r_squared),
+      timeS: (d.time_s ?? []).map((x: any) => Number(x)),
+      fitValues: (d.fit_values ?? []).map((x: any) => Number(x)),
+      regionValues: (d.region_values ?? []).map((x: any) => Number(x)),
+      regionTStartS: Number(d.region_t_start_s),
+    }
+  },
+
+  fetchEventsDetectionMeasure: async (group, series, channel, sweep, method, template,
+                                       cutoff, direction, deconvLowHz, deconvHighHz,
+                                       tStartS, tEndS, filter = null) => {
+    const { backendUrl } = get()
+    if (!backendUrl) throw new Error('Backend not connected')
+    const resp = await fetch(`${backendUrl}/api/events/detection_measure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group, series, sweep, trace: channel,
+        method,
+        template: {
+          b0: template.b0, b1: template.b1,
+          tau_rise_ms: template.tauRiseMs,
+          tau_decay_ms: template.tauDecayMs,
+          width_ms: template.widthMs,
+        },
+        cutoff,
+        direction,
+        deconv_low_hz: deconvLowHz,
+        deconv_high_hz: deconvHighHz,
+        t_start_s: tStartS, t_end_s: tEndS,
+        filter_enabled: filter?.enabled ?? false,
+        filter_type: filter?.type ?? 'bandpass',
+        filter_low: filter?.low ?? 1,
+        filter_high: filter?.high ?? 500,
+        filter_order: filter?.order ?? 4,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+    const d = await resp.json()
+    return {
+      values: (d.values ?? []).map((x: any) => Number(x)),
+      dtS: Number(d.dt_s ?? 1),
+      tStartS: Number(d.t_start_s ?? 0),
+      method: d.method as 'correlation' | 'deconvolution',
+      cutoffLine: Number(d.cutoff_line ?? 0),
+      mu: d.mu != null ? Number(d.mu) : undefined,
+      sigma: d.sigma != null ? Number(d.sigma) : undefined,
+    }
+  },
+
+  computeEventsRms: async (group, series, channel, sweep, tStartS, tEndS, filter = null) => {
+    const { backendUrl } = get()
+    if (!backendUrl) throw new Error('Backend not connected')
+    const resp = await fetch(`${backendUrl}/api/events/rms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group, series, sweep, trace: channel,
+        t_start_s: tStartS, t_end_s: tEndS,
+        filter_enabled: filter?.enabled ?? false,
+        filter_type: filter?.type ?? 'bandpass',
+        filter_low: filter?.low ?? 1,
+        filter_high: filter?.high ?? 500,
+        filter_order: filter?.order ?? 4,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+    const d = await resp.json()
+    return {
+      rms: Number(d.rms),
+      baselineMean: Number(d.baseline_mean),
+      nSamples: Number(d.n_samples),
+    }
+  },
+
+  refineEventsTemplate: async (group, series, channel, sweep, events,
+                                align, windowBeforeMs, windowAfterMs, direction) => {
+    const { backendUrl } = get()
+    if (!backendUrl) throw new Error('Backend not connected')
+    const resp = await fetch(`${backendUrl}/api/events/refine_template`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group, series, sweep, trace: channel,
+        events: events.map((e) => ({
+          sweep: e.sweep, peak_idx: e.peakIdx, peak_time_s: e.peakTimeS,
+          peak_val: e.peakVal, foot_idx: e.footIdx, foot_time_s: e.footTimeS,
+          baseline_val: e.baselineVal, amplitude: e.amplitude,
+          manual: e.manual,
+        })),
+        align,
+        window_before_ms: windowBeforeMs,
+        window_after_ms: windowAfterMs,
+        direction,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+    const d = await resp.json()
+    return {
+      nAveraged: Number(d.n_events_averaged),
+      averageTimeS: (d.average_time_s ?? []).map((x: any) => Number(x)),
+      averageValues: (d.average_values ?? []).map((x: any) => Number(x)),
+      footSampleIdx: Number(d.foot_sample_idx ?? 0),
+      fit: {
+        b0: Number(d.fit.b0),
+        b1: Number(d.fit.b1),
+        tauRiseMs: Number(d.fit.tau_rise_ms),
+        tauDecayMs: Number(d.fit.tau_decay_ms),
+        rSquared: Number(d.fit.r_squared),
+        fitTimeS: (d.fit.fit_time_s ?? []).map((x: any) => Number(x)),
+        fitValues: (d.fit.fit_values ?? []).map((x: any) => Number(x)),
+      },
+    }
+  },
+
+  clearEvents: (group, series) => {
+    set((s) => {
+      if (group == null || series == null) return { eventsAnalyses: {} }
+      const key = `${group}:${series}`
+      const { [key]: _dropped, ...rest } = s.eventsAnalyses
+      return { eventsAnalyses: rest }
+    })
+    _broadcastEvents(get().eventsAnalyses)
+  },
+
+  selectEvent: (group, series, idx) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.eventsAnalyses[key]
+      if (!entry) return s
+      return { eventsAnalyses: { ...s.eventsAnalyses, [key]: { ...entry, selectedIdx: idx } } }
+    })
+    _broadcastEvents(get().eventsAnalyses)
+  },
+
+  addManualEvent: async (group, series, timeS) => {
+    const key = `${group}:${series}`
+    const entry = get().eventsAnalyses[key]
+    if (!entry) return
+    const nextAdded = [...entry.manualEdits.addedTimes, timeS]
+    // Also clean up any "removed" entry at the same time — user may
+    // have removed then changed their mind.
+    const nextRemoved = entry.manualEdits.removedTimes.filter(
+      (t) => Math.abs(t - timeS) > 0.001,
+    )
+    const updated: EventsData = {
+      ...entry,
+      manualEdits: { addedTimes: nextAdded, removedTimes: nextRemoved },
+    }
+    set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
+    // Re-run detection so the backend snaps the added time to the
+    // local extremum and computes kinetics for it.
+    const { runEvents, eventsTemplates } = get()
+    const template = entry.params.templateId
+      ? eventsTemplates.entries[entry.params.templateId] ?? null
+      : (eventsTemplates.selectedId
+          ? eventsTemplates.entries[eventsTemplates.selectedId] ?? null
+          : null)
+    await runEvents(group, series, entry.channel, entry.sweep, entry.params, template)
+  },
+
+  removeEvent: async (group, series, idx) => {
+    const key = `${group}:${series}`
+    const entry = get().eventsAnalyses[key]
+    if (!entry || idx < 0 || idx >= entry.events.length) return
+    const target = entry.events[idx]
+    // Manual-added events get dropped from the added-list, not logged
+    // in removed — so the next run simply doesn't re-add them.
+    let nextAdded = entry.manualEdits.addedTimes
+    let nextRemoved = entry.manualEdits.removedTimes
+    if (target.manual) {
+      nextAdded = nextAdded.filter((t) => Math.abs(t - target.peakTimeS) > 0.001)
+    } else {
+      nextRemoved = [...nextRemoved, target.peakTimeS]
+    }
+    const updated: EventsData = {
+      ...entry,
+      manualEdits: { addedTimes: nextAdded, removedTimes: nextRemoved },
+    }
+    set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
+    const { runEvents, eventsTemplates } = get()
+    const template = entry.params.templateId
+      ? eventsTemplates.entries[entry.params.templateId] ?? null
+      : (eventsTemplates.selectedId
+          ? eventsTemplates.entries[eventsTemplates.selectedId] ?? null
+          : null)
+    await runEvents(group, series, entry.channel, entry.sweep, entry.params, template)
+  },
+
+  saveEventsTemplate: (template) => {
+    set((s) => {
+      const entries = { ...s.eventsTemplates.entries, [template.id]: template }
+      const selectedId = s.eventsTemplates.selectedId ?? template.id
+      return { eventsTemplates: { selectedId, entries } }
+    })
+    const { eventsTemplates } = get()
+    _saveEventsTemplates(eventsTemplates.entries, eventsTemplates.selectedId)
+    _broadcastEventsTemplates(eventsTemplates.selectedId, eventsTemplates.entries)
+  },
+
+  deleteEventsTemplate: (id) => {
+    set((s) => {
+      const { [id]: _dropped, ...entries } = s.eventsTemplates.entries
+      const selectedId = s.eventsTemplates.selectedId === id
+        ? Object.keys(entries)[0] ?? null
+        : s.eventsTemplates.selectedId
+      return { eventsTemplates: { selectedId, entries } }
+    })
+    const { eventsTemplates } = get()
+    _saveEventsTemplates(eventsTemplates.entries, eventsTemplates.selectedId)
+    _broadcastEventsTemplates(eventsTemplates.selectedId, eventsTemplates.entries)
+  },
+
+  selectEventsTemplate: (id) => {
+    set((s) => ({
+      eventsTemplates: { ...s.eventsTemplates, selectedId: id },
+    }))
+    const { eventsTemplates } = get()
+    _saveEventsTemplates(eventsTemplates.entries, eventsTemplates.selectedId)
+    _broadcastEventsTemplates(eventsTemplates.selectedId, eventsTemplates.entries)
   },
 }))
 

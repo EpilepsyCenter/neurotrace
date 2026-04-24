@@ -210,6 +210,11 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   iv: 'I-V Curve',
   action_potential: 'Action Potentials',
   events: 'Event Detection',
+  // Sub-windows of Event Detection — open via a button in the main
+  // events window. Open at the same time as the parent (keyed by
+  // unique view names so they don't collide).
+  events_template_generator: 'Events — Template Generator',
+  events_template_refinement: 'Events — Refine Template',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',

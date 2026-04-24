@@ -228,6 +228,8 @@ export function CursorPanel() {
             fpspCurves: state.fpspCurves,
             cursorAnalyses: state.cursorAnalyses,
             apAnalyses: state.apAnalyses,
+            eventsAnalyses: state.eventsAnalyses,
+            eventsTemplates: state.eventsTemplates,
             excludedSweeps: state.excludedSweeps,
             averagedSweeps: state.averagedSweeps,
           })
@@ -267,6 +269,16 @@ export function CursorPanel() {
         // disk persistence).
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
+        }
+        // Event-detection data + template-library updates — adopted
+        // by the main window so a) state-update responses to newly-
+        // opened sub-windows carry the current state, b) future disk
+        // persistence lives in one place.
+        if (ev.data?.type === 'events-update' && ev.data.eventsAnalyses) {
+          useAppStore.setState({ eventsAnalyses: ev.data.eventsAnalyses })
+        }
+        if (ev.data?.type === 'events-templates-update' && ev.data.eventsTemplates) {
+          useAppStore.setState({ eventsTemplates: ev.data.eventsTemplates })
         }
         // Excluded-sweep changes from any window — adopt so the main
         // store persists to electron prefs and other windows see the

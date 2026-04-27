@@ -495,14 +495,21 @@ export function TraceViewer() {
         const xMin3 = xScale3?.min ?? -Infinity
         const xMax3 = xScale3?.max ?? Infinity
         const sr = ev.samplingRate || 1
-        const drawEvDot = (px: number, py: number, color: string, r: number = 3.5) => {
+        // Marker sizes — bumped from the original (3.5 / 2.5 / 5
+        // selected) so events on the main viewer are spottable at a
+        // glance without leaning into the screen.
+        const PEAK_R = 5.5
+        const PEAK_R_SELECTED = 8
+        const FOOT_R = 4
+        const ENDPOINT_R = 4
+        const drawEvDot = (px: number, py: number, color: string, r: number = PEAK_R) => {
           if (!isFinite(px) || !isFinite(py)) return
           ctx.beginPath()
           ctx.arc(px, py, r, 0, 2 * Math.PI)
           ctx.fillStyle = color
           ctx.fill()
           ctx.strokeStyle = '#ffffff'
-          ctx.lineWidth = 1
+          ctx.lineWidth = 1.5
           ctx.stroke()
         }
         for (let i = 0; i < ev.events.length; i++) {
@@ -512,11 +519,11 @@ export function TraceViewer() {
           const selected = i === ev.selectedIdx
           const px = u.valToPos(e.peakTimeS, 'x', true) / dpr
           const py = u.valToPos(e.peakVal - yOffset, 'y', true) / dpr
-          drawEvDot(px, py, e.manual ? '#ffb74d' : '#e57373', selected ? 5 : 3.5)
+          drawEvDot(px, py, e.manual ? '#ffb74d' : '#e57373', selected ? PEAK_R_SELECTED : PEAK_R)
           // Foot (gray) at (footTimeS, baselineVal)
           const fpx = u.valToPos(e.footTimeS, 'x', true) / dpr
           const fpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
-          drawEvDot(fpx, fpy, '#9e9e9e', 2.5)
+          drawEvDot(fpx, fpy, '#9e9e9e', FOOT_R)
           // Decay endpoint (purple) at (endpointT, baselineVal) — the
           // endpoint is where the trace returned to baseline, so the
           // y-value is the event baseline.
@@ -524,7 +531,7 @@ export function TraceViewer() {
             const endpointT = e.decayEndpointIdx / sr
             const dpx = u.valToPos(endpointT, 'x', true) / dpr
             const dpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
-            drawEvDot(dpx, dpy, '#ab47bc', 2.5)
+            drawEvDot(dpx, dpy, '#ab47bc', ENDPOINT_R)
           }
         }
       }

@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getBackendUrl: (): Promise<string> => ipcRenderer.invoke('get-backend-url'),
   openFileDialog: (): Promise<string | null> => ipcRenderer.invoke('open-file-dialog'),
+  openFolderDialog: (defaultPath?: string): Promise<string | null> =>
+    ipcRenderer.invoke('open-folder-dialog', defaultPath),
   saveFileDialog: (defaultName: string, filters?: { name: string; extensions: string[] }[]): Promise<string | null> =>
     ipcRenderer.invoke('save-file-dialog', defaultName, filters),
   getPreferences: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('get-preferences'),
@@ -47,6 +49,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('read-sidecar', recordingPath),
   writeSidecar: (recordingPath: string, payload: Record<string, unknown>): Promise<boolean> =>
     ipcRenderer.invoke('write-sidecar', recordingPath, payload),
+
+  // Folder listing for the Metadata window's left pane. ``anchorPath``
+  // can be either a folder or a file inside it (we use the active
+  // recording's path). Returns every recording-shaped file in the
+  // folder along with its sidecar status + parsed ``meta`` block.
+  listFolderRecordings: (anchorPath: string): Promise<{
+    folder: string | null
+    entries: Array<{
+      filePath: string
+      fileName: string
+      hasSidecar: boolean
+      meta?: Record<string, unknown> | null
+    }>
+  }> => ipcRenderer.invoke('list-folder-recordings', anchorPath),
 
   // Analysis windows
   openAnalysisWindow: (type: string): Promise<boolean> => ipcRenderer.invoke('open-analysis-window', type),

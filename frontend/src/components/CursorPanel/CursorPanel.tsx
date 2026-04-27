@@ -247,6 +247,15 @@ export function CursorPanel() {
             eventsTemplates: state.eventsTemplates,
             excludedSweeps: state.excludedSweeps,
             averagedSweeps: state.averagedSweeps,
+            resistanceResults: state.resistanceResults,
+            recordingMeta: state.recordingMeta,
+            recording: state.recording ? {
+              filePath: state.recording.filePath,
+              fileName: state.recording.fileName,
+              format: state.recording.format,
+              groupCount: state.recording.groupCount,
+              groups: state.recording.groups,
+            } : null,
           })
         }
         // Bursts pushed from an analysis window → adopt them here so the
@@ -285,6 +294,12 @@ export function CursorPanel() {
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
         }
+        // Per-series resistance results from the ResistanceWindow.
+        // Drives the TreeNavigator R badge + the cohort extractor's
+        // resistance slice on next sidecar save.
+        if (ev.data?.type === 'resistance-update' && ev.data.resistanceResults) {
+          useAppStore.setState({ resistanceResults: ev.data.resistanceResults })
+        }
         // Event-detection data + template-library updates — adopted
         // by the main window so a) state-update responses to newly-
         // opened sub-windows carry the current state, b) future disk
@@ -304,6 +319,15 @@ export function CursorPanel() {
         // User-created averaged sweeps (virtual tree entries).
         if (ev.data?.type === 'averaged-update' && ev.data.averagedSweeps) {
           useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
+        }
+        // Recording-level metadata pushed from the metadata window
+        // (file tags / per-series tags / cell_id / notes / toast
+        // suppression). Adopt into the main store so the auto-save
+        // subscriber persists it to the .neurotrace sidecar — the
+        // metadata window can't write to disk itself because it
+        // doesn't own the recording.filePath link.
+        if (ev.data?.type === 'meta-update' && ev.data.recordingMeta !== undefined) {
+          useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
         }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same

@@ -8,6 +8,7 @@ import { CursorPanel } from './components/CursorPanel/CursorPanel'
 import { Toolbar } from './components/Toolbar/Toolbar'
 import { StatusBar } from './components/StatusBar/StatusBar'
 import { ResizeHandle } from './components/ResizeHandle/ResizeHandle'
+import { TagToast } from './components/TagToast/TagToast'
 
 const MIN_SIDEBAR = 160
 const MIN_TRACE = 200
@@ -127,6 +128,7 @@ export default function App() {
         </div>
       </div>
       <StatusBar />
+      <TagToast />
     </div>
   )
 }

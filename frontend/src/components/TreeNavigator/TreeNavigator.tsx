@@ -29,6 +29,22 @@ const TYPE_LABELS: Record<string, string> = {
   unknown: '',
 }
 
+// Visual identity for the analysis-presence badges shown next to each
+// series in the tree navigator. Each present analysis type contributes
+// one small coloured pill carrying a short letter code; hovering the
+// cluster lists the analyses by full name. Letters are short enough
+// that 4-5 badges fit in the row without crowding the type-pill / tag
+// chip / sweep count that already live there.
+const ANALYSIS_BADGES: { id: string; code: string; label: string; color: string }[] = [
+  { id: 'events',     code: 'E',  label: 'Events',            color: '#42a5f5' },
+  { id: 'ap',         code: 'AP', label: 'Action potentials', color: '#ff7043' },
+  { id: 'bursts',     code: 'B',  label: 'Bursts',            color: '#ab47bc' },
+  { id: 'iv',         code: 'IV', label: 'I-V curve',         color: '#66bb6a' },
+  { id: 'cursors',    code: 'C',  label: 'Cursors',           color: '#ffca28' },
+  { id: 'fpsp',       code: 'FP', label: 'fPSP',              color: '#ec407a' },
+  { id: 'resistance', code: 'R',  label: 'Resistance (Rs/Rin/Cm)', color: '#26c6da' },
+]
+
 export function TreeNavigator() {
   const {
     recording, currentGroup, currentSeries, currentSweep,
@@ -38,6 +54,22 @@ export function TreeNavigator() {
     averagedSweeps, deleteAveragedSweep, selectAveragedSweep,
     renameAveragedSweep, currentAveragedSweep,
   } = useAppStore()
+  // Per-series tag map (Metadata module). Subscribed separately so
+  // tree rows re-render when the user edits tags in the metadata
+  // window — broadcasts arrive via the cross-window meta-update sync.
+  const seriesTagMap = useAppStore((s) => s.recordingMeta?.series_tags)
+  // Analysis-presence subscriptions — drive the small "what's been
+  // analyzed" badges shown next to each series. Each subscription
+  // returns the per-(group,series) keyset, which is small (one entry
+  // per analysed series), so re-renders are cheap. fpsp is keyed
+  // ``g:s:mode`` so we strip the mode suffix when matching.
+  const eventsKeys = useAppStore((s) => Object.keys(s.eventsAnalyses))
+  const apKeys = useAppStore((s) => Object.keys(s.apAnalyses))
+  const burstKeys = useAppStore((s) => Object.keys(s.fieldBursts))
+  const ivKeys = useAppStore((s) => Object.keys(s.ivCurves))
+  const cursorKeys = useAppStore((s) => Object.keys(s.cursorAnalyses))
+  const fpspKeys = useAppStore((s) => Object.keys(s.fpspCurves))
+  const resistanceKeys = useAppStore((s) => Object.keys(s.resistanceResults))
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set([0]))
   const [expandedSeries, setExpandedSeries] = useState<Set<string>>(new Set())
   const [hoveredSweep, setHoveredSweep] = useState<string | null>(null)
@@ -65,6 +97,23 @@ export function TreeNavigator() {
     toggleSeries(gIdx, sIdx)
     clearSweepSelection(gIdx, sIdx)
     selectSweep(gIdx, sIdx, 0)
+  }
+
+  // Presence map: which analyses have data for ``g:s``. Cheap O(1)
+  // membership checks built from the keyset selectors above. fpsp keys
+  // include a ``:mode`` suffix so we match by prefix.
+  const presenceFor = (g: number, s: number) => {
+    const k = `${g}:${s}`
+    const fpspPrefix = `${g}:${s}:`
+    return {
+      events: eventsKeys.includes(k),
+      ap: apKeys.includes(k),
+      bursts: burstKeys.includes(k),
+      iv: ivKeys.includes(k),
+      cursors: cursorKeys.includes(k),
+      fpsp: fpspKeys.some((fk) => fk.startsWith(fpspPrefix)),
+      resistance: resistanceKeys.includes(k),
+    }
   }
 
   if (!recording) {
@@ -148,6 +197,96 @@ export function TreeNavigator() {
                       style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {series.label || `Series ${series.index + 1}`}
                     </span>
+
+                    {(() => {
+                      // Analysis-presence badges: one tiny coloured
+                      // pill per analysis type with stored data for
+                      // this series. Lets the user see at a glance
+                      // what's been worked on without opening every
+                      // analysis window. Tooltip on the cluster
+                      // wrapper enumerates the analyses in plain
+                      // English; individual badges also have their
+                      // own tooltip for the single-analysis case.
+                      const presence = presenceFor(group.index, series.index)
+                      const present = ANALYSIS_BADGES.filter((b) =>
+                        presence[b.id as keyof typeof presence])
+                      if (present.length === 0) return null
+                      const tooltip = `Analyses present: ${present.map((b) => b.label).join(', ')}`
+                      return (
+                        <span
+                          title={tooltip}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {present.map((b) => (
+                            <span
+                              key={b.id}
+                              title={b.label}
+                              style={{
+                                display: 'inline-block',
+                                padding: '0 4px',
+                                borderRadius: 3,
+                                background: `${b.color}28`,
+                                color: b.color,
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '0.65em',
+                                fontWeight: 700,
+                                lineHeight: 1.5,
+                                letterSpacing: 0.3,
+                                border: `1px solid ${b.color}55`,
+                              }}
+                            >{b.code}</span>
+                          ))}
+                        </span>
+                      )
+                    })()}
+
+                    {(() => {
+                      // Per-series metadata tags. Show the first tag as
+                      // a chip (themed to match the metadata window),
+                      // with a ``+N`` suffix when more exist. Tooltip
+                      // lists every tag so the user can read them
+                      // without opening the metadata window.
+                      const tags = seriesTagMap?.[`${group.index}:${series.index}`]
+                      if (!tags || tags.length === 0) return null
+                      const first = tags[0]
+                      const extra = tags.length - 1
+                      return (
+                        <span
+                          title={tags.join(', ')}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 3,
+                            maxWidth: 120,
+                            padding: '0 5px',
+                            borderRadius: 8,
+                            background: 'var(--accent-dim, rgba(100,150,200,0.18))',
+                            color: 'var(--text-primary)',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.75em',
+                            lineHeight: 1.4,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <span style={{
+                            overflow: 'hidden', textOverflow: 'ellipsis',
+                          }}>{first}</span>
+                          {extra > 0 && (
+                            <span style={{
+                              color: 'var(--text-muted)',
+                              fontSize: '0.85em',
+                            }}>+{extra}</span>
+                          )}
+                        </span>
+                      )
+                    })()}
 
                     {selectedList.length > 0 && (
                       <span
@@ -279,21 +418,35 @@ export function TreeNavigator() {
                             }}
                             title={
                               isExcluded
-                                ? 'Click to include this sweep in analyses'
-                                : 'Click to exclude this sweep from all analyses'
+                                ? 'Click to include this sweep again'
+                                : 'Click to exclude this sweep from analyses'
                             }
                             style={{
                               flexShrink: 0,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              padding: '1px 7px',
+                              borderRadius: 8,
+                              fontSize: 'var(--font-size-label)',
+                              fontWeight: 600,
+                              lineHeight: 1.5,
+                              cursor: 'pointer',
                               color: isExcluded
                                 ? (isSweepSelected ? 'white' : '#ff9800')
-                                : 'var(--text-muted)',
-                              fontSize: '0.9em',
-                              padding: '0 2px',
-                              lineHeight: 1,
-                              opacity: isExcluded ? 1 : 0.7,
+                                : 'var(--text-secondary)',
+                              background: isExcluded
+                                ? 'rgba(255, 152, 0, 0.22)'
+                                : 'var(--bg-tertiary, rgba(120,120,120,0.20))',
+                              border: isExcluded
+                                ? '1px solid rgba(255, 152, 0, 0.5)'
+                                : '1px solid var(--border)',
                             }}
                           >
-                            ⊘
+                            <span style={{ fontSize: '1.1em', lineHeight: 1 }}>
+                              {isExcluded ? '↩' : '⊘'}
+                            </span>
+                            <span>{isExcluded ? 'include' : 'exclude'}</span>
                           </span>
                         )}
                       </div>

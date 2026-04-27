@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { useAppStore } from '../../stores/appStore'
+import { useAppStore, getMetaStatus } from '../../stores/appStore'
 import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES, PaletteName } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { TracesDropdown } from '../TraceViewer/TracesDropdown'
@@ -341,10 +341,45 @@ export function Toolbar() {
         )}
       </div>
 
+      {/* Cohort Analysis — separate from the per-file Analyses dropdown
+          because it operates on a folder of sidecars, not the active
+          recording. Always enabled (no recording dependency). */}
+      <button
+        className="btn"
+        onClick={async () => {
+          if (window.electronAPI?.openAnalysisWindow) {
+            await window.electronAPI.openAnalysisWindow('cohort_analysis')
+          }
+        }}
+        title="Aggregate per-cell metrics across a folder of recordings"
+        style={{ marginLeft: 6 }}
+      >
+        Cohort…
+      </button>
+
       <div className="toolbar-separator" />
 
-      <div className="toolbar-group">
+      <div className="toolbar-group" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {recording && <MetaStatusDot />}
         <span className="toolbar-label">{recording ? recording.fileName : 'No file loaded'}</span>
+        {recording && <FileTagChips />}
+        {recording && (
+          <button
+            className="btn"
+            onClick={async () => {
+              const api = window.electronAPI
+              if (api?.openAnalysisWindow) {
+                await api.openAnalysisWindow('metadata')
+              }
+            }}
+            title="Open the metadata window to tag this recording"
+            style={{
+              padding: '2px 8px', fontSize: 'var(--font-size-label)',
+              marginLeft: 4,
+            }}>
+            Tags…
+          </button>
+        )}
       </div>
 
       {loading && (
@@ -418,5 +453,96 @@ export function Toolbar() {
         )}
       </div>
     </div>
+  )
+}
+
+/** Coloured pill in the toolbar that surfaces the active recording's
+ *  tagging status. Subscribes to ``recordingMeta`` so it updates
+ *  live as the user tags from the metadata window. Hover tooltip
+ *  spells out exactly what's missing for non-green states. */
+function MetaStatusDot() {
+  const meta = useAppStore((s) => s.recordingMeta)
+  const groups = useAppStore((s) => s.recording?.groups ?? [])
+  const status = getMetaStatus(meta)
+  const colour =
+    status === 'green' ? 'var(--success)'
+      : status === 'yellow' ? 'var(--warning)'
+      : 'var(--error)'
+  const label = status === 'green' ? 'Tagged'
+    : status === 'yellow' ? 'No series tagged'
+    : 'Untagged'
+  // Tooltip expands the label with a count of what's been tagged so
+  // far so the user has actionable feedback without opening the
+  // metadata window.
+  const tooltip = (() => {
+    const fileTags = meta?.group_tags ?? []
+    const seriesTags = meta?.series_tags ?? {}
+    const taggedSeries = Object.values(seriesTags).filter(
+      (t) => Array.isArray(t) && t.length > 0).length
+    const totalSeries = groups.reduce(
+      (acc: number, g: any) => acc + (g.series?.length ?? 0), 0)
+    if (status === 'red') {
+      return 'No file-level tags. Cohort Analysis needs at least one (e.g. "WT", "male"). Click "Tags…" to add.'
+    }
+    if (status === 'yellow') {
+      return `File tagged with ${fileTags.length} tag${fileTags.length === 1 ? '' : 's'}, but no series tagged yet (0 / ${totalSeries}).`
+    }
+    return `File tagged with ${fileTags.length} tag${fileTags.length === 1 ? '' : 's'}; ${taggedSeries} of ${totalSeries} series tagged.`
+  })()
+  return (
+    <span
+      title={`${label} — ${tooltip}`}
+      aria-label={label}
+      style={{
+        display: 'inline-block',
+        width: 9, height: 9,
+        borderRadius: '50%',
+        background: colour,
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.4)',
+        flexShrink: 0,
+        cursor: 'default',
+      }}
+    />
+  )
+}
+
+/** File-level tag chips next to the file name in the toolbar.
+ *  Shows every file tag inline (file tags are usually a small set —
+ *  genotype + sex + treatment etc.) with the same accent-dim styling
+ *  the metadata window and tree-navigator series chips use. Hover
+ *  shows the same comma-joined list as a tooltip for tagsthat get
+ *  truncated when the toolbar is narrow. */
+function FileTagChips() {
+  const fileTags = useAppStore((s) => s.recordingMeta?.group_tags)
+  if (!fileTags || fileTags.length === 0) return null
+  const tooltip = fileTags.join(', ')
+  return (
+    <span
+      title={tooltip}
+      style={{
+        display: 'inline-flex', alignItems: 'center',
+        gap: 3, marginLeft: 2,
+        maxWidth: 320, overflow: 'hidden',
+      }}
+    >
+      {fileTags.map((tag, i) => (
+        <span
+          key={`${tag}-${i}`}
+          style={{
+            display: 'inline-block',
+            padding: '0 6px',
+            borderRadius: 8,
+            background: 'var(--accent-dim, rgba(100,150,200,0.18))',
+            color: 'var(--text-primary)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 'var(--font-size-label)',
+            lineHeight: 1.6,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden', textOverflow: 'ellipsis',
+            maxWidth: 140,
+          }}
+        >{tag}</span>
+      ))}
+    </span>
   )
 }

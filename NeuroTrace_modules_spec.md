@@ -68,35 +68,103 @@ autocomplete and the consistency checker (below), not schema.
 
 ### Status indicator
 
-Every file in the tree sidebar gets a small coloured dot:
+Every file in the tree sidebar gets a small coloured dot. The
+criterion is "can this file meaningfully contribute to Cohort
+Analysis?" — not "is every series in the file tagged?". Most
+recordings have many irrelevant series (calibration, abandoned
+attempts) that won't ever get tagged; requiring 100 % series
+coverage would punish normal recording habits.
 
-- **Red** — file has *no* tags at all (neither file nor series).
-- **Yellow** — file has file-level tags but at least one series is
-  untagged. (Or vice versa.)
-- **Green** — file has file-level tags AND every series in the file
-  carries at least one tag.
+| State | Meaning | Criterion |
+|---|---|---|
+| 🔴 **Red** | No file-level tags. Cell can't be grouped. | `len(group_tags) == 0` |
+| 🟡 **Yellow** | Cell categorized but no series tagged yet. File-level comparisons OK; series-level slicing not yet possible. | `len(group_tags) > 0 && every series_tags == []` |
+| 🟢 **Green** | Ready for Cohort Analysis. | `len(group_tags) > 0 && any series has tags` |
 
-Tooltip on hover lists exactly what's missing. Drives users toward
-green before they try Cohort Analysis on the folder.
+Tooltip on hover lists exactly what's missing.
 
-### Tag editing
+### The Metadata window
 
-- Open any `.neurotrace` file — tags are editable in the metadata
-  strip in the main window's top bar (file-level) and in the tree
-  sidebar (series-level chips next to sweep counts).
-- Same controls also exposed in every analysis window's top bar.
+Tagging lives in **its own Electron window**, not in the main
+window's top bar. Rationale: file + series tags + batch tagging +
+consistency checker collectively need real estate; squeezing them
+into the main toolbar would be cramped, and tagging is
+qualitatively different work from analysis (you switch into "tag
+this cohort" mode for a few minutes, then back to analysis).
+
+#### Layout — two-pane
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Folder: /path/to/cohort                  [Consistency check] │
+├────────────────┬─────────────────────────────────────────────┤
+│ ● cell01.dat   │ Cell ID:    cell01                          │
+│ ● cell02.dat   │ File tags:  [WT] [male] [P30] +             │
+│ ○ cell03.dat   │                                             │
+│ ● cell04.dat   │ ─── Series ───                              │
+│ — cell05.dat   │   0:0 [TP_pre]                              │
+│ … (no sidecar) │   0:1 [IV]                                  │
+│                │   0:2 [baseline] [mEPSC]                    │
+│ ☑ select all   │   0:3 [treatment] [mEPSC]                   │
+│                │   0:4 [TP_post]                             │
+│ [Apply tags    │                                             │
+│  to selected]  │ Notes: …                                    │
+└────────────────┴─────────────────────────────────────────────┘
+```
+
+- **Left pane** lists every recording in the current folder —
+  including ones without a `.neurotrace` sidecar yet (greyed,
+  shown as `—`). Users often want to tag all files in a cohort
+  with group / animal info BEFORE running any analyses; this lets
+  them do that. Status dot per file matches the main window's
+  tree.
+- **Right pane** shows the editor for the active selection.
+  Single-file: full editor (file tags + series tags + cell_id +
+  notes). Multi-file: batch mode (file-level tag input only,
+  applies to every selected file via append).
+- **Top toolbar** has the folder context selector + "Consistency
+  check" button (opens the checker as a modal sub-view).
+
+#### Entry points
+
+- **Main toolbar button**: `Tags…` → opens the metadata window
+  pointed at the current recording's folder, or — if no recording
+  is loaded — at `prefs.metadata.lastFolder`.
+- **Tree-sidebar status dot click** in main window: also opens
+  the metadata window with that file selected.
+- **Auto-toast on red-status file open**: when the user loads a
+  recording with no tags, a non-modal toast appears in the main
+  window corner:
+  > *"This recording has no tags. [Open metadata] [Dismiss]
+  > [Don't show again]"*
+  - Auto-dismisses after **8 seconds**.
+  - "Don't show again" → suppresses for **this file** only
+    (per-file flag in the sidecar's `meta.suppressTagToast`).
+    Users might forget a global suppression; per-file is safer
+    and the 8-second auto-dismiss makes one-off appearances
+    cheap.
+  - Yellow / green files don't trigger the toast — user has
+    already started, no need to nag.
+
+#### Tag editing rules
+
 - Editing tags **never re-runs analyses** — pure metadata.
-- Auto-saved through the existing sidecar debounce (1 s) — no
+- Auto-saved through the existing sidecar debounce (1 s); no
   explicit save button.
+- Same controls also exposed in every analysis window's top bar
+  for "I'm in the middle of analysing, let me tag this series real
+  quick" scenarios — but the metadata window is the canonical
+  place for cohort-level tagging.
 
 ### Batch tagging
 
-- Multi-select files in the file-explorer / tree.
-- "Apply tags to selection…" action: pop a small modal with the
-  same tag-editor UI; tags entered there get appended to every
-  selected file's `meta.group_tags`.
-- Essential for cohorts of 20+ recordings — no one wants to tag
-  one at a time.
+- In the metadata window's left pane, multi-select files via
+  checkboxes.
+- The right pane switches to batch mode: file-level tag input
+  appears with an "Apply to N files" button. Tags entered get
+  **appended** to every selected file's `meta.group_tags`
+  (existing tags untouched).
+- Essential for cohorts of 20+ recordings.
 
 ### Tag autocomplete
 

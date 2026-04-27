@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
-import { join } from 'path'
+import { join, dirname, basename } from 'path'
 import { createServer } from 'net'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'fs'
 
 // Pin the app name BEFORE the app ready event so the macOS application
 // menu + dock both read "NeuroTrace" instead of "Electron". In packaged
@@ -179,6 +179,21 @@ ipcMain.handle('open-file-dialog', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+ipcMain.handle('open-folder-dialog', async (_event, defaultPath?: string) => {
+  // Folder picker for the Cohort Analysis module — the user picks the
+  // directory of ``.neurotrace`` sidecars they want to aggregate.
+  // Falls back to the system home dir when no anchor is supplied.
+  // Triggered from any window (main or analysis), so we look up the
+  // sender's BrowserWindow rather than assuming ``mainWindow``.
+  const sender = BrowserWindow.fromWebContents(_event.sender) ?? mainWindow
+  if (!sender) return null
+  const result = await dialog.showOpenDialog(sender, {
+    properties: ['openDirectory'],
+    defaultPath: defaultPath || undefined,
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+
 ipcMain.handle('save-file-dialog', async (_event, defaultName: string, filters: Electron.FileFilter[]) => {
   if (!mainWindow) return null
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -272,6 +287,72 @@ ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<
   }
 })
 
+// List recording-shaped files (dat / abf / h5 / nwb / wcp / axgd / smr)
+// in a folder, plus their sidecar status + parsed sidecar.meta. Used by
+// the Metadata window's left pane so the user can tag the whole cohort
+// without having to open every file. Returns paths sorted by name.
+//
+// We don't try to peek inside non-sidecar files — listing is metadata-
+// only, so the cost is just a directory read + N small JSON parses.
+const RECORDING_EXTENSIONS = new Set(['dat', 'abf', 'h5', 'nwb', 'wcp', 'axgd', 'smr'])
+
+ipcMain.handle('list-folder-recordings', (_event, anchorPath: string) => {
+  try {
+    if (!anchorPath) return { folder: null, entries: [] }
+    // Accept either a folder path or a file inside the folder. The
+    // metadata window uses the active recording's path; a future
+    // "open folder" entry point can pass the folder directly.
+    let folder = anchorPath
+    try {
+      const st = statSync(anchorPath)
+      if (st.isFile()) folder = dirname(anchorPath)
+    } catch {
+      folder = dirname(anchorPath)
+    }
+    const names = readdirSync(folder)
+    const entries: Array<{
+      filePath: string
+      fileName: string
+      hasSidecar: boolean
+      meta?: Record<string, unknown> | null
+    }> = []
+    for (const name of names) {
+      // Skip hidden files and the sidecars themselves (they live next
+      // to recordings; we list the recordings).
+      if (name.startsWith('.')) continue
+      if (name.endsWith('.neurotrace')) continue
+      if (name.endsWith('.tmp')) continue
+      const ext = name.split('.').pop()?.toLowerCase() ?? ''
+      if (!RECORDING_EXTENSIONS.has(ext)) continue
+      const filePath = join(folder, name)
+      try {
+        const st = statSync(filePath)
+        if (!st.isFile()) continue
+      } catch { continue }
+      const sidecarPath = sidecarPathFor(filePath)
+      let hasSidecar = false
+      let meta: Record<string, unknown> | null = null
+      if (existsSync(sidecarPath)) {
+        hasSidecar = true
+        try {
+          const parsed = JSON.parse(readFileSync(sidecarPath, 'utf-8'))
+          if (parsed && typeof parsed === 'object'
+              && parsed.format === 'neurotrace-sidecar'
+              && parsed.meta && typeof parsed.meta === 'object') {
+            meta = parsed.meta
+          }
+        } catch { /* corrupt — leave meta null */ }
+      }
+      entries.push({ filePath, fileName: name, hasSidecar, meta })
+    }
+    entries.sort((a, b) => a.fileName.localeCompare(b.fileName))
+    return { folder, entries }
+  } catch (err) {
+    console.error('Failed to list folder recordings:', err)
+    return { folder: null, entries: [] }
+  }
+})
+
 // -----------------------------------------------------------------
 // Analysis windows — one per analysis type, opened on demand
 // -----------------------------------------------------------------
@@ -287,6 +368,8 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   events_template_generator: 'Events — Template Generator',
   events_template_refinement: 'Events — Refine Template',
   events_browser: 'Events — Browser & Overlay',
+  metadata: 'Metadata',
+  cohort_analysis: 'Cohort Analysis',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',

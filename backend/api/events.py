@@ -355,8 +355,22 @@ class DetectRequest(BaseModel):
     return_detection_measure: bool = False
 
 
-@router.post("/detect")
-async def detect(req: DetectRequest):
+def _detect_iter(req: "DetectRequest"):
+    """Generator core of /detect.
+
+    Yields:
+      ``('progress', {sweep_index, completed, total, sweep_id})``
+        once per sweep AFTER it finishes processing. Lets the streaming
+        endpoint surface "X / N sweeps done" to the UI.
+      ``('result', payload)``
+        as the final yield, carrying the same dict the synchronous
+        /detect endpoint returns to its callers.
+
+    Splitting like this lets ``/detect`` and ``/detect_stream`` share
+    every line of detection logic without one calling the other —
+    the synchronous endpoint just consumes the generator and returns
+    the final payload, the streaming endpoint serializes each yield.
+    """
     # Sweep list: either the explicit cross-sweep list, or the single
     # primary sweep. The "primary" sweep is the one whose trace feeds
     # the detection-measure overlay and whose units / sampling-rate
@@ -434,7 +448,17 @@ async def detect(req: DetectRequest):
     # idx is known, so the frontend can compute total-sweep-duration
     # for cross-sweep rates.
     sweep_lengths_s: dict[int, float] = {}
-    for sw_idx in sweeps:
+    total_sweeps = len(sweeps)
+    # Threading + queue plumbing so within-sweep progress (kinetics
+    # callbacks from ``run_events``) can be yielded while the sync
+    # detection function is still running. Without this the generator
+    # would only see progress at sweep boundaries — useless for
+    # single-sweep detections, which is the common case.
+    import queue as _q
+    import threading as _th
+    for done_count, sw_idx in enumerate(sweeps, start=1):
+        # Iterating with ``done_count`` so the progress yield below
+        # carries 1-based completion counts (1/N, 2/N, …, N/N).
         if sw_idx == primary:
             vv = values_primary
             sr_i = sr
@@ -444,42 +468,122 @@ async def detect(req: DetectRequest):
         # sweep mass detection should run clean on the rest.
         added_times = req.manual_added_times if sw_idx == primary else None
         removed_times = req.manual_removed_times if sw_idx == primary else None
-        try:
-            recs_i, dm_i = run_events(
-                vv, sr_i,
-                method=req.method,
-                template=template_arr,
-                templates=template_list,
-                cutoff=req.cutoff,
-                deconv_low_hz=req.deconv_low_hz,
-                deconv_high_hz=req.deconv_high_hz,
-                threshold_value=req.threshold_value,
-                direction=req.direction,
-                min_iei_ms=req.min_iei_ms,
-                baseline_search_ms=req.baseline_search_ms,
-                avg_baseline_ms=req.avg_baseline_ms,
-                avg_peak_ms=req.avg_peak_ms,
-                rise_low_pct=req.rise_low_pct,
-                rise_high_pct=req.rise_high_pct,
-                decay_pct=req.decay_pct,
-                decay_search_ms=req.decay_search_ms,
-                amplitude_min_abs=req.amplitude_min_abs,
-                amplitude_max_abs=req.amplitude_max_abs,
-                auc_min_abs=req.auc_min_abs,
-                rise_max_ms=req.rise_max_ms,
-                decay_max_ms=req.decay_max_ms,
-                fwhm_max_ms=req.fwhm_max_ms,
-                skip_regions=req.skip_regions,
-                manual_added_times=added_times,
-                manual_removed_times=removed_times,
-                sweep_index=sw_idx,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+
+        # Per-sweep progress fraction maps into the band
+        # ``[(done_count-1)/N, done_count/N]`` of overall progress.
+        sweep_base = (done_count - 1) / total_sweeps
+        sweep_span = 1.0 / total_sweeps
+
+        # Bridge ``run_events``'s progress callback (called from the
+        # worker thread) to the generator (which yields). Items on
+        # the queue are floats in [0, 1] = within-sweep fraction; the
+        # sentinel ``None`` means the worker finished.
+        progress_q: '_q.Queue[Optional[float]]' = _q.Queue()
+        worker_result: dict = {}
+
+        def _worker(_vv=vv, _sr_i=sr_i, _added=added_times,
+                    _removed=removed_times, _sw=sw_idx, _q=progress_q,
+                    _holder=worker_result):
+            try:
+                recs, dm = run_events(
+                    _vv, _sr_i,
+                    method=req.method,
+                    template=template_arr,
+                    templates=template_list,
+                    cutoff=req.cutoff,
+                    deconv_low_hz=req.deconv_low_hz,
+                    deconv_high_hz=req.deconv_high_hz,
+                    threshold_value=req.threshold_value,
+                    direction=req.direction,
+                    min_iei_ms=req.min_iei_ms,
+                    baseline_search_ms=req.baseline_search_ms,
+                    avg_baseline_ms=req.avg_baseline_ms,
+                    avg_peak_ms=req.avg_peak_ms,
+                    rise_low_pct=req.rise_low_pct,
+                    rise_high_pct=req.rise_high_pct,
+                    decay_pct=req.decay_pct,
+                    decay_search_ms=req.decay_search_ms,
+                    amplitude_min_abs=req.amplitude_min_abs,
+                    amplitude_max_abs=req.amplitude_max_abs,
+                    auc_min_abs=req.auc_min_abs,
+                    rise_max_ms=req.rise_max_ms,
+                    decay_max_ms=req.decay_max_ms,
+                    fwhm_max_ms=req.fwhm_max_ms,
+                    skip_regions=req.skip_regions,
+                    manual_added_times=_added,
+                    manual_removed_times=_removed,
+                    sweep_index=_sw,
+                    progress_cb=lambda f: _q.put(float(f)),
+                )
+                _holder['records'] = recs
+                _holder['dm'] = dm
+            except Exception as exc:  # noqa: BLE001
+                _holder['error'] = exc
+            finally:
+                _q.put(None)
+
+        worker = _th.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        # Drain progress events as they arrive. Each tick re-emits a
+        # combined ``progress`` event with the overall fraction.
+        last_within = 0.0
+        while True:
+            within = progress_q.get()
+            if within is None:
+                break
+            # Coalesce: if the queue has a backlog (worker is faster
+            # than the consumer), skip ahead to the latest fraction
+            # so the UI sees recent state, not stale ones.
+            try:
+                while True:
+                    next_within = progress_q.get_nowait()
+                    if next_within is None:
+                        # Sentinel — replay it after the loop body so
+                        # the outer while exits cleanly.
+                        progress_q.put(None)
+                        break
+                    within = next_within
+            except _q.Empty:
+                pass
+            if within < last_within:
+                # Clamp to monotonic — a rare case where the worker
+                # ticks 0.30 (start of kinetics) AFTER an earlier
+                # higher tick gets requeued shouldn't make the bar
+                # jump backwards.
+                within = last_within
+            last_within = within
+            yield ('progress', {
+                'sweep_id': int(sw_idx),
+                'completed': int(done_count - 1),
+                'total': int(total_sweeps),
+                'fraction': float(sweep_base + sweep_span * within),
+                'events_so_far': len(all_records),
+            })
+
+        worker.join()
+        if 'error' in worker_result:
+            exc = worker_result['error']
+            if isinstance(exc, ValueError):
+                raise HTTPException(status_code=400, detail=str(exc))
+            raise exc
+
+        recs_i = worker_result['records']
+        dm_i = worker_result['dm']
         all_records.extend(recs_i)
         sweep_lengths_s[sw_idx] = float(len(vv)) / sr_i
         if sw_idx == primary:
             primary_dm = dm_i
+
+        # Final per-sweep tick (in case the within-sweep callbacks
+        # didn't reach 1.0 for the last batch).
+        yield ('progress', {
+            'sweep_id': int(sw_idx),
+            'completed': int(done_count),
+            'total': int(total_sweeps),
+            'fraction': float(done_count) / float(total_sweeps),
+            'events_so_far': len(all_records),
+        })
 
     # Sort merged records by (sweep, peak_time) so the table is
     # consistent across re-runs.
@@ -529,7 +633,7 @@ async def detect(req: DetectRequest):
     # Total duration across all sweeps that contributed events —
     # lets the frontend compute cross-sweep rates without a re-fetch.
     total_len_s = float(sum(sweep_lengths_s.values()))
-    return {
+    yield ('result', {
         "events": events_out,
         "n_events": len(events_out),
         "sampling_rate": sr,
@@ -538,7 +642,73 @@ async def detect(req: DetectRequest):
         "total_length_s": total_len_s,
         "sweeps_analysed": sorted(sweep_lengths_s.keys()),
         "detection_measure": dm_payload,
-    }
+    })
+
+
+@router.post("/detect")
+async def detect(req: DetectRequest):
+    """Synchronous detection. Drains :func:`_detect_iter` and returns
+    the final result payload — backwards-compatible with all existing
+    callers."""
+    final = None
+    for kind, payload in _detect_iter(req):
+        if kind == 'result':
+            final = payload
+    if final is None:
+        # Should never happen — _detect_iter always yields a 'result'
+        # last unless it raised mid-flight. Treat as 500.
+        raise HTTPException(status_code=500, detail="Detection produced no result")
+    return final
+
+
+@router.post("/detect_stream")
+async def detect_stream(req: DetectRequest):
+    """Streaming detection. Returns an ``application/x-ndjson`` body
+    with one JSON object per line:
+
+    * ``{"type": "progress", ...}`` — emitted after each sweep
+      finishes processing. Carries ``completed`` / ``total`` /
+      ``fraction`` so the UI can drive a progress fill on the RUN
+      button without polling.
+    * ``{"type": "result", "data": {...}}`` — emitted last. ``data``
+      is the same payload :func:`detect` returns synchronously.
+
+    NDJSON over POST (rather than SSE) because Server-Sent Events'
+    EventSource API is GET-only; the detect request body is large
+    (params + manual edits + skip regions + multi-templates) so POST
+    is the right verb.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    def _stream():
+        try:
+            for kind, payload in _detect_iter(req):
+                if kind == 'progress':
+                    yield _json.dumps({"type": "progress", **payload}) + "\n"
+                elif kind == 'result':
+                    yield _json.dumps({"type": "result", "data": payload}) + "\n"
+        except HTTPException as exc:
+            # Surface as a final error line so the client can
+            # display a clean message instead of having to parse a
+            # half-streamed body.
+            yield _json.dumps({"type": "error",
+                               "status": exc.status_code,
+                               "detail": str(exc.detail)}) + "\n"
+        except Exception as exc:  # noqa: BLE001 — graceful failure
+            yield _json.dumps({"type": "error",
+                               "status": 500,
+                               "detail": f"{type(exc).__name__}: {exc}"}) + "\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="application/x-ndjson",
+        # Disable buffering so the browser sees each line as it's
+        # written. Without this, nginx-style intermediate proxies
+        # could batch the whole response. (Electron talks directly
+        # to uvicorn so this is mostly future-proofing.)
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 # ---------------------------------------------------------------------------

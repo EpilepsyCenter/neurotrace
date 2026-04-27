@@ -59,15 +59,28 @@ class HekaReader(BaseReader):
         """Walk the PatchMasterFile tree and populate our data model."""
 
         for group_idx, pm_group in enumerate(pf):
+            # HEKA already numbers groups (a.k.a. "Experiments") in
+            # the PGF as ``E-1``, ``E-2``, … so we use that label
+            # verbatim and only fall back to a numbered placeholder
+            # when the file doesn't carry one.
             group = Group(
                 index=group_idx,
                 label=pm_group.label() or f"Group {group_idx + 1}",
             )
 
             for series_idx, pm_series in enumerate(pm_group):
+                # Same number-prefix rationale for series — and more
+                # important here because most recordings have multiple
+                # series with identical PGF names ("Test pulse" run 3
+                # times etc).
+                raw_series_label = pm_series.label()
+                series_label = (
+                    f"{series_idx + 1}. {raw_series_label}"
+                    if raw_series_label else f"Series {series_idx + 1}"
+                )
                 series = Series(
                     index=series_idx,
-                    label=pm_series.label() or f"Series {series_idx + 1}",
+                    label=series_label,
                 )
 
                 # Extract amplifier metadata if available.

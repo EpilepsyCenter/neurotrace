@@ -25,6 +25,7 @@ Linear data flow:
    → Metadata tagging
        → Cohort Analysis  → graphs + stats panel
                           → .pzfx / .xlsx (Prism + Excel)
+                          → .neurocohort  (resumable session file)
        → Trace Export     → SVG / PDF / PNG figures
 ```
 
@@ -226,11 +227,20 @@ Normality assessed via Shapiro-Wilk on each group; if any group
 fails (p < 0.05), the non-parametric branch runs. All stats via
 **Pingouin**. Post-hoc: Tukey for ANOVA, Dunn for Kruskal-Wallis.
 
-### Curated metric preset (default selection)
+### Metric selection — the central organising element
 
-To skip the "check 50 boxes" ritual, the metric tree opens with a
-curated preset of the metrics most commonly reported in figures.
-Everything else is visible, off, one click away.
+The metric picker is **always visible** in the cohort window — it's
+the surface the user touches most. Selection drives which graphs
+render, what stats run, and what the export contains. Live updates:
+checking / unchecking a metric instantly adds / removes a graph
+from the panel without recomputing anything.
+
+The picker is a tree-view collapsible by analysis type, with
+checkboxes per metric and a role-filter dropdown next to each.
+
+To skip the "check 50 boxes" ritual, the tree opens with a curated
+preset of the metrics most commonly reported in figures. Everything
+else is visible, off, one click away.
 
 | Analysis | Pre-checked metrics |
 |---|---|
@@ -279,18 +289,9 @@ Adjacent to the graph panel, a table:
 | Metric | Group | N | Mean ± SD | Test | Stat | p | Effect size |
 |---|---|---|---|---|---|---|---|
 
-Plus a **Methods blurb** below — auto-generated paragraph pasteable
-into a manuscript:
-
-> *Inter-event intervals were compared between wildtype (n = 12) and
-> knockout (n = 14) using an unpaired t-test (Shapiro-Wilk
-> p = 0.21 / 0.18). Significance was set at p < 0.05. Statistical
-> tests performed in Pingouin v0.5.x. N is the experimental unit
-> (animal).*
-
 ### Output — files
 
-Output is a chosen folder containing:
+Export is a chosen folder containing:
 
 ```
 events_comparison.pzfx        ← Prism native
@@ -298,9 +299,17 @@ events_comparison.xlsx        ← Excel-friendly
 ap_comparison.pzfx
 ap_comparison.xlsx
 …
-_cohort_audit.json            ← full audit trail
-_cohort_summary.html          ← graphs + stats + blurb, self-contained
+_cells.xlsx                   ← per-cell metadata (always written)
 ```
+
+`_cells.xlsx` carries a row per contributing cell with its file
+path, cell_id, group_tags, series_tags used, notes — lightweight
+in-export provenance so a reviewer opening the export folder a year
+later can still see exactly which cells produced these numbers.
+
+Reproducibility beyond `_cells.xlsx` (full graph state, exact tag
+selections, stats output) lives in **session files** (next section)
+— users save those when they want a richer bookmark.
 
 #### Prism (.pzfx)
 
@@ -323,20 +332,90 @@ the export dialog (persisted under `prefs.cohortAnalysis.xlsxLayout`):
 Both modes always also write `_cells.xlsx` listing every contributing
 cell with its metadata — the export is self-describing.
 
-### Audit trail
+### Session files
 
-Every export writes `_cohort_audit.json` capturing:
+A Cohort Analysis run can be saved to a `.neurocohort` JSON file —
+capturing the full working state of the analysis so the user can
+close NeuroTrace and resume the same comparison later without
+redoing the wizard.
 
-- Folder scanned, cell IDs and file paths included
-- Tags used to define each group
-- Per-cell series-tag → series-index resolution (which series
-  contributed to which role for which cell)
-- Statistical test chosen, why, and the design inference logic
-- N choice (sweep / series / slice / animal) and N per group
-- Pingouin version + NeuroTrace version
-- Timestamp
+**What's in a session file**
 
-Lets a reviewer or future-you reconstruct any export exactly.
+```json
+{
+  "format": "neurocohort",
+  "version": 1,
+  "saved_at": "2026-04-27T15:43:00Z",
+  "app_version": "0.3.x",
+  "name": "WT vs KO mEPSC frequency",
+  "scope": {
+    "folder": "/Users/.../recordings",
+    "files": [
+      { "path": "...cell01.dat", "cell_id": "cell01", "included": true },
+      …
+    ]
+  },
+  "design": {
+    "analysis_type": "events",
+    "comparison": "between",
+    "tag_axis": "genotype",
+    "tags": ["wildtype", "knockout"],
+    "n_unit": "animal",
+    "test": "unpaired_t",
+    "test_reason": "2 groups, both Shapiro-Wilk p > 0.05"
+  },
+  "metric_selection": [
+    { "metric": "rate_hz",      "role_filter": "baseline" },
+    { "metric": "amp_mean",     "role_filter": "baseline" },
+    …
+  ],
+  "results": {
+    "per_cell": [ … ],          // raw aggregated values per cell × metric
+    "stats":    { … },          // pingouin output per metric
+    "graphs":   { … }           // cached plot data so reopen is instant
+  }
+}
+```
+
+**Save / Load**
+
+- `Save session…` button in the cohort window writes the active
+  state to a user-chosen path. Default suggested name comes from
+  `design.tags` (`WT_vs_KO_events.neurocohort`).
+- `Open session…` from the file menu — picks a `.neurocohort` file,
+  hydrates the cohort window with cached results.
+- Sessions list pinned in the app's recent-files area (alongside
+  recently-opened recordings).
+
+**On reopen**
+
+- Graphs render from cached data — zero recomputation required.
+- User can **change which metrics are visualised / exported** without
+  re-running anything; the metric tree picks from already-aggregated
+  values.
+- "Re-aggregate from sidecars" button (top of the window) re-reads
+  every contributing sidecar and replaces cached results — used when
+  underlying analyses have been re-run since the session was saved.
+
+**Missing-files handling**
+
+When a session is loaded:
+
+1. Try absolute paths first.
+2. Fall back to paths relative to the session-file location.
+3. Any file still missing flagged in the cell list with a warning;
+   user can manually relocate or exclude.
+
+The user can keep working with whichever cells remain available;
+re-aggregation skips missing files.
+
+**Why this replaces a separate audit trail**
+
+A session file IS the audit trail — richer, interactive, replayable.
+A static `_cohort_audit.json` would carry the same information in
+a less useful form. `_cells.xlsx` (always written on export) covers
+the lightweight in-export provenance need; sessions cover the
+"come back and inspect / modify" need.
 
 ---
 
@@ -462,10 +541,16 @@ running anything cross-file. Phase B/C are unblocked.
   - `POST /api/cohort/aggregate` — folder + analysis type + tags
     → flat per-cell metric table
   - `POST /api/cohort/run_stats` — aggregated table + design choice
-    → test results + graph data + audit trail
+    → test results + graph data
   - `POST /api/cohort/export_pzfx` — produces `.pzfx` files
   - `POST /api/cohort/export_xlsx` — produces `.xlsx` files +
     `_cells.xlsx`
+  - `POST /api/cohort/save_session` — writes a `.neurocohort` JSON
+    capturing the current cohort window state (atomic write,
+    same tmp + rename pattern as sidecars)
+  - `POST /api/cohort/load_session` — reads a `.neurocohort` JSON,
+    returns the payload + a missing-files report so the frontend
+    can warn the user about relocations needed
 - New deps in `backend/requirements.txt`:
   - `pingouin`
   - `pzfx` (Prism XML writer)
@@ -478,13 +563,17 @@ running anything cross-file. Phase B/C are unblocked.
 - New Electron analysis window `cohort_analysis`.
 - Six-step wizard (folder → analysis → comparison-shape → tags →
   N-choice → design preview → run).
-- Curated metric tree with role filters; persistence of selection
-  in prefs; reset-to-defaults button.
+- Curated metric tree with role filters; **live updates** — toggling
+  a metric adds/removes its graph from the panel instantly. Selection
+  persisted in prefs; reset-to-defaults button.
 - Graph panel — render Pingouin-fed plots inline (PNG fallback
   acceptable; SVG nicer if tractable).
-- Stats table + Methods blurb panel.
+- Stats table panel.
 - "Export…" button → save-to-folder dialog → `.pzfx` + `.xlsx` +
-  `_cohort_audit.json` + `_cohort_summary.html`.
+  `_cells.xlsx`.
+- "Save session…" / "Open session…" actions in the file menu →
+  `.neurocohort` JSON files. Recent-sessions list pinned in the
+  app's recent-files area for one-click resume.
 
 **Deliverable**: end-to-end cohort comparison with publication-grade
 inputs to Prism + an in-app graphical / textual report.

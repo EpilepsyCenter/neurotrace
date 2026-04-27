@@ -49,7 +49,7 @@ All formulas cited inline. No code ported from copyleft sources.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -1132,6 +1132,14 @@ def run_events(
     manual_removed_times: Optional[list[float]] = None,
     removed_tol_ms: float = 2.0,
     sweep_index: int = 0,
+    # Optional within-sweep progress callback. Called with a float in
+    # [0, 1] at a few points: ~0.05 right after detection finishes,
+    # then incrementally through the kinetics loop, and finally 1.0
+    # when the sweep is fully processed. The streaming /detect_stream
+    # endpoint forwards these to the UI so single-sweep detections
+    # also show a moving progress bar (per-sweep granularity alone
+    # gave one tick at the end, useless for single-sweep work).
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> tuple[list[EventRecord], Optional[np.ndarray]]:
     """Run the full event-detection + kinetics pipeline on one sweep.
 
@@ -1139,6 +1147,15 @@ def run_events(
     correlation or deconvolution trace (for plotting overlay); None for
     the threshold method.
     """
+    # Helper that swallows callback errors so a buggy UI hook can
+    # never crash detection. Also clamps to [0, 1].
+    def _tick(frac: float) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(max(0.0, min(1.0, float(frac))))
+        except Exception:
+            pass
     x = np.asarray(values, dtype=float)
     detection_measure: Optional[np.ndarray] = None
 
@@ -1303,8 +1320,24 @@ def run_events(
     manual_flags = [manual_flags[i] for i in order]
 
     # ---- Step 3: per-event kinetics ----
+    # Detection has finished; tell the caller we're entering kinetics
+    # (the slow phase for high-event-rate sweeps). We allocate the
+    # range [0.30, 1.00] to kinetics — detection itself is reported
+    # as "0..0.30" by the caller (the API generator) since it
+    # happens BEFORE this function is invoked for the threshold
+    # method, or interleaved with the FFT for template methods.
+    _tick(0.30)
     records: list[EventRecord] = []
-    for pi, mf in zip(peak_idxs, manual_flags):
+    n_total = len(peak_idxs)
+    # Aim for ~20 ticks per sweep regardless of event count: tiny N
+    # (< 20) ticks every event; large N ticks every ``N/20``. The
+    # API-side queue coalesces bursts so over-ticking doesn't flood
+    # the network — under-ticking (the previous default of 40) made
+    # single-sweep progress look stuck for several seconds at a time.
+    tick_every = max(1, n_total // 20)
+    for i_ev, (pi, mf) in enumerate(zip(peak_idxs, manual_flags)):
+        if n_total > 0 and (i_ev % tick_every) == 0:
+            _tick(0.30 + 0.65 * (i_ev / n_total))
         k = measure_event_kinetics(
             x, sr, pi,
             direction=direction,
@@ -1360,6 +1393,7 @@ def run_events(
             biexp_b1=k.biexp_b1,
             manual=mf,
         ))
+    _tick(1.0)
     return records, detection_measure
 
 

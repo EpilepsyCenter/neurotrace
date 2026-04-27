@@ -24,11 +24,16 @@ backend-dist/
 
 # Data files (too large for git)
 sample_data/
+heka_test_files/
 *.dat
 *.abf
 *.h5
 *.nwb
 *.wcp
+# Per-recording sidecars are user-local — they sit next to private
+# recordings and carry analysis state, not code. Excluded so test
+# folders don't accidentally leak into commits.
+*.neurotrace
 
 # Local environment
 .env

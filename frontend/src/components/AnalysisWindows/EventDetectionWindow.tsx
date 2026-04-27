@@ -113,11 +113,20 @@ export function EventDetectionWindow({
   }, [totalSweeps, sweep])
 
   // ---- Viewport (viewport-based fetch + navigation) ----
-  const [viewport, setViewport] = useState<Viewport>({ tStart: 0, tEnd: 10 })
+  // Default 1 s on open — long continuous recordings render fast at
+  // this scale; user expands from there with the zoom controls. The
+  // previous 10 s default made first paint sluggish on multi-minute
+  // sweeps because the backend had to decimate a much larger window.
+  const DEFAULT_VIEWPORT_S = 1
+  const [viewport, setViewport] = useState<Viewport>({ tStart: 0, tEnd: DEFAULT_VIEWPORT_S })
   const [sweepDurationS, setSweepDurationS] = useState(0)
   useEffect(() => {
-    // On sweep change, reset viewport to first 10 s or full sweep.
-    setViewport({ tStart: 0, tEnd: sweepDurationS > 0 ? Math.min(10, sweepDurationS) : 10 })
+    // On sweep change, reset viewport to first ``DEFAULT_VIEWPORT_S``
+    // or full sweep, whichever is shorter.
+    setViewport({
+      tStart: 0,
+      tEnd: sweepDurationS > 0 ? Math.min(DEFAULT_VIEWPORT_S, sweepDurationS) : DEFAULT_VIEWPORT_S,
+    })
   }, [group, series, sweep, sweepDurationS])
   const shiftViewport = useCallback((factor: number) => {
     setViewport((v) => shiftViewportBy(v, sweepDurationS, factor))
@@ -427,13 +436,28 @@ export function EventDetectionWindow({
   }, [viewport, sweepDurationS, updateCursors])
 
   // ---- Run ----
+  // Progress fraction the streaming detect endpoint reports per
+  // sweep. Drives the RUN button's gradient fill so the user can see
+  // long detections (multi-sweep, multi-template) make headway —
+  // before the streaming refactor a 60-sweep detection just sat at
+  // "Running…" for 30+ seconds with no feedback.
+  const [runProgress, setRunProgress] = useState(0)
   const onRun = async () => {
     const template = params.method.startsWith('template_') ? activeTemplate : null
     if (params.method.startsWith('template_') && !template) {
       setError('Select or generate a template first.')
       return
     }
-    await runEvents(group, series, channel, sweep, params, template)
+    setRunProgress(0)
+    try {
+      await runEvents(group, series, channel, sweep, params, template, (frac) => {
+        setRunProgress(frac)
+      })
+    } finally {
+      // Brief settle so the user sees the bar reach 100% before the
+      // button reverts to the idle label.
+      setTimeout(() => setRunProgress(0), 250)
+    }
   }
 
   // ---- Open sub-windows ----
@@ -828,18 +852,101 @@ export function EventDetectionWindow({
             padding: 8, border: '1px solid var(--border)', borderRadius: 4,
             background: 'var(--bg-primary)',
           }}>
-            <button className="btn btn-primary" onClick={onRun}
-              disabled={loading || !fileInfo}
-              style={{
-                width: '100%', padding: '8px 0',
-                fontSize: 'var(--font-size-sm)', fontWeight: 600,
-              }}>
-              {loading
-                ? 'Running…'
-                : params.sweepMode === 'all'
-                  ? `Run on all sweeps (${totalSweeps})`
-                  : 'Run'}
-            </button>
+            {(() => {
+              // RUN button = a progress bar.
+              //
+              // The label always reflects the current state. The
+              // background depends on ``loading``:
+              //   - idle    → default primary button (CSS class)
+              //   - loading → a CSS-painted bar laid OVER the button
+              //     by way of an absolutely-positioned overlay div.
+              //     We use an overlay (rather than a background
+              //     gradient) so the button can keep its primary
+              //     colour underneath; the overlay is the accent
+              //     fill for whatever progress fraction we have.
+              //
+              // When loading but no progress yet (single-sweep run,
+              // or backend hasn't finished its first sweep), the
+              // overlay is 100% wide with a faded indeterminate
+              // animation so the user sees activity immediately —
+              // the previous "no-fill until first progress event"
+              // looked broken on fast detections that completed
+              // before the first progress chunk could repaint.
+              const pct = Math.round(runProgress * 100)
+              const hasProgress = runProgress > 0
+              return (
+                <button className="btn btn-primary" onClick={onRun}
+                  disabled={loading || !fileInfo}
+                  style={{
+                    width: '100%', padding: '8px 0',
+                    fontSize: 'var(--font-size-sm)', fontWeight: 600,
+                    position: 'relative',
+                    overflow: 'hidden',
+                  }}>
+                  {loading && hasProgress && (
+                    // Determinate fill — semi-transparent white wash
+                    // across the left ``pct%`` of the button. Sits on
+                    // top of the primary-button background colour so
+                    // the colour shift reads as "X% complete".
+                    <span
+                      aria-hidden
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        background: `linear-gradient(to right,
+                          rgba(255,255,255,0.32) 0%,
+                          rgba(255,255,255,0.32) ${pct}%,
+                          transparent ${pct}%,
+                          transparent 100%)`,
+                        transition: 'background 80ms linear',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+                  {loading && !hasProgress && (
+                    // Indeterminate marquee — a bright stripe slides
+                    // left-to-right across the button so the user sees
+                    // activity even when we don't know the fraction
+                    // (single-sweep runs, slow first sweep, etc.).
+                    // The stripe is a narrow gradient bar, repeated
+                    // by the keyframe animation moving its position.
+                    <span
+                      aria-hidden
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        background: 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.42) 50%, transparent 100%)',
+                        backgroundSize: '40% 100%',
+                        backgroundRepeat: 'no-repeat',
+                        animation: 'btn-indet 1.2s linear infinite',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+                  <span style={{ position: 'relative' }}>
+                    {loading
+                      ? (hasProgress
+                        ? `Running… ${pct}%`
+                        : 'Running…')
+                      : params.sweepMode === 'all'
+                        ? `Run on all sweeps (${totalSweeps})`
+                        : 'Run'}
+                  </span>
+                  {/* Indeterminate-bar keyframes scoped via a style
+                      tag adjacent to the button. Defined inline so we
+                      don't have to add a global CSS rule for one
+                      affordance. The stripe starts off-screen left
+                      (-50% of its 40%-wide bar = -20% of container),
+                      slides to off-screen right. */}
+                  <style>{`
+                    @keyframes btn-indet {
+                      0%   { background-position: -50% 0; }
+                      100% { background-position: 150% 0; }
+                    }
+                  `}</style>
+                </button>
+              )
+            })()}
             {/* Sweep-mode dropdown — sits directly under the Run
                 button so the "what am I about to run on?" is right
                 next to the action. Same pattern as the other analysis

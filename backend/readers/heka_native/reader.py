@@ -90,15 +90,26 @@ class HekaNativeReader(BaseReader):
 
         # Build our Recording model from the .pul tree
         for pul_group in pul_root.groups:
+            # HEKA already labels groups as ``E-1``, ``E-2``, … so we
+            # use that verbatim and only synthesize a name when the
+            # file doesn't carry one. (Series labels DO get a numeric
+            # prefix below — those come from the PGF and frequently
+            # repeat across runs.)
+            group_idx = len(recording.groups)
             group = Group(
-                index=len(recording.groups),
-                label=pul_group.label or f'Group {len(recording.groups) + 1}',
+                index=group_idx,
+                label=pul_group.label or f'Group {group_idx + 1}',
             )
 
             for pul_series in pul_group.series_list:
+                series_idx = len(group.series_list)
+                series_label = (
+                    f"{series_idx + 1}. {pul_series.label}"
+                    if pul_series.label else f'Series {series_idx + 1}'
+                )
                 series = Series(
-                    index=len(group.series_list),
-                    label=pul_series.label or f'Series {len(group.series_list) + 1}',
+                    index=series_idx,
+                    label=series_label,
                     protocol=pul_series.method_name or pul_series.label,
                 )
 

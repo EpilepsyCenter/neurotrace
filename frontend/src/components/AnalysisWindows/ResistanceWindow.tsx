@@ -32,6 +32,14 @@ interface Props {
   fileInfo: any
   cursors: CursorPositions
   currentSweep: number
+  // Mirrored from the main viewer's selection so the resistance
+  // window opens already pointed at the same series the user is
+  // looking at, matching the pattern the other analysis windows
+  // (IV, AP, fPSP, …) use. Initial value only — once the user
+  // picks a different series here, this stops driving anything.
+  mainGroup?: number | null
+  mainSeries?: number | null
+  mainTrace?: number | null
 }
 
 // Cursor band colors mirror the other analysis windows for consistency.
@@ -39,16 +47,34 @@ const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
 const FIT_COLOR_VAR = '--cursor-fit'
 
-export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }: Props) {
+export function ResistanceWindow({
+  backendUrl, fileInfo, cursors, currentSweep,
+  mainGroup, mainSeries, mainTrace,
+}: Props) {
   const theme = useThemeStore((s) => s.theme)
   const fontSize = useThemeStore((s) => s.fontSize)
 
-  const [currentGroup, setCurrentGroup] = useState(0)
-  const [currentSeries, setCurrentSeries] = useState(0)
-  // Channel (trace index) selector — previously hard-coded to 0.
-  // Kept in sync with the current series so multi-channel recordings
-  // can pick which amplifier channel feeds the resistance fit.
-  const [currentChannel, setCurrentChannel] = useState(0)
+  // Pre-select the main viewer's series. Default 0/0/0 only if the
+  // main window hasn't reported a selection yet. Once the user picks
+  // a different series in the dropdowns here, the mirroring stops —
+  // hence this is initial state, not a controlled prop.
+  const [currentGroup, setCurrentGroup] = useState(mainGroup ?? 0)
+  const [currentSeries, setCurrentSeries] = useState(mainSeries ?? 0)
+  const [currentChannel, setCurrentChannel] = useState(mainTrace ?? 0)
+  // Adopt the main-window selection on first arrival (state-update
+  // broadcast lands a moment after mount). Without this the window
+  // would stay on 0/0 if the user opened it before main-window state
+  // sync. We only update when the value actually changes from what we
+  // have, so the user's manual picks here aren't clobbered.
+  const adoptedSelectionRef = useRef(false)
+  useEffect(() => {
+    if (adoptedSelectionRef.current) return
+    if (mainGroup == null || mainSeries == null) return
+    adoptedSelectionRef.current = true
+    setCurrentGroup(mainGroup)
+    setCurrentSeries(mainSeries)
+    if (mainTrace != null) setCurrentChannel(mainTrace)
+  }, [mainGroup, mainSeries, mainTrace])
   // Form state lives in the app store so the .neurotrace sidecar can
   // round-trip it across sessions. ``setForm`` patches only the
   // fields the caller passes; everything else stays intact.
@@ -333,6 +359,51 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
     }
   }
 
+  // Push the latest resistance result into the per-series map AND
+  // broadcast it to the other windows. ResistanceWindow lives in its
+  // own Electron BrowserWindow with its own Zustand store instance,
+  // so a local ``setState`` would only light up things in *this*
+  // window — the main window (where the TreeNavigator's R badge
+  // lives) never sees it without a cross-window broadcast. Same
+  // pattern as ``_broadcastEvents`` etc. in the appStore.
+  const recordResistancePresence = useCallback((m: any, source: string) => {
+    if (!m) return
+    const key = `${currentGroup}:${currentSeries}`
+    const result = {
+      baseline: Number(m.baseline ?? 0),
+      peak_current: Number(m.peak_current ?? 0),
+      steady_state_current: Number(m.steady_state_current ?? 0),
+      rs: m.rs == null ? null : Number(m.rs),
+      rin: m.rin == null ? null : Number(m.rin),
+      cm: m.cm == null ? null : Number(m.cm),
+      tau: m.tau == null ? null : Number(m.tau),
+      peak_idx: m.peak_idx,
+      steady_state_start_idx: m.steady_state_start_idx,
+      pulse_end_idx: m.pulse_end_idx,
+      source,
+    }
+    const nextResults = {
+      ...useAppStore.getState().resistanceResults,
+      [key]: result,
+    }
+    // Local store update so this window's UI sees the result too
+    // (the resistance results table can hydrate from here in the
+    // future).
+    useAppStore.setState({ resistanceResults: nextResults })
+    // Cross-window: tell the main window so its TreeNavigator badge
+    // lights up. The main window's broadcast listener adopts the
+    // full map (last-write-wins by series key, same shape as the
+    // events / bursts / etc. broadcasts).
+    try {
+      const ch = new BroadcastChannel('neurotrace-sync')
+      ch.postMessage({
+        type: 'resistance-update',
+        resistanceResults: nextResults,
+      })
+      ch.close()
+    } catch { /* ignore */ }
+  }, [currentGroup, currentSeries])
+
   // ---- API: single sweep ----
   const runSingle = async (sweepIdx: number) => {
     setLoading(true); setError(null)
@@ -349,9 +420,10 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
       if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
       const data = await resp.json()
       const row = toRow(data.measurement, `sweep ${sweepIdx + 1}`, sweepIdx + 1)
-      setMeasurements((prev) => [...prev, row])
+      setMeasurements([row])
       await storeRows([row])
       applyFit(data.measurement)
+      recordResistancePresence(data.measurement, `sweep ${sweepIdx + 1}`)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -390,9 +462,10 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
       if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
       const data = await resp.json()
       const row = toRow(data.measurement, `avg ${from}–${to}`, `avg ${from}–${to}`)
-      setMeasurements((prev) => [...prev, row])
+      setMeasurements([row])
       await storeRows([row])
       applyFit(data.measurement)
+      recordResistancePresence(data.measurement, `averaged sweeps ${from}–${to}`)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -424,8 +497,12 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
         const data = await resp.json()
         rows.push(toRow(data.measurement, `sweep ${swIdx + 1}`, swIdx + 1))
+        // Last-write-wins: each sweep's measurement updates the
+        // per-series record. The badge appears as soon as the first
+        // sweep finishes.
+        recordResistancePresence(data.measurement, `sweep ${swIdx + 1}`)
       }
-      setMeasurements((prev) => [...prev, ...rows])
+      setMeasurements(rows)
       await storeRows(rows)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
@@ -456,7 +533,15 @@ export function ResistanceWindow({ backendUrl, fileInfo, cursors, currentSweep }
         return toRow(r, `sweep ${swIdx + 1}`, swIdx + 1)
       })
 
-      setMeasurements((prev) => [...prev, ...rows])
+      // Take the last sweep's measurement as the "current" per-series
+      // record so the tree-navigator badge appears.
+      const lastResult = (data.results || [])[(data.results || []).length - 1]
+      if (lastResult) {
+        const swIdx = lastResult.sweep_index ?? 0
+        recordResistancePresence(lastResult, `sweep ${swIdx + 1} (of ${rows.length} run)`)
+      }
+
+      setMeasurements(rows)
       await storeRows(rows)
     } catch (err: any) { setError(err.message) }
     setLoading(false)

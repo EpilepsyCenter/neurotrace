@@ -101,8 +101,10 @@ export interface Viewport {
   end: number    // seconds, exclusive
 }
 
-/** Default viewport length when opening a new sweep (seconds). */
-export const DEFAULT_VIEWPORT_SECONDS = 10
+/** Default viewport length when opening a new sweep (seconds).
+ *  Kept short so the initial trace fetch + render is cheap on long
+ *  continuous recordings; user scrolls / zooms out from there. */
+export const DEFAULT_VIEWPORT_SECONDS = 1
 
 /** Monotonic counter used by refetchViewport to discard stale responses
  *  (e.g. when the user drags the scroll slider, we fire many requests and
@@ -391,8 +393,41 @@ async function _savePersistedEvents(filePath: string, events: Record<string, Eve
 // Shape of the payload is flat, slice-keyed, and intentionally stable —
 // future schema changes bump ``version`` and add a migration block here.
 
-const SIDECAR_VERSION = 1
+const SIDECAR_VERSION = 2
 const SIDECAR_DEBOUNCE_MS = 1000
+
+/** Recording-level metadata used by the Metadata module + Cohort
+ *  Analysis. Tags are arrays so a cell can carry multiple orthogonal
+ *  attributes (genotype + sex + age + treatment) at once. Series
+ *  tags are keyed by ``${group}:${series}`` (HEKA group + series). */
+export interface SidecarMeta {
+  cell_id?: string
+  notes?: string
+  group_tags?: string[]
+  series_tags?: Record<string, string[]>
+  /** When true the "this file has no tags" toast is suppressed for
+   *  this specific recording. Per-file rather than global so users
+   *  don't accidentally turn the prompt off forever. */
+  suppressTagToast?: boolean
+}
+
+/** Status derived from ``SidecarMeta`` for the file-status pill:
+ *
+ *  - ``red``    — no file-level tags. Cell can't be grouped.
+ *  - ``yellow`` — file-level tags present but no series tagged yet.
+ *  - ``green``  — file-level tags present AND ≥ 1 series carries a tag.
+ *
+ *  See ``NeuroTrace_modules_spec.md`` for the rationale (we
+ *  deliberately don't require every series to be tagged). */
+export type MetaStatus = 'red' | 'yellow' | 'green'
+
+export function getMetaStatus(meta: SidecarMeta | null | undefined): MetaStatus {
+  if (!meta || !meta.group_tags || meta.group_tags.length === 0) return 'red'
+  const seriesTags = meta.series_tags ?? {}
+  const anySeriesTagged = Object.values(seriesTags).some((tags) =>
+    Array.isArray(tags) && tags.length > 0)
+  return anySeriesTagged ? 'green' : 'yellow'
+}
 
 type SidecarPayload = {
   format: 'neurotrace-sidecar'
@@ -400,6 +435,10 @@ type SidecarPayload = {
   saved_at?: string
   app_version?: string
   recording_name?: string
+  /** Per-recording metadata — see ``SidecarMeta``. Optional for
+   *  backward-compat with v1 sidecars; absent / empty meta means
+   *  the file shows as red status until the user tags it. */
+  meta?: SidecarMeta
   analyses?: {
     events?: Record<string, EventsData>
     bursts?: Record<string, FieldBurstsData>
@@ -407,6 +446,11 @@ type SidecarPayload = {
     iv_curves?: Record<string, IVCurveData>
     fpsp_curves?: Record<string, FPspData>
     cursor_analyses?: Record<string, CursorAnalysisData>
+    /** Per-series resistance results (Rs, Rin, Cm, τ). Keyed by
+     *  ``${group}:${series}``. Populated by ``runResistanceOnSweep``
+     *  and ``runResistanceOnAverage``; cohort extractor reads from
+     *  here. */
+    resistance?: Record<string, ResistanceResult>
   }
   /** Form / preference state per analysis that doesn't live inside
    *  a per-(group,series) results blob. Flat so future analyses can
@@ -438,6 +482,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
     version: SIDECAR_VERSION,
     app_version: '0.3.0',
     recording_name: state.recording?.filePath?.split(/[/\\]/).pop(),
+    meta: state.recordingMeta ?? undefined,
     analyses: {
       events: state.eventsAnalyses,
       bursts: state.fieldBursts,
@@ -445,6 +490,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
       iv_curves: state.ivCurves,
       fpsp_curves: state.fpspCurves,
       cursor_analyses: state.cursorAnalyses,
+      resistance: state.resistanceResults,
     },
     forms: {
       resistance: state.resistanceForm,
@@ -1453,12 +1499,33 @@ interface AppState {
 
   // Resistance analysis
   resistanceResult: ResistanceResult | null
+  /** Per-series resistance results, keyed by ``${group}:${series}``.
+   *  Lets the tree navigator show a per-series "R" badge so users
+   *  know which series have had resistance computed, and gives the
+   *  cohort-aggregator a sidecar slice to read from later. The
+   *  singleton ``resistanceResult`` above stays as the "currently
+   *  displayed" pointer used by the resistance window. */
+  resistanceResults: Record<string, ResistanceResult>
   /** Resistance-window form state — lifted out of the component so
    *  the sidecar can persist it per recording. ``vStep`` is also
    *  auto-populated from the stimulus protocol when a new series is
    *  picked; users can then override by typing a new value, which
    *  sticks (sidecar save on change). */
   resistanceForm: ResistanceFormState
+
+  /** Recording-level metadata: cell ID, free-text notes, and the
+   *  multi-tag arrays that drive Cohort Analysis grouping. ``null``
+   *  when no recording is loaded. Auto-saved into the sidecar like
+   *  the rest of the per-recording state. */
+  recordingMeta: SidecarMeta | null
+
+  /** ``true`` once the sidecar load (or "no sidecar" determination)
+   *  for the current recording has finished. The tag-prompt toast
+   *  uses this to avoid firing during the brief window between the
+   *  recording being set and the sidecar actually being read off
+   *  disk — without it, every freshly-opened tagged file briefly
+   *  shows "no tags" and the toast pops even on green-status files. */
+  recordingMetaReady: boolean
 
   // Field-burst detection, keyed by `${group}:${series}` so markers can
   // persist across series switches.
@@ -1640,6 +1707,14 @@ interface AppState {
   clearResistanceResult: () => void
   setResistanceForm: (patch: Partial<ResistanceFormState>) => void
 
+  /** Patch the active recording's metadata. Pass undefined values to
+   *  delete a field. Auto-saved through the existing sidecar
+   *  debounce; no explicit save needed. */
+  setRecordingMeta: (patch: Partial<SidecarMeta>) => void
+  /** Replace a single series' tag array (group is HEKA group, not
+   *  experimental group). Pass an empty array to clear. */
+  setSeriesTags: (group: number, series: number, tags: string[]) => void
+
   // Field-burst actions
   /** Run on a single sweep. Result REPLACES any existing bursts for that
    *  (group, series, sweepIndex) triple and APPENDS for new sweep indices. */
@@ -1762,6 +1837,12 @@ interface AppState {
     group: number, series: number, channel: number, sweep: number,
     params: EventsParams,
     template: EventsTemplate | null,
+    /** Optional progress callback. Called once per sweep with a
+     *  fraction in [0, 1]. Used by the EventDetectionWindow to
+     *  render a progress fill on its RUN button — multi-sweep
+     *  detections can take 30-60s on large recordings and the
+     *  user wants to see things moving. */
+    onProgress?: (fraction: number) => void,
   ) => Promise<void>
   /** Fit a biexponential to (t_start_s, t_end_s) in the specified sweep.
    *  Returns the fitted coefficients + the data + the fit curve so the
@@ -1959,6 +2040,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   results: [],
   resistanceResult: null,
+  resistanceResults: {},
   resistanceForm: {
     vStep: 5,
     nExp: 2,
@@ -1968,6 +2050,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     avgTo: 1,
     sweepOne: 1,
   },
+  recordingMeta: null,
+  recordingMetaReady: false,
   fieldBursts: {},
   burstFormParams: {},
   ivCurves: {},
@@ -2353,10 +2437,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       showOverlay: false,
       showAverage: false,
       resistanceResult: null,
+      resistanceResults: {},
       resistanceForm: {
         vStep: 5, nExp: 2, fitDurationMs: 5.0,
         runMode: 'all', avgFrom: 1, avgTo: 1, sweepOne: 1,
       },
+      recordingMeta: null,
+      recordingMetaReady: false,
     })
     try {
       const recording = await apiFetch(backendUrl, '/api/files/open', {
@@ -2378,6 +2465,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       // through to the per-slice prefs loads for back-compat with
       // users whose results are still stored in the Electron prefs
       // file from before v0.3.x.
+      // Track which slices the sidecar populated, so the legacy
+      // prefs hydration below knows which ones still need loading.
+      // Without this, a sidecar with only ``meta`` (e.g. a file the
+      // user tagged via the metadata window before ever running an
+      // analysis) used to overwrite legacy-prefs analyses with empty
+      // dicts and then early-return — losing all prior events / AP /
+      // bursts / IV / fPSP / cursor data until the next prefs save.
+      const sidecarPopulated = {
+        events: false, bursts: false, ap: false, iv: false,
+        fpsp: false, cursor_analyses: false, resistance: false,
+        burst_form: false, excluded: false, averaged: false,
+      }
       if (recording?.filePath) {
         const sidecar = await _loadSidecar(recording.filePath)
         if (sidecar) {
@@ -2385,122 +2484,204 @@ export const useAppStore = create<AppState>((set, get) => ({
           const post = (msg: any) => { try { bc.postMessage(msg) } catch { /* ignore */ } }
           const a = sidecar.analyses ?? {}
           const patch: Partial<AppState> = {}
-          if (a.events) { patch.eventsAnalyses = a.events; post({ type: 'events-update', eventsAnalyses: a.events }) }
-          if (a.bursts) { patch.fieldBursts = a.bursts; post({ type: 'bursts-update', fieldBursts: a.bursts }) }
-          if (a.ap) { patch.apAnalyses = a.ap; post({ type: 'ap-update', apAnalyses: a.ap }) }
-          if (a.iv_curves) { patch.ivCurves = a.iv_curves; post({ type: 'iv-update', ivCurves: a.iv_curves }) }
-          if (a.fpsp_curves) { patch.fpspCurves = a.fpsp_curves; post({ type: 'fpsp-update', fpspCurves: a.fpsp_curves }) }
-          if (a.cursor_analyses) { patch.cursorAnalyses = a.cursor_analyses; post({ type: 'cursor-analyses-update', cursorAnalyses: a.cursor_analyses }) }
-          if (sidecar.burst_form_params) { patch.burstFormParams = sidecar.burst_form_params; post({ type: 'burst-form-params-update', burstFormParams: sidecar.burst_form_params }) }
-          if (sidecar.excluded_sweeps) { patch.excludedSweeps = sidecar.excluded_sweeps; post({ type: 'excluded-update', excludedSweeps: sidecar.excluded_sweeps }) }
-          if (sidecar.averaged_sweeps) { patch.averagedSweeps = sidecar.averaged_sweeps; post({ type: 'averaged-update', averagedSweeps: sidecar.averaged_sweeps }) }
-          if (sidecar.cursors) { patch.cursors = { ...get().cursors, ...sidecar.cursors }; post({ type: 'cursor-update', cursors: patch.cursors }) }
+          // Only patch when the sidecar actually carries data for the
+          // slice. ``Object.keys(...).length > 0`` distinguishes a
+          // populated slice from an empty placeholder dict that earlier
+          // versions (or the metadata-only sidecar path) might have
+          // serialized.
+          if (a.events && Object.keys(a.events).length > 0) {
+            patch.eventsAnalyses = a.events
+            post({ type: 'events-update', eventsAnalyses: a.events })
+            sidecarPopulated.events = true
+          }
+          if (a.bursts && Object.keys(a.bursts).length > 0) {
+            patch.fieldBursts = a.bursts
+            post({ type: 'bursts-update', fieldBursts: a.bursts })
+            sidecarPopulated.bursts = true
+          }
+          if (a.ap && Object.keys(a.ap).length > 0) {
+            patch.apAnalyses = a.ap
+            post({ type: 'ap-update', apAnalyses: a.ap })
+            sidecarPopulated.ap = true
+          }
+          if (a.iv_curves && Object.keys(a.iv_curves).length > 0) {
+            patch.ivCurves = a.iv_curves
+            post({ type: 'iv-update', ivCurves: a.iv_curves })
+            sidecarPopulated.iv = true
+          }
+          if (a.fpsp_curves && Object.keys(a.fpsp_curves).length > 0) {
+            patch.fpspCurves = a.fpsp_curves
+            post({ type: 'fpsp-update', fpspCurves: a.fpsp_curves })
+            sidecarPopulated.fpsp = true
+          }
+          if (a.cursor_analyses && Object.keys(a.cursor_analyses).length > 0) {
+            patch.cursorAnalyses = a.cursor_analyses
+            post({ type: 'cursor-analyses-update', cursorAnalyses: a.cursor_analyses })
+            sidecarPopulated.cursor_analyses = true
+          }
+          if ((a as any).resistance && Object.keys((a as any).resistance).length > 0) {
+            // Per-series resistance results — sidecar-only (no
+            // legacy prefs slice). Hydrating them lights up the
+            // tree-navigator R badge and pre-loads the per-series
+            // result for the resistance window's "previously
+            // computed" view (when added).
+            patch.resistanceResults = (a as any).resistance
+            sidecarPopulated.resistance = true
+          }
+          if (sidecar.burst_form_params && Object.keys(sidecar.burst_form_params).length > 0) {
+            patch.burstFormParams = sidecar.burst_form_params
+            post({ type: 'burst-form-params-update', burstFormParams: sidecar.burst_form_params })
+            sidecarPopulated.burst_form = true
+          }
+          if (sidecar.excluded_sweeps && Object.keys(sidecar.excluded_sweeps).length > 0) {
+            patch.excludedSweeps = sidecar.excluded_sweeps
+            post({ type: 'excluded-update', excludedSweeps: sidecar.excluded_sweeps })
+            sidecarPopulated.excluded = true
+          }
+          if (sidecar.averaged_sweeps && Object.keys(sidecar.averaged_sweeps).length > 0) {
+            patch.averagedSweeps = sidecar.averaged_sweeps
+            post({ type: 'averaged-update', averagedSweeps: sidecar.averaged_sweeps })
+            sidecarPopulated.averaged = true
+          }
+          if (sidecar.cursors) {
+            patch.cursors = { ...get().cursors, ...sidecar.cursors }
+            post({ type: 'cursor-update', cursors: patch.cursors })
+          }
           if (sidecar.forms?.resistance) {
             patch.resistanceForm = { ...get().resistanceForm, ...sidecar.forms.resistance }
           }
+          if (sidecar.meta) {
+            patch.recordingMeta = sidecar.meta
+            // No broadcast — the metadata window will resync on its
+            // own once it lands; meta isn't shared across windows
+            // beyond the eventual metadata UI.
+          }
+          // Mark meta as hydrated so the tag-prompt toast can finally
+          // make a decision based on real data instead of the
+          // transient null state.
+          patch.recordingMetaReady = true
           bc.close()
           if (Object.keys(patch).length > 0) set(patch)
-          // Sidecar hit — skip the legacy prefs-based hydration.
-          await get().selectSweep(0, 0, 0, 0)
-          return
+          // Fall through to the legacy prefs hydration. It only fills
+          // in slices the sidecar didn't carry, so cells that have
+          // both (sidecar wins) work correctly while cells with only
+          // legacy prefs data still surface their analyses.
+        } else {
+          // No sidecar at all — meta load is a no-op; mark ready so
+          // the toast knows it's safe to evaluate.
+          set({ recordingMetaReady: true })
         }
+      } else {
+        set({ recordingMetaReady: true })
       }
 
-      // Legacy hydration path — used when no sidecar exists (fresh
-      // recording or pre-v0.3.x user). Any edits in this session
-      // will write a sidecar on next auto-save, migrating silently.
+      // Legacy hydration path — fills in any slice the sidecar
+      // didn't carry. Used both for files that have no sidecar at
+      // all (pre-v0.3.x recordings) and for files where the sidecar
+      // exists but only carries some slices (e.g. the metadata
+      // module wrote ``meta`` but the user had previously run events
+      // before the sidecar existed). Each slice's load is gated on
+      // ``sidecarPopulated`` so we never overwrite the sidecar's
+      // value with stale prefs data.
       if (recording?.filePath) {
-        const savedBursts = await _loadPersistedBursts(recording.filePath)
-        if (savedBursts) {
-          set({ fieldBursts: savedBursts })
-          // Push to analysis windows if any are open, so they see existing
-          // detections without requiring a re-run.
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.bursts) {
+          const savedBursts = await _loadPersistedBursts(recording.filePath)
+          if (savedBursts) {
+            set({ fieldBursts: savedBursts })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Burst-detection form state (survives window close even without
-        // a Run). Keyed by "g:s" per recording.
-        const savedBurstForm = await _loadPersistedBurstFormParams(recording.filePath)
-        if (savedBurstForm) {
-          set({ burstFormParams: savedBurstForm })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'burst-form-params-update', burstFormParams: savedBurstForm })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.burst_form) {
+          const savedBurstForm = await _loadPersistedBurstFormParams(recording.filePath)
+          if (savedBurstForm) {
+            set({ burstFormParams: savedBurstForm })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'burst-form-params-update', burstFormParams: savedBurstForm })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Same for I-V curves.
-        const savedIV = await _loadPersistedIVCurves(recording.filePath)
-        if (savedIV) {
-          set({ ivCurves: savedIV })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.iv) {
+          const savedIV = await _loadPersistedIVCurves(recording.filePath)
+          if (savedIV) {
+            set({ ivCurves: savedIV })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // fPSP curves.
-        const savedFPsp = await _loadPersistedFPsp(recording.filePath)
-        if (savedFPsp) {
-          set({ fpspCurves: savedFPsp })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.fpsp) {
+          const savedFPsp = await _loadPersistedFPsp(recording.filePath)
+          if (savedFPsp) {
+            set({ fpspCurves: savedFPsp })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Cursor analyses.
-        const savedCursor = await _loadPersistedCursors(recording.filePath)
-        if (savedCursor) {
-          set({ cursorAnalyses: savedCursor })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.cursor_analyses) {
+          const savedCursor = await _loadPersistedCursors(recording.filePath)
+          if (savedCursor) {
+            set({ cursorAnalyses: savedCursor })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Action Potentials analyses.
-        const savedAP = await _loadPersistedAP(recording.filePath)
-        if (savedAP) {
-          set({ apAnalyses: savedAP })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.ap) {
+          const savedAP = await _loadPersistedAP(recording.filePath)
+          if (savedAP) {
+            set({ apAnalyses: savedAP })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Event-detection analyses.
-        const savedEvents = await _loadPersistedEvents(recording.filePath)
-        if (savedEvents) {
-          set({ eventsAnalyses: savedEvents })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'events-update', eventsAnalyses: savedEvents })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.events) {
+          const savedEvents = await _loadPersistedEvents(recording.filePath)
+          if (savedEvents) {
+            set({ eventsAnalyses: savedEvents })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'events-update', eventsAnalyses: savedEvents })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // Excluded sweeps (drop-from-analysis markers).
-        const savedExcluded = await _loadPersistedExcluded(recording.filePath)
-        if (savedExcluded) {
-          set({ excludedSweeps: savedExcluded })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'excluded-update', excludedSweeps: savedExcluded })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.excluded) {
+          const savedExcluded = await _loadPersistedExcluded(recording.filePath)
+          if (savedExcluded) {
+            set({ excludedSweeps: savedExcluded })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'excluded-update', excludedSweeps: savedExcluded })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
-        // User-created averaged sweeps.
-        const savedAveraged = await _loadPersistedAveraged(recording.filePath)
-        if (savedAveraged) {
-          set({ averagedSweeps: savedAveraged })
-          try {
-            const ch = new BroadcastChannel('neurotrace-sync')
-            ch.postMessage({ type: 'averaged-update', averagedSweeps: savedAveraged })
-            ch.close()
-          } catch { /* ignore */ }
+        if (!sidecarPopulated.averaged) {
+          const savedAveraged = await _loadPersistedAveraged(recording.filePath)
+          if (savedAveraged) {
+            set({ averagedSweeps: savedAveraged })
+            try {
+              const ch = new BroadcastChannel('neurotrace-sync')
+              ch.postMessage({ type: 'averaged-update', averagedSweeps: savedAveraged })
+              ch.close()
+            } catch { /* ignore */ }
+          }
         }
       }
       await get().selectSweep(0, 0, 0, 0)
@@ -2543,6 +2724,44 @@ export const useAppStore = create<AppState>((set, get) => ({
         baselineEnd: stimulus.baselineEnd,
         peakStart: stimulus.pulseStart,
         peakEnd: stimulus.pulseEnd,
+      }
+    }
+
+    // When navigating to a series that has stored event-detection
+    // results, mirror the filter the detector ran with into the main
+    // viewer's filter slice. Without this, the displayed trace is
+    // unfiltered while the event markers were computed against the
+    // filtered trace — peaks would visibly miss the trace by a few
+    // samples and amplitudes wouldn't read correctly off the line.
+    //
+    // Field-name shim: ``EventsParams`` uses ``filterLow / filterHigh``
+    // while the main store's ``FilterState`` uses ``lowCutoff /
+    // highCutoff``. Same numbers, different keys.
+    //
+    // Series with no stored events leave the filter alone — switching
+    // away from a filtered series doesn't auto-reset, so the user
+    // can intentionally keep the same filter across series.
+    if (seriesChanged) {
+      const evKey = `${group}:${series}`
+      const evEntry = state.eventsAnalyses[evKey]
+      const evParams = evEntry?.params
+      if (evParams) {
+        const nextFilter: FilterState = {
+          enabled: !!evParams.filterEnabled,
+          type: evParams.filterType,
+          lowCutoff: Number(evParams.filterLow ?? 1),
+          highCutoff: Number(evParams.filterHigh ?? 1000),
+          order: Number(evParams.filterOrder ?? 1),
+        }
+        patch.filter = nextFilter
+        // Echo to other windows so the analysis-window filter strip
+        // stays in lockstep — same broadcast type the detection
+        // window listens for.
+        try {
+          const ch = new BroadcastChannel('neurotrace-sync')
+          ch.postMessage({ type: 'detection-filter', filter: nextFilter })
+          ch.close()
+        } catch { /* ignore */ }
       }
     }
 
@@ -2968,10 +3187,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         }),
       })
       const m = resp.measurement || {}
-      set({
-        resistanceResult: { ...m, source: `sweep ${currentSweep + 1}` },
+      const result = { ...m, source: `sweep ${currentSweep + 1}` }
+      // Also stash into the per-series map so the tree-navigator's
+      // "R" badge lights up and the cohort extractor can later pick
+      // up resistance values from the sidecar.
+      const seriesKey = `${currentGroup}:${currentSeries}`
+      set((s) => ({
+        resistanceResult: result,
+        resistanceResults: { ...s.resistanceResults, [seriesKey]: result },
         loading: false,
-      })
+      }))
     } catch (err: any) {
       set({ error: err.message, loading: false })
     }
@@ -3006,10 +3231,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         sourceLabel = `averaged over ${n} sweeps`
       }
-      set({
-        resistanceResult: { ...m, source: sourceLabel },
+      const result = { ...m, source: sourceLabel }
+      const seriesKey = `${currentGroup}:${currentSeries}`
+      set((s) => ({
+        resistanceResult: result,
+        resistanceResults: { ...s.resistanceResults, [seriesKey]: result },
         loading: false,
-      })
+      }))
     } catch (err: any) {
       set({ error: err.message, loading: false })
     }
@@ -3019,6 +3247,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   setResistanceForm: (patch) => set((s) => ({
     resistanceForm: { ...s.resistanceForm, ...patch },
   })),
+
+  setRecordingMeta: (patch) => set((s) => {
+    const next: SidecarMeta = { ...(s.recordingMeta ?? {}), ...patch }
+    // Strip undefined values so the sidecar doesn't persist explicit
+    // "absent" markers — keeps the JSON tidy and `getMetaStatus`
+    // doesn't have to special-case them.
+    for (const k of Object.keys(next) as (keyof SidecarMeta)[]) {
+      if (next[k] === undefined) delete next[k]
+    }
+    return { recordingMeta: next }
+  }),
+  setSeriesTags: (group, series, tags) => set((s) => {
+    const cleaned = tags.map((t) => t.trim()).filter(Boolean)
+    const meta = { ...(s.recordingMeta ?? {}) }
+    const seriesTags = { ...(meta.series_tags ?? {}) }
+    const key = `${group}:${series}`
+    if (cleaned.length === 0) {
+      delete seriesTags[key]
+    } else {
+      seriesTags[key] = cleaned
+    }
+    meta.series_tags = seriesTags
+    return { recordingMeta: meta }
+  }),
 
   // ---- Field-burst detection ----
 
@@ -3935,7 +4187,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- Events ----
 
-  runEvents: async (group, series, channel, sweep, params, template) => {
+  runEvents: async (group, series, channel, sweep, params, template, onProgress) => {
     const { backendUrl } = get()
     if (!backendUrl) return
     set({ loading: true, error: null })
@@ -4047,13 +4299,59 @@ export const useAppStore = create<AppState>((set, get) => ({
         body.threshold_value = t
       }
 
-      const resp = await fetch(`${backendUrl}/api/events/detect`, {
+      // Streaming detection — NDJSON over POST. The backend yields one
+      // ``{type:"progress", ...}`` line per sweep finished, then a
+      // final ``{type:"result", data:{...}}`` line carrying the same
+      // payload the original synchronous /detect endpoint returned.
+      // Reading the body chunk-by-chunk lets us drive ``onProgress``
+      // for the RUN button's gradual fill.
+      const resp = await fetch(`${backendUrl}/api/events/detect_stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
-      const data = await resp.json()
+      if (!resp.body) throw new Error('Streaming response has no body')
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let data: any = null
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        // Drain complete lines; the trailing fragment stays in ``buf``
+        // until the next chunk arrives.
+        let idx: number
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim()
+          buf = buf.slice(idx + 1)
+          if (!line) continue
+          let parsed: any
+          try { parsed = JSON.parse(line) } catch { continue }
+          if (parsed.type === 'progress') {
+            onProgress?.(Number(parsed.fraction) || 0)
+          } else if (parsed.type === 'result') {
+            data = parsed.data
+          } else if (parsed.type === 'error') {
+            throw new Error(`HTTP ${parsed.status}: ${parsed.detail}`)
+          }
+        }
+      }
+      // Drain any final fragment without a trailing newline (defensive
+      // — the backend always terminates with \n but defensive parsing
+      // is cheap insurance).
+      const tail = buf.trim()
+      if (tail) {
+        try {
+          const parsed = JSON.parse(tail)
+          if (parsed.type === 'result') data = parsed.data
+        } catch { /* ignore */ }
+      }
+      if (!data) throw new Error('Detection completed without a result')
+      // Final 100% tick so the UI button settles full before clearing.
+      onProgress?.(1)
 
       const events: EventRow[] = (data.events ?? []).map((e: any) => ({
         sweep: Number(e.sweep ?? sweep),
@@ -4593,11 +4891,13 @@ let _sidecarRefs = {
   iv: null as any,
   fpsp: null as any,
   cursorAnalyses: null as any,
+  resistanceResults: null as any,
   burstFormParams: null as any,
   excluded: null as any,
   averaged: null as any,
   cursors: null as any,
   resistanceForm: null as any,
+  recordingMeta: null as any,
 }
 useAppStore.subscribe((state) => {
   const filePath = state.recording?.filePath
@@ -4609,11 +4909,13 @@ useAppStore.subscribe((state) => {
     iv: state.ivCurves,
     fpsp: state.fpspCurves,
     cursorAnalyses: state.cursorAnalyses,
+    resistanceResults: state.resistanceResults,
     burstFormParams: state.burstFormParams,
     excluded: state.excludedSweeps,
     averaged: state.averagedSweeps,
     cursors: state.cursors,
     resistanceForm: state.resistanceForm,
+    recordingMeta: state.recordingMeta,
   }
   // Reference-equality check across the tracked slices — avoids
   // re-scheduling on unrelated state churn (e.g. trace fetches).
@@ -4653,11 +4955,21 @@ declare global {
       syncPreferences: Record<string, unknown>
       getBackendUrl: () => Promise<string>
       openFileDialog: () => Promise<string | null>
+      openFolderDialog: (defaultPath?: string) => Promise<string | null>
       saveFileDialog: (defaultName: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
       getPreferences: () => Promise<Record<string, unknown>>
       setPreferences: (prefs: Record<string, unknown>) => Promise<boolean>
       readSidecar: (recordingPath: string) => Promise<Record<string, unknown> | null>
       writeSidecar: (recordingPath: string, payload: Record<string, unknown>) => Promise<boolean>
+      listFolderRecordings: (anchorPath: string) => Promise<{
+        folder: string | null
+        entries: Array<{
+          filePath: string
+          fileName: string
+          hasSidecar: boolean
+          meta?: Record<string, unknown> | null
+        }>
+      }>
       openAnalysisWindow: (type: string) => Promise<boolean>
       closeAnalysisWindow: (type: string) => Promise<boolean>
       getOpenAnalysisWindows: () => Promise<string[]>

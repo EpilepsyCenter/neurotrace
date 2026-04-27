@@ -11,6 +11,8 @@ import { EventDetectionWindow } from './components/AnalysisWindows/EventDetectio
 import { EventsTemplateGeneratorWindow } from './components/AnalysisWindows/EventsTemplateGeneratorWindow'
 import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/EventsTemplateRefinementWindow'
 import { EventsBrowserWindow } from './components/AnalysisWindows/EventsBrowserWindow'
+import { MetadataWindow } from './components/AnalysisWindows/MetadataWindow'
+import { CohortWindow } from './components/AnalysisWindows/CohortWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -151,6 +153,26 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.averagedSweeps) {
             useAppStore.setState({ averagedSweeps: ev.data.averagedSweeps })
           }
+          if (ev.data.resistanceResults) {
+            useAppStore.setState({ resistanceResults: ev.data.resistanceResults })
+          }
+          if (ev.data.recordingMeta !== undefined) {
+            useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          }
+          // The metadata window needs full recording info (filePath +
+          // groups → series labels) to drive its left-pane file list and
+          // the per-series chip rows. Other analysis windows ignore this
+          // field; it's harmless for them.
+          if (ev.data.recording) {
+            useAppStore.setState({ recording: ev.data.recording })
+          }
+        }
+        // Live tag-edit pushes from another window (typically the
+        // metadata window) → adopt into this window's store instance
+        // so the toolbar status dot + any series-tag overlays update
+        // without a round-trip through state-request.
+        if (ev.data?.type === 'meta-update' && ev.data.recordingMeta !== undefined) {
+          useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
         }
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })
@@ -163,6 +185,9 @@ export function AnalysisWindow({ view }: { view: string }) {
         }
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
+        }
+        if (ev.data?.type === 'resistance-update' && ev.data.resistanceResults) {
+          useAppStore.setState({ resistanceResults: ev.data.resistanceResults })
         }
         // Event-detection cross-window sync: sub-windows (template
         // generator, refine) save/select/delete templates into their
@@ -203,6 +228,8 @@ export function AnalysisWindow({ view }: { view: string }) {
     events_template_generator: 'Events — Template Generator',
     events_template_refinement: 'Events — Refine Template',
     events_browser: 'Events — Browser & Overlay',
+    metadata: 'Metadata',
+    cohort_analysis: 'Cohort Analysis',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
     field_potential: 'Field PSP',
@@ -259,6 +286,9 @@ export function AnalysisWindow({ view }: { view: string }) {
             fileInfo={fileInfo}
             cursors={cursors}
             currentSweep={currentSweep}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
+            mainTrace={mainTrace}
           />
         ) : view === 'bursts' ? (
           <FieldBurstWindow
@@ -332,6 +362,15 @@ export function AnalysisWindow({ view }: { view: string }) {
           <EventsBrowserWindow
             backendUrl={backendUrl}
             fileInfo={fileInfo}
+          />
+        ) : view === 'metadata' ? (
+          <MetadataWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+          />
+        ) : view === 'cohort_analysis' ? (
+          <CohortWindow
+            backendUrl={backendUrl}
           />
         ) : (
           <div style={{

@@ -386,6 +386,12 @@ function AveragePlot({
   }, [result])
 
   useEffect(() => {
+    // Depend on ``result`` because the container element only exists
+    // in the rendered tree when ``result`` is truthy (the early-return
+    // path above renders a placeholder with no ref). Without this
+    // dependency the observer was set up at mount when the ref was
+    // still null and never re-attached after the plot div appeared,
+    // so the plot never resized with the window.
     const el = containerRef.current
     if (!el) return
     const ro = new ResizeObserver(() => {
@@ -395,8 +401,22 @@ function AveragePlot({
       if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     })
     ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
+    // Also listen on window resize as a belt-and-braces safeguard for
+    // browsers / Electron versions where the inner ResizeObserver
+    // doesn't fire on parent layout shifts driven purely by chrome
+    // resize.
+    const onWin = () => {
+      const u = plotRef.current
+      if (!u) return
+      const w = el.clientWidth, h = el.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
+    }
+    window.addEventListener('resize', onWin)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', onWin)
+    }
+  }, [result])
 
   if (!result) {
     return (

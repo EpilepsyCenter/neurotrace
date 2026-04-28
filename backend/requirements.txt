@@ -12,7 +12,7 @@ msgpack>=1.1.0
 # pulled in by pingouin's plotting helpers but we use it directly for
 # dot plots + ECDF overlays in Phase B.6.
 pingouin>=0.5.5
-pzfx>=0.4
+pzfx>=0.3.0
 openpyxl>=3.1.0
 pandas>=2.2.0
 matplotlib>=3.9.0

@@ -427,26 +427,75 @@ def extract_bursts(slice_data: dict, sidecar: dict) -> CellExtraction:
 # Resistance extractor (Rs / Rin / Cm / τ)
 # ---------------------------------------------------------------------
 
-def extract_resistance(slice_data: dict, sidecar: dict) -> CellExtraction:
+def extract_resistance(slice_data: list, sidecar: dict) -> CellExtraction:
     """Per-series Rs / Rin / Cm / τ from the Resistance analysis.
 
-    Stored as a single result dict per series (no per-event /
-    per-sweep arrays — the resistance analysis collapses a test
-    pulse to four scalars). Distributions therefore stay empty.
+    Sidecar entry is a list of measurements per series — one row per
+    sweep when the user ran "all sweeps", or one entry per single /
+    averaged run, accumulating across runs within the same series.
+    Cohort scalar = mean across the list.
+
+    Per-cell distributions expose the Rs/Rin trajectories so
+    reviewers can see across-sweep stability of access resistance —
+    the canonical QC figure for whole-cell recordings.
     """
+    rows = slice_data if isinstance(slice_data, list) else []
+
+    rs_vals = [_maybe_float(r.get('rs')) for r in rows]
+    rin_vals = [_maybe_float(r.get('rin')) for r in rows]
+    cm_vals = [_maybe_float(r.get('cm')) for r in rows]
+    tau_vals = [_maybe_float(r.get('tau')) for r in rows]
+    baseline_vals = [_maybe_float(r.get('baseline')) for r in rows]
+    peak_vals = [_maybe_float(r.get('peak_current')) for r in rows]
+    ss_vals = [_maybe_float(r.get('steady_state_current')) for r in rows]
+
     scalars: dict[str, Optional[float]] = {
-        'rs_mohm': _maybe_float(slice_data.get('rs')),
-        'rin_mohm': _maybe_float(slice_data.get('rin')),
-        'cm_pf': _maybe_float(slice_data.get('cm')),
-        'tau_ms': _maybe_float(slice_data.get('tau')),
-        'baseline': _maybe_float(slice_data.get('baseline')),
-        'peak_current': _maybe_float(slice_data.get('peak_current')),
-        'steady_state_current': _maybe_float(slice_data.get('steady_state_current')),
+        'rs_mohm': _mean(rs_vals),
+        'rin_mohm': _mean(rin_vals),
+        'cm_pf': _mean(cm_vals),
+        'tau_ms': _mean(tau_vals),
+        'baseline': _mean(baseline_vals),
+        'peak_current': _mean(peak_vals),
+        'steady_state_current': _mean(ss_vals),
+        # Rs drift (max - min as % of mean) — a standard QC metric
+        # on whole-cell recordings; reviewers ask for it routinely.
+        'rs_drift_pct': _drift_pct(rs_vals),
+        'n_measurements': float(len(rows)),
     }
+
+    distributions: dict[str, list[float]] = {
+        'rs_mohm_trace': _clean(rs_vals),
+        'rin_mohm_trace': _clean(rin_vals),
+        'cm_pf_trace': _clean(cm_vals),
+    }
+
     meta: dict[str, Any] = {
-        'source': slice_data.get('source'),
+        'n_measurements': len(rows),
+        # Time-series-style traces (per-sweep Rs trajectories) so the
+        # cohort UI can render a line-vs-sweep plot, the standard QC
+        # figure for whole-cell stability.
+        'distribution_kinds': {
+            'rs_mohm_trace': 'timeseries',
+            'rin_mohm_trace': 'timeseries',
+            'cm_pf_trace': 'timeseries',
+        },
+        'distribution_counts': {k: len(v) for k, v in distributions.items()},
     }
-    return CellExtraction(scalars=scalars, distributions={}, meta=meta)
+
+    return CellExtraction(scalars=scalars, distributions=distributions, meta=meta)
+
+
+def _drift_pct(xs) -> Optional[float]:
+    """Per-cell drift = (max - min) / |mean| × 100. Tighter
+    convention than CV for "did access resistance run away?". None
+    when fewer than 2 valid samples or mean ≈ 0."""
+    cleaned = _clean(xs)
+    if len(cleaned) < 2:
+        return None
+    mean = float(np.mean(cleaned))
+    if abs(mean) < 1e-12:
+        return None
+    return (max(cleaned) - min(cleaned)) / abs(mean) * 100.0
 
 
 def _maybe_float(v) -> Optional[float]:
@@ -729,10 +778,10 @@ def extract_fpsp_ltp(slice_data: dict, sidecar: dict) -> CellExtraction:
     """
     points = slice_data.get('points') or []
     n_bins = len(points)
+    series_a = slice_data.get('seriesA')
+    series_b = slice_data.get('seriesB')
 
-    # Pick the response metric the user analysed against. PPR /
-    # fpsp_ltp share the same point dict shape — ``slope`` for both
-    # slope-based recipes, ``fepspAmp`` for the amplitude recipe.
+    # Pick the response metric the user analysed against.
     method = (slice_data.get('measurementMethod') or 'full_slope').lower()
     if method == 'amplitude':
         metric_field = 'fepspAmp'
@@ -741,32 +790,64 @@ def extract_fpsp_ltp(slice_data: dict, sidecar: dict) -> CellExtraction:
         metric_field = 'slope'
         metric_label = 'slope'
 
-    # Baseline window from the user's normalisation settings (1-based,
-    # inclusive in the UI). Convert to 0-based slice. Falls back to
-    # "first 10 bins" when the user didn't set one.
-    bf = slice_data.get('normBaselineFrom')
-    bt = slice_data.get('normBaselineTo')
-    if bf is not None and bt is not None and n_bins > 0:
-        baseline_lo = max(0, int(bf) - 1)
-        baseline_hi = min(n_bins, int(bt))
-    else:
-        baseline_lo = 0
-        baseline_hi = min(10, n_bins)
-
-    # Late window: trailing 10 bins. Excludes the baseline window
-    # so a too-short post-induction series doesn't double-count.
-    late_n = 10
-    late_lo = max(baseline_hi, n_bins - late_n)
-    late_hi = n_bins
-
     series_vals_raw = [p.get(metric_field) for p in points]
-    # Magnitude series used for normalisation so the sign of the
-    # underlying slope doesn't matter — works for fEPSPs (negative
-    # slope) and depolarising responses (positive slope) alike.
     series_mag = [abs(v) if v is not None else None for v in series_vals_raw]
 
-    baseline_mag = [v for v in series_mag[baseline_lo:baseline_hi] if v is not None]
-    late_mag = [v for v in series_mag[late_lo:late_hi] if v is not None]
+    # Baseline / late selection: the typical LTP recipe is two
+    # series — a short "baseline" series (seriesA) and a longer
+    # "post-tetanus" series (seriesB). The merged points array is
+    # sorted by (sourceSeries, binIndex), so positional windows like
+    # "first 10 bins" can pull the wrong data when the baseline is
+    # shorter than expected. Two cases:
+    #
+    #   * Two-series LTP (seriesB set): pull baseline from points
+    #     whose ``sourceSeries == seriesA``, late from the trailing
+    #     bins of points whose ``sourceSeries == seriesB``. Robust
+    #     to any ratio of baseline-to-post lengths.
+    #
+    #   * Single-series LTP (no seriesB): the user's
+    #     ``normBaselineFrom`` / ``normBaselineTo`` window into the
+    #     points array IS the baseline; late = trailing N points.
+    #     Same as before this fix.
+    late_n = 10
+
+    if series_b is not None:
+        # Two-series LTP — partition by sourceSeries.
+        baseline_idxs = [i for i, p in enumerate(points)
+                         if p.get('sourceSeries') == series_a]
+        post_idxs = [i for i, p in enumerate(points)
+                     if p.get('sourceSeries') == series_b]
+        baseline_mag = [series_mag[i] for i in baseline_idxs
+                        if series_mag[i] is not None]
+        late_idxs = post_idxs[-late_n:] if post_idxs else []
+        late_mag = [series_mag[i] for i in late_idxs
+                    if series_mag[i] is not None]
+        # Window descriptors for meta — point ranges in the merged
+        # array, 1-based inclusive (matches the format we already
+        # used).
+        baseline_lo = (baseline_idxs[0] + 1) if baseline_idxs else 1
+        baseline_hi = baseline_idxs[-1] + 1 if baseline_idxs else 0
+        late_lo = (late_idxs[0] + 1) if late_idxs else 0
+        late_hi = late_idxs[-1] + 1 if late_idxs else 0
+    else:
+        # Single-series LTP — fall back to the user's normBaseline
+        # window for baseline and trailing-N for late.
+        bf = slice_data.get('normBaselineFrom')
+        bt = slice_data.get('normBaselineTo')
+        if bf is not None and bt is not None and n_bins > 0:
+            baseline_lo_idx = max(0, int(bf) - 1)
+            baseline_hi_idx = min(n_bins, int(bt))
+        else:
+            baseline_lo_idx = 0
+            baseline_hi_idx = min(10, n_bins)
+        baseline_lo = baseline_lo_idx + 1
+        baseline_hi = baseline_hi_idx
+        late_lo_idx = max(baseline_hi_idx, n_bins - late_n)
+        late_lo = late_lo_idx + 1
+        late_hi = n_bins
+        baseline_mag = [v for v in series_mag[baseline_lo_idx:baseline_hi_idx]
+                        if v is not None]
+        late_mag = [v for v in series_mag[late_lo_idx:n_bins] if v is not None]
 
     baseline_response_mean = _mean(baseline_mag)
     late_response_mean = _mean(late_mag)
@@ -819,14 +900,50 @@ def extract_fpsp_ltp(slice_data: dict, sidecar: dict) -> CellExtraction:
         'response_raw_timeseries': _clean(series_vals_raw),
     }
 
+    # Bin-width estimate for the cohort graph's time axis. fPSP
+    # points are aggregated over a number of consecutive sweeps; bin
+    # width = (sweeps per bin) × sweepInterval. Cohort's graph
+    # plotter checks consistency across cells before deciding whether
+    # to render time in minutes vs. bare bin index.
+    sweep_interval_s = float(slice_data.get('sweepIntervalA') or 0)
+    sweeps_per_bin: list[int] = []
+    for p in points:
+        sw = p.get('sweepIndices')
+        if isinstance(sw, list) and sw:
+            sweeps_per_bin.append(len(sw))
+    bin_width_s: Optional[float] = None
+    bins_consistent: Optional[bool] = None
+    if sweep_interval_s > 0 and sweeps_per_bin:
+        # Bin width is consistent if every bin has the same sweep
+        # count. Cohort plotter falls back to bin index when not.
+        bins_consistent = len(set(sweeps_per_bin)) == 1
+        # Mean width is what we report — when inconsistent the
+        # plotter ignores it and uses bin index instead.
+        bin_width_s = sweep_interval_s * float(np.mean(sweeps_per_bin))
+
+    # Induction time = the bin INDEX where post-tetanus data begins.
+    # Best estimate: the bin at the boundary between the user's
+    # baseline window and the rest. Frontend uses this to draw a
+    # vertical "induction" marker on the cohort timeseries plot.
+    induction_bin_idx = baseline_hi  # bin index (0-based) of first post-baseline bin
+
     meta: dict[str, Any] = {
         'n_bins': n_bins,
         'baseline_window_bins': [baseline_lo + 1, baseline_hi],
         'late_window_bins': [late_lo + 1, late_hi],
+        'induction_bin_idx': induction_bin_idx,
+        # Carry the underlying series indices so the cohort can pick
+        # up tags from BOTH the baseline series AND the post-tetanus
+        # series (they're tagged separately by the user; an LTP
+        # experiment spans both).
+        'series_a': slice_data.get('seriesA'),
+        'series_b': slice_data.get('seriesB'),
         'response_unit': slice_data.get('responseUnit'),
         'measurement_method': method,
         'metric_label': metric_label,
         'mode': slice_data.get('mode'),
+        'bin_width_s': bin_width_s,
+        'bins_consistent': bins_consistent,
         # Per-distribution plot-kind hint for the cohort UI.
         # ``timeseries`` → group line ± SEM vs. time.
         # ``samples``    → per-cell ECDF overlay (default).
@@ -897,8 +1014,19 @@ DEFAULT_METRICS: dict[str, dict[str, list[str]]] = {
             'freq_hz', 'iei_mean_ms', 'iei_median_ms',
             'amp_mean', 'amp_median',
             'rise_mean_ms', 'decay_mean_ms', 'tau_decay_mean_ms',
+            'half_width_mean_ms', 'auc_mean',
         ],
-        'distributions': ['iei_ms', 'amp'],
+        # The events extractor produces per-event arrays for every
+        # kinetic measurement, not just IEI / amplitude — surface
+        # them all here so the cohort UI's distribution panel can
+        # plot ECDFs of rise / decay / tau / half-width / AUC. The
+        # extractor already populates these (see ``extract_events``
+        # above), they were just missing from the metric tree.
+        'distributions': [
+            'iei_ms', 'amp',
+            'rise_ms', 'decay_ms', 'tau_decay_ms',
+            'half_width_ms', 'auc',
+        ],
     },
     'ap': {
         'scalars': [
@@ -1058,6 +1186,7 @@ def aggregate_folder(
         group_tags = list(meta.get('group_tags') or [])
         series_tags = dict(meta.get('series_tags') or {})
         cell_id = meta.get('cell_id')
+        animal_id = meta.get('animal_id')
 
         if not group_tags:
             # Cohort comparisons are tag-driven — a file with no
@@ -1070,7 +1199,7 @@ def aggregate_folder(
             continue
 
         analyses = sidecar.get('analyses') or {}
-        slices = analyses.get(sidecar_key) or {}
+        all_slices = analyses.get(sidecar_key) or {}
         # When a mode filter is active (e.g. cohort type ``fpsp_ppr``
         # only wants ``ppr`` slices), trim before the empty check so a
         # cell with only an LTP slice gets reported under
@@ -1078,13 +1207,45 @@ def aggregate_folder(
         # silently contributing nothing.
         if mode_filter is not None:
             slices = {
-                k: v for k, v in slices.items()
+                k: v for k, v in all_slices.items()
                 if (v.get('mode') or '').lower() == mode_filter
             }
+        else:
+            slices = all_slices
         if not slices:
+            # Diagnostic reason so the UI can show the user exactly
+            # what's happening — "I have analyses!" vs the cohort
+            # saying "no analyses" needs to be explainable. Three
+            # cases:
+            #   1. The whole sidecar has no analyses block
+            #   2. Has the block but no slices in this analysis_type
+            #   3. Has slices but none match the mode filter (lists
+            #      what modes ARE present so the user can spot a
+            #      typo / wrong analysis run)
+            if not analyses:
+                reason = "sidecar has no 'analyses' block"
+            elif not all_slices:
+                reason = (
+                    f"no '{sidecar_key}' slices in sidecar "
+                    f"(present analysis blocks: {sorted(analyses.keys())})"
+                )
+            elif mode_filter is not None:
+                modes_present = sorted({
+                    (v.get('mode') or '<missing>') for v in all_slices.values()
+                })
+                slice_keys = list(all_slices.keys())
+                reason = (
+                    f"{len(all_slices)} slice(s) in '{sidecar_key}' "
+                    f"but none match mode='{mode_filter}'. "
+                    f"modes present: {modes_present}. "
+                    f"slice keys: {slice_keys}"
+                )
+            else:
+                reason = f"no '{sidecar_key}' slices"
             skipped_no_analysis.append({
                 'file_path': recording_path,
                 'file_name': os.path.basename(recording_path),
+                'reason': reason,
             })
             continue
 
@@ -1104,10 +1265,43 @@ def aggregate_folder(
                 })
                 continue
 
+            # Resolve which series_tags entries belong to this cell.
+            # For most analyses series_key matches the series_tags
+            # map key 1:1 (``g:s``). For fpsp the key carries a
+            # mode suffix (``g:s:ltp``) so we strip it; LTP also
+            # spans seriesA AND seriesB, so we union both files'
+            # series-tag sets — that lets the cohort UI's series-
+            # tag matching see "baseline" + "post-tetanus" tags
+            # the user put on the two underlying series.
+            specific_tags: list[str] = []
+            tag_lookup_keys: list[str] = []
+            if analysis_type.startswith('fpsp_'):
+                parts = series_key.split(':')
+                if len(parts) >= 2:
+                    g = parts[0]
+                    series_a = parts[1]
+                    tag_lookup_keys.append(f'{g}:{series_a}')
+                # LTP: also include seriesB's tags. seriesB lives
+                # inside the slice (``slice_data.seriesB``); for
+                # I-O / PPR there's no seriesB so this is a no-op.
+                series_b = slice_data.get('seriesB')
+                if series_b is not None and len(parts) >= 1:
+                    tag_lookup_keys.append(f'{parts[0]}:{int(series_b)}')
+            else:
+                tag_lookup_keys.append(series_key)
+            seen_tag = set()
+            for k in tag_lookup_keys:
+                for t in (series_tags.get(k) or []):
+                    if t.lower() in seen_tag:
+                        continue
+                    seen_tag.add(t.lower())
+                    specific_tags.append(t)
+
             cells.append({
                 'file_path': recording_path,
                 'file_name': os.path.basename(recording_path),
                 'cell_id': cell_id,
+                'animal_id': animal_id,
                 'group_tags': list(group_tags),
                 # Carry the full series_tags map so downstream code can
                 # do its own per-series tag filtering for distribution
@@ -1115,7 +1309,7 @@ def aggregate_folder(
                 # within the same cell.
                 'series_tags': dict(series_tags),
                 'series_key': series_key,
-                'series_specific_tags': list(series_tags.get(series_key) or []),
+                'series_specific_tags': specific_tags,
                 'scalars': extraction.scalars,
                 'distributions': extraction.distributions,
                 'meta': extraction.meta,

@@ -206,6 +206,34 @@ ipcMain.handle('save-file-dialog', async (_event, defaultName: string, filters: 
   return result.canceled ? null : result.filePath
 })
 
+// Write a text file (UTF-8). Used by the cohort export modal for
+// SVG output. Returns ``{ ok }`` so the renderer can show a clear
+// error toast instead of a silent failure.
+ipcMain.handle('write-text-file', (_event, targetPath: string, contents: string) => {
+  try {
+    writeFileSync(targetPath, contents, 'utf-8')
+    return { ok: true }
+  } catch (err) {
+    console.error('Failed to write text file:', targetPath, err)
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+// Write a binary file from base64. Used by the cohort export modal
+// for PNG / PDF output (the backend returns base64-encoded bytes).
+// Decoding lives here in main rather than the renderer to keep the
+// hot path off the React thread for large rasters.
+ipcMain.handle('write-binary-file', (_event, targetPath: string, base64: string) => {
+  try {
+    const buf = Buffer.from(base64, 'base64')
+    writeFileSync(targetPath, buf)
+    return { ok: true }
+  } catch (err) {
+    console.error('Failed to write binary file:', targetPath, err)
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
 ipcMain.handle('get-preferences', () => {
   try {
     const path = prefsFilePath()
@@ -285,6 +313,77 @@ ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<
     try { unlinkSync(sidecarPathFor(recordingPath) + '.tmp') } catch { /* ignore */ }
     return false
   }
+})
+
+// -----------------------------------------------------------------
+// Cohort session files (.neurocohort) — Phase B.9
+// -----------------------------------------------------------------
+//
+// Cohort-level counterpart to the per-recording ``.neurotrace``
+// sidecar. Stores a single cohort run as a portable JSON document:
+// folder + analysis type, wizard state, selected metrics, stats
+// results, graph customisation prefs. Read/written atomically via
+// the same ``.tmp + rename-over`` pattern so a mid-write crash
+// can't corrupt an existing session file. Reads return null on
+// any parse / IO error; the renderer surfaces that as "no
+// session" rather than crashing.
+//
+// Path convention: the renderer picks the path via the standard
+// open / save dialog. By default we suggest
+// ``<folder>/<basename>.neurocohort`` so a cohort folder
+// keeps its session next to the data. Users can save anywhere.
+
+ipcMain.handle('read-cohort-session', (_event, sessionPath: string) => {
+  try {
+    if (!sessionPath) return null
+    if (!existsSync(sessionPath)) return null
+    const raw = readFileSync(sessionPath, 'utf-8')
+    const parsed = JSON.parse(raw)
+    // Shape guard — reject anything that isn't ours.
+    if (parsed && typeof parsed === 'object'
+        && parsed.format === 'neurocohort-session') {
+      return parsed
+    }
+    return null
+  } catch (err) {
+    console.error('Failed to read cohort session:', err)
+    return null
+  }
+})
+
+ipcMain.handle('write-cohort-session', (_event, sessionPath: string, payload: Record<string, unknown>) => {
+  try {
+    if (!sessionPath) return false
+    const tmp = `${sessionPath}.tmp`
+    const withMeta = {
+      format: 'neurocohort-session',
+      version: 1,
+      saved_at: new Date().toISOString(),
+      ...payload,
+    }
+    writeFileSync(tmp, JSON.stringify(withMeta, null, 2), 'utf-8')
+    renameSync(tmp, sessionPath)
+    return true
+  } catch (err) {
+    console.error('Failed to write cohort session:', err)
+    try { unlinkSync(`${sessionPath}.tmp`) } catch { /* ignore */ }
+    return false
+  }
+})
+
+// Dedicated open dialog with the .neurocohort filter pre-set so
+// users see only their session files. Returns the chosen path or
+// null if cancelled.
+ipcMain.handle('open-cohort-session-dialog', async () => {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open cohort session',
+    properties: ['openFile'],
+    filters: [
+      { name: 'NeuroTrace Cohort Session', extensions: ['neurocohort'] },
+    ],
+  })
+  return result.canceled || !result.filePaths.length ? null : result.filePaths[0]
 })
 
 // List recording-shaped files (dat / abf / h5 / nwb / wcp / axgd / smr)

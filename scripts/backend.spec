@@ -22,23 +22,50 @@ for pkg in ('api', 'analysis', 'readers', 'macros', 'utils'):
 # Neo and Myokit both load plugins/data files at import time.
 hidden += collect_submodules('neo')
 hidden += collect_submodules('myokit')
+# Cohort Analysis (Phase B) deps. Several have lazy plugin loaders
+# or runtime-discovered submodules PyInstaller's static analysis
+# misses on its own. Listed explicitly so the bundled backend has
+# everything pingouin / matplotlib / openpyxl / pzfx need at import
+# time.
+hidden += collect_submodules('pingouin')
+hidden += collect_submodules('pandas')
+hidden += collect_submodules('matplotlib')
+hidden += collect_submodules('openpyxl')
+hidden += collect_submodules('pzfx')
+hidden += collect_submodules('scipy')
 
 datas = []
 datas += collect_data_files('neo')
 datas += collect_data_files('myokit')
+# matplotlib carries its own bundled fonts + style sheets; pingouin
+# and pzfx ship CSV / XML templates the runtime reads from disk.
+# Without these the imports succeed but the first call into the
+# library fails with "no such file" deep inside the package.
+datas += collect_data_files('matplotlib')
+datas += collect_data_files('pingouin')
+datas += collect_data_files('pzfx')
+# Bundled JetBrains Mono — used by cohort_graphs to render every
+# matplotlib chart in the app's mono. ``backend/assets/fonts/`` is
+# read by ``backend/utils/fonts.py`` via a path relative to its
+# own __file__, so we ship the directory verbatim.
+datas += [(str(BACKEND / 'assets' / 'fonts'), 'assets/fonts')]
 
 # The base conda env includes deeplabcut/torch/PyQt/etc. — PyInstaller's
 # module-graph pulls them in transitively through optional neo/scipy
 # hooks. None are used by NeuroTrace, so drop them aggressively.
+# NOTE: ``pandas`` and ``matplotlib`` USED to live in this list back
+# when the only entry points were trace-viewing. Phase B (Cohort
+# Analysis) made both of them required at runtime — pingouin pulls
+# in pandas, and we use matplotlib directly for graph rendering.
+# Removing them here was the fix for the v0.4.0 build crash
+# ("ModuleNotFoundError: No module named 'pandas'").
 EXCLUDES = [
     'tkinter',
-    'matplotlib',
     'IPython', 'ipykernel', 'jupyter', 'jupyter_core', 'jupyter_client',
     'notebook', 'nbconvert', 'nbformat',
     'torch', 'torchvision', 'torchaudio',
     'tensorflow', 'keras', 'jax', 'jaxlib',
     'sklearn', 'sympy',
-    'pandas',
     'pyarrow',
     'PIL', 'Pillow',
     'PyQt5', 'PyQt6', 'PySide2', 'PySide6',

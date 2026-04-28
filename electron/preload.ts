@@ -38,6 +38,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('open-folder-dialog', defaultPath),
   saveFileDialog: (defaultName: string, filters?: { name: string; extensions: string[] }[]): Promise<string | null> =>
     ipcRenderer.invoke('save-file-dialog', defaultName, filters),
+
+  // Write a UTF-8 text file at ``targetPath`` (already chosen via
+  // ``saveFileDialog``). Returns ``{ ok: true }`` on success or
+  // ``{ ok: false, error }`` on failure. Used by the cohort modal's
+  // SVG export, where the renderer holds the SVG string and just
+  // needs to flush it to the user's chosen path.
+  writeTextFile: (targetPath: string, contents: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('write-text-file', targetPath, contents),
+
+  // Write a binary file at ``targetPath`` from a base64-encoded
+  // payload. The base64 hop avoids passing raw Buffers across the
+  // IPC bridge (renderer → main loses the Buffer type). Used for
+  // PNG / PDF exports — the backend returns base64, the renderer
+  // forwards it through this channel to the main process which
+  // decodes once and writes.
+  writeBinaryFile: (targetPath: string, base64: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('write-binary-file', targetPath, base64),
   getPreferences: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('get-preferences'),
   setPreferences: (prefs: Record<string, unknown>): Promise<boolean> => ipcRenderer.invoke('set-preferences', prefs),
 
@@ -49,6 +66,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('read-sidecar', recordingPath),
   writeSidecar: (recordingPath: string, payload: Record<string, unknown>): Promise<boolean> =>
     ipcRenderer.invoke('write-sidecar', recordingPath, payload),
+
+  // Cohort session (.neurocohort) — Phase B.9 portable cohort-run
+  // file. Same atomic-write semantics as the per-recording sidecar.
+  // Reads return null on missing / corrupt / wrong-format files so
+  // the renderer can treat absence as "no session" without throwing.
+  readCohortSession: (sessionPath: string): Promise<Record<string, unknown> | null> =>
+    ipcRenderer.invoke('read-cohort-session', sessionPath),
+  writeCohortSession: (sessionPath: string, payload: Record<string, unknown>): Promise<boolean> =>
+    ipcRenderer.invoke('write-cohort-session', sessionPath, payload),
+  openCohortSessionDialog: (): Promise<string | null> =>
+    ipcRenderer.invoke('open-cohort-session-dialog'),
 
   // Folder listing for the Metadata window's left pane. ``anchorPath``
   // can be either a folder or a file inside it (we use the active

@@ -31,6 +31,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from analysis import cohort
+from analysis import cohort_stats
+from analysis import cohort_graphs
+from analysis import cohort_export
 
 router = APIRouter()
 
@@ -91,3 +94,304 @@ def aggregate(req: AggregateRequest) -> dict:
     except ValueError as exc:
         # Unknown analysis_type — caller error.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------
+# /run_stats — Pingouin runner driven by the wizard's design
+# ---------------------------------------------------------------------
+
+class StatsGroup(BaseModel):
+    tag: str
+    values: list[Optional[float]]
+
+
+class RunStatsRequest(BaseModel):
+    groups: list[StatsGroup] = Field(
+        ..., description=(
+            "One entry per group: {tag, values}. For paired designs "
+            "the values lists must align row-by-row across groups."
+        ),
+    )
+    design_kind: str = Field(
+        ..., description=(
+            "One of: 'unpaired_2', 'oneway_n', 'paired_2', 'rm_n'. "
+            "The cohort wizard derives this from the comparison "
+            "shape + group count."
+        ),
+    )
+    test_override: str = Field(
+        default='auto',
+        description=(
+            "'auto' lets Shapiro-Wilk decide parametric vs non-parametric. "
+            "'parametric' / 'nonparametric' force one branch and skip "
+            "the normality check."
+        ),
+    )
+    metric: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional metric name being tested — echoed back in the "
+            "result so the cohort UI / export layer can attribute "
+            "the row without a side channel."
+        ),
+    )
+
+
+@router.post("/run_stats")
+def run_stats(req: RunStatsRequest) -> dict:
+    """Run a single statistical test for the wizard's current design.
+
+    Pingouin lives behind this endpoint — heavy import, slow first
+    call after the backend boots. Subsequent calls are cheap.
+    """
+    payload = cohort_stats.run_test(
+        groups=[g.model_dump() for g in req.groups],
+        design_kind=req.design_kind,
+        test_override=req.test_override,
+    )
+    if req.metric is not None:
+        payload['metric'] = req.metric
+    return payload
+
+
+# ---------------------------------------------------------------------
+# /render_graph — matplotlib plot rendering for the cohort UI
+# ---------------------------------------------------------------------
+
+class GraphGroup(BaseModel):
+    tag: str
+    # Per-cell value arrays. For scalar plots each cell is a singleton
+    # (or a multi-row file averaged downstream). For distributions
+    # each cell is the full pooled-events array. For time-series each
+    # cell is the bin-by-bin trace.
+    values_per_cell: list[list[Optional[float]]]
+    # Optional per-cell bin-width estimate (timeseries only). The
+    # graph backend collapses these across cells to decide whether
+    # the time axis can be rendered in minutes vs bin index.
+    bin_width_s: Optional[float] = None
+    bins_consistent: Optional[bool] = None
+    # Per-cell induction bin index (timeseries / LTP only). Frontend
+    # pulls this from each cell's meta when assembling the graph
+    # request; the backend draws a vertical "induction" marker at
+    # the median across cells.
+    induction_bin_idx: Optional[float] = None
+    color: Optional[str] = None
+
+
+class GraphOverrides(BaseModel):
+    """User-driven axis / label / color / scale overrides from the
+    fullscreen modal. All fields are optional; None means
+    "keep the plot's own default". The modal builds this object from
+    its sidebar form state and posts it back with the same payload
+    used for the inline render — server replays the plot with the
+    edits applied."""
+    # Each list is ``[min, max]``; either element may be ``None`` so
+    # the user can pin one bound and leave the other on autoscale.
+    xlim: Optional[list[Optional[float]]] = Field(
+        default=None, description="[min|null, max|null]")
+    ylim: Optional[list[Optional[float]]] = Field(
+        default=None, description="[min|null, max|null]")
+    xlabel: Optional[str] = None
+    ylabel: Optional[str] = None
+    title: Optional[str] = None
+    log_x: bool = False
+    log_y: bool = False
+    # Per-group display name ({canonical_tag: visible_name}). Empty
+    # string clears (falls back to canonical).
+    group_labels: Optional[dict[str, str]] = None
+    # Per-group color ({canonical_tag: '#RRGGBB'}). Hex strings only.
+    group_colors: Optional[dict[str, str]] = None
+    # Distribution-only flags. Ignored by scalar / timeseries plots,
+    # so it's safe to leave them at their defaults always — they
+    # only kick in when ``kind == 'distribution'``.
+    abs_values: bool = Field(
+        default=False,
+        description="Fold values to |x| before building ECDFs. "
+                    "Useful for signed amplitudes (EPSCs at negative "
+                    "pA) so a log-X plot makes sense.",
+    )
+    show_individuals: bool = Field(
+        default=True,
+        description="Show faded per-cell ECDFs.",
+    )
+    show_mean: bool = Field(
+        default=True,
+        description="Show bold per-group mean ECDF.",
+    )
+    gaussian_overlay: bool = Field(
+        default=False,
+        description="Overlay each group's fitted N(μ, σ) CDF as a "
+                    "dashed line — visual normality reference.",
+    )
+    # Scalar-only flags. Ignored by distribution / timeseries plots.
+    central_tendency: Optional[str] = Field(
+        default=None,
+        description="'mean' (default) or 'median' — line drawn "
+                    "through each strip in scalar plots.",
+    )
+    error_bar: Optional[str] = Field(
+        default=None,
+        description="Whisker style. Scalar plots accept 'sem' "
+                    "(default), 'sd', 'ci95', 'iqr', 'range', 'none'. "
+                    "Timeseries plots accept 'sem' (default), 'sd', "
+                    "'ci95', 'none' — IQR / range don't make sense "
+                    "for per-bin error bars.",
+    )
+    # Timeseries-only flags. Ignored by scalar / distribution plots.
+    connect_lines: bool = Field(
+        default=False,
+        description="Draw a thin line connecting bin means across "
+                    "time. Off by default — markers + error bars is "
+                    "the canonical LTP / fEPSP plot style.",
+    )
+    show_band: bool = Field(
+        default=False,
+        description="Draw a filled ±spread band under the markers. "
+                    "Off by default — discrete error bars are clearer "
+                    "at LTP-bin granularity.",
+    )
+    align_to_induction: bool = Field(
+        default=True,
+        description="Re-zero each group's time axis at its own "
+                    "induction bin so baseline bins have negative "
+                    "time and tetanus is at 0 (canonical LTP plot "
+                    "layout). Falls through to absolute time when "
+                    "induction metadata is absent.",
+    )
+
+
+class RenderGraphRequest(BaseModel):
+    kind: str = Field(..., description="'scalar' | 'distribution' | 'timeseries'")
+    groups: list[GraphGroup]
+    title: str = ''
+    ylabel: str = ''
+    xlabel: str = ''
+    theme: str = Field(default='dark', description="'light' | 'dark'")
+    palette: Optional[list[str]] = None
+    p_value: Optional[float] = None
+    posthoc: Optional[list[dict]] = None
+    test_label: Optional[str] = None
+    reference_y: Optional[float] = Field(
+        default=None,
+        description="Optional horizontal reference line (e.g. 1.0 for LTP normalized).",
+    )
+    output_format: str = Field(
+        default='svg',
+        description="'svg' (inline-friendly), 'png' (base64), or 'pdf' (base64).",
+    )
+    overrides: Optional[GraphOverrides] = None
+    # Modal renders use a larger figure than the inline card (the
+    # modal canvas is much wider). When None each plot kind keeps
+    # its 5.5×4 in default.
+    width_in: Optional[float] = None
+    height_in: Optional[float] = None
+    # PNG / PDF resolution. SVG ignores this (vector). Default 150
+    # for inline preview; 300 for export-quality.
+    dpi: int = 150
+
+
+@router.post("/render_graph")
+def render_graph(req: RenderGraphRequest) -> dict:
+    """Render a single cohort plot. Matplotlib is heavy on first
+    call after backend boot; subsequent calls are fast."""
+    # Pull bin-width metadata onto the timeseries plot path. The
+    # graph dispatcher does the consistency check across these.
+    bin_widths_s = [g.bin_width_s for g in req.groups]
+    bins_consistent = [g.bins_consistent for g in req.groups]
+    induction_bins = [g.induction_bin_idx for g in req.groups]
+    overrides_dict = req.overrides.model_dump() if req.overrides is not None else None
+    return cohort_graphs.render_graph(
+        kind=req.kind,
+        groups=[g.model_dump() for g in req.groups],
+        title=req.title,
+        ylabel=req.ylabel,
+        xlabel=req.xlabel,
+        theme=req.theme,
+        palette=req.palette,
+        p_value=req.p_value,
+        posthoc=req.posthoc,
+        test_label=req.test_label,
+        bin_widths_s=bin_widths_s,
+        bins_consistent=bins_consistent,
+        reference_y=req.reference_y,
+        induction_bins=induction_bins,
+        output_format=req.output_format,
+        overrides=overrides_dict,
+        width_in=req.width_in,
+        height_in=req.height_in,
+        dpi=req.dpi,
+    )
+
+
+# ---------------------------------------------------------------------
+# /export — cohort export to Excel + Prism. Phase B.8.
+# ---------------------------------------------------------------------
+
+class ExportRequest(BaseModel):
+    """Cohort export payload. The frontend sends the in-memory
+    aggregate result (from ``/aggregate``) and optionally the stats
+    map (from per-metric ``/run_stats`` calls) — we don't re-compute
+    server-side, since that would cause inconsistency between what
+    the user sees on screen and what they download.
+
+    ``format``:
+      * ``excel_summary`` — multi-sheet workbook (cohort meta, stats,
+        wide cells, long cells, one sheet per distribution metric).
+      * ``excel_cells``   — single-sheet ``_cells.xlsx`` per-cell wide
+        format. The shape stats packages expect.
+      * ``prism``         — GraphPad Prism ``.pzfx`` project file.
+        One Grouped table per scalar metric, one Column table per
+        (distribution metric × group).
+    """
+    format: str = Field(..., description="'excel_summary' | 'excel_cells' | 'prism'")
+    aggregate: dict
+    stats: Optional[dict] = None
+    selected_metrics: Optional[list[str]] = None
+    design: Optional[dict] = None
+    # Wizard's grouped cells — the source of truth for which cells
+    # appear in each analysis card. When present, the export uses
+    # this directly without re-filtering server-side, so the file
+    # exactly matches the on-screen cards.
+    design_groups: Optional[list[dict]] = None
+
+
+@router.post("/export")
+def export(req: ExportRequest) -> dict:
+    """Render the cohort to one of three file formats and return
+    base64-encoded bytes plus a sensible default filename.
+
+    The renderer base64-decodes via ``writeBinaryFile`` IPC and
+    writes to whatever path the user picked in the save dialog.
+    Single round-trip, no temp files server-side.
+    """
+    import base64
+    fmt = req.format
+    if fmt == 'excel_summary':
+        data = cohort_export.write_excel_summary(
+            req.aggregate, req.stats, req.selected_metrics, req.design,
+            design_groups=req.design_groups,
+        )
+        return {
+            'format': 'xlsx',
+            'filename': 'cohort_summary.xlsx',
+            'base64': base64.b64encode(data).decode('ascii'),
+        }
+    if fmt == 'excel_cells':
+        data = cohort_export.write_excel_cells(
+            req.aggregate, req.design, design_groups=req.design_groups,
+        )
+        return {
+            'format': 'xlsx',
+            'filename': 'cohort_cells.xlsx',
+            'base64': base64.b64encode(data).decode('ascii'),
+        }
+    if fmt == 'prism':
+        data = cohort_export.write_prism_pzfx(
+            req.aggregate, req.design, design_groups=req.design_groups,
+        )
+        return {
+            'format': 'pzfx',
+            'filename': 'cohort.pzfx',
+            'base64': base64.b64encode(data).decode('ascii'),
+        }
+    raise HTTPException(status_code=400, detail=f"Unknown export format: {fmt!r}")

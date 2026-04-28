@@ -327,7 +327,23 @@ export function CursorPanel() {
         // metadata window can't write to disk itself because it
         // doesn't own the recording.filePath link.
         if (ev.data?.type === 'meta-update' && ev.data.recordingMeta !== undefined) {
-          useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          // File-path guard: drop the update unless it targets the
+          // currently-loaded recording. Without this, a tag edit
+          // racing with an openFile would land the previous file's
+          // tags into the new recording's state and silently save
+          // them to the wrong sidecar (the user sees them
+          // "disappear" from the file they thought they tagged).
+          // ``file_path === undefined`` falls through to the
+          // legacy unconditional behavior so older sub-windows
+          // that haven't been rebuilt still work — once everything
+          // ships the verified path, this fallback can go.
+          const targetPath = ev.data.file_path
+          const currentPath = useAppStore.getState().recording?.filePath
+          if (targetPath !== undefined && targetPath !== currentPath) {
+            // Stale broadcast — drop silently.
+          } else {
+            useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          }
         }
         // Detection filter pushed from an analysis window → adopt in the
         // main viewer's filter panel so the displayed trace has the same

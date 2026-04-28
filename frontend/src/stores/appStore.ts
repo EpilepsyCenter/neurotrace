@@ -101,10 +101,27 @@ export interface Viewport {
   end: number    // seconds, exclusive
 }
 
-/** Default viewport length when opening a new sweep (seconds).
- *  Kept short so the initial trace fetch + render is cheap on long
- *  continuous recordings; user scrolls / zooms out from there. */
+/** Default viewport length when opening a new sweep (seconds) —
+ *  applies only to **continuous-mode** recordings (single very long
+ *  sweep, typically spontaneous-event or field-potential traces of
+ *  many minutes). Episodic recordings (multi-sweep protocol-driven,
+ *  every test pulse / evoked response / fEPSP / AP train) always
+ *  open at full view regardless of per-sweep duration. The 1 s
+ *  window only kicks in to keep initial paint fast on multi-minute
+ *  single-sweep traces. */
 export const DEFAULT_VIEWPORT_SECONDS = 1
+
+/** Threshold (seconds) above which a SINGLE-sweep series is treated
+ *  as a continuous recording. Used only when ``sweepCount === 1`` —
+ *  for multi-sweep series, every sweep opens at full view
+ *  regardless of length, because by definition the protocol
+ *  generated discrete episodes meant to be viewed individually.
+ *
+ *  60 s catches the realistic edge: a single 60+ s sweep is almost
+ *  always a continuous spontaneous-events / field recording; a
+ *  single short sweep is a one-shot evoked response which the user
+ *  wants in full. */
+export const CONTINUOUS_SWEEP_THRESHOLD_S = 60
 
 /** Monotonic counter used by refetchViewport to discard stale responses
  *  (e.g. when the user drags the scroll slider, we fire many requests and
@@ -402,6 +419,14 @@ const SIDECAR_DEBOUNCE_MS = 1000
  *  tags are keyed by ``${group}:${series}`` (HEKA group + series). */
 export interface SidecarMeta {
   cell_id?: string
+  /** Optional animal-of-origin identifier. First-class field rather
+   *  than a tag because animal grouping is a fundamental piece of
+   *  experimental provenance — multiple cells routinely come from
+   *  the same animal, and the cohort module needs an unambiguous
+   *  way to collapse them when the user picks "N = animal". The
+   *  string is opaque (any naming convention works); whatever the
+   *  user types is the grouping key. */
+  animal_id?: string
   notes?: string
   group_tags?: string[]
   series_tags?: Record<string, string[]>
@@ -447,10 +472,11 @@ type SidecarPayload = {
     fpsp_curves?: Record<string, FPspData>
     cursor_analyses?: Record<string, CursorAnalysisData>
     /** Per-series resistance results (Rs, Rin, Cm, τ). Keyed by
-     *  ``${group}:${series}``. Populated by ``runResistanceOnSweep``
-     *  and ``runResistanceOnAverage``; cohort extractor reads from
-     *  here. */
-    resistance?: Record<string, ResistanceResult>
+     *  ``${group}:${series}``. Each entry is an array — one row per
+     *  sweep (cross-sweep mode) or one row total (single / averaged
+     *  modes). Cohort extractor takes the mean across the array
+     *  for its per-cell scalar. */
+    resistance?: Record<string, ResistanceResult[]>
   }
   /** Form / preference state per analysis that doesn't live inside
    *  a per-(group,series) results blob. Flat so future analyses can
@@ -480,7 +506,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
   return {
     format: 'neurotrace-sidecar',
     version: SIDECAR_VERSION,
-    app_version: '0.3.0',
+    app_version: '0.4.0',
     recording_name: state.recording?.filePath?.split(/[/\\]/).pop(),
     meta: state.recordingMeta ?? undefined,
     analyses: {
@@ -506,7 +532,28 @@ async function _saveSidecar(filePath: string, state: AppState): Promise<void> {
   const api = window.electronAPI
   if (!api?.writeSidecar || !filePath) return
   try {
-    await api.writeSidecar(filePath, _sidecarPayloadFromState(state) as unknown as Record<string, unknown>)
+    const payload = _sidecarPayloadFromState(state)
+    // Meta block is owned by the metadata window — it writes
+    // synchronously via writeSidecar at the moment of each user
+    // edit. Main's debounced auto-save fires for unrelated state
+    // changes (cursor moves, analyses, …) and would otherwise
+    // overwrite a freshly-typed tag with main's stale
+    // ``state.recordingMeta`` (the cross-window broadcast that
+    // refreshes main's view may not have arrived yet).
+    //
+    // Prevent that by always preserving whatever's currently on
+    // disk. Read existing → if it has a meta block, use it
+    // verbatim. Falls back to state.recordingMeta only when the
+    // disk has no sidecar yet (first write).
+    if (api.readSidecar) {
+      try {
+        const existing = await api.readSidecar(filePath)
+        if (existing && (existing as any).meta) {
+          payload.meta = (existing as any).meta as SidecarMeta
+        }
+      } catch { /* ignore — fall back to state's meta */ }
+    }
+    await api.writeSidecar(filePath, payload as unknown as Record<string, unknown>)
   } catch { /* ignore */ }
 }
 
@@ -1500,12 +1547,25 @@ interface AppState {
   // Resistance analysis
   resistanceResult: ResistanceResult | null
   /** Per-series resistance results, keyed by ``${group}:${series}``.
-   *  Lets the tree navigator show a per-series "R" badge so users
-   *  know which series have had resistance computed, and gives the
-   *  cohort-aggregator a sidecar slice to read from later. The
-   *  singleton ``resistanceResult`` above stays as the "currently
-   *  displayed" pointer used by the resistance window. */
-  resistanceResults: Record<string, ResistanceResult>
+   *  Each entry is the *full set of rows* the user computed in their
+   *  most recent run on that series — one row for single-sweep or
+   *  averaged-sweep runs, N rows for cross-sweep / "all sweeps"
+   *  runs. Replacing instead of appending matches what every other
+   *  per-series analysis does (events, AP, bursts: one stored
+   *  result per series, last-write-wins).
+   *
+   *  Drives:
+   *    * tree-navigator's R badge (any non-empty array lights it)
+   *    * resistance window's table on series switch (rehydrates from
+   *      this so switching series never shows the previous one's
+   *      numbers and never accumulates across runs)
+   *    * cohort extractor (computes mean Rs/Rin/Cm/τ across the
+   *      array for the per-cell scalar)
+   *
+   *  Sidecar storage uses the same shape; v0.3.x sidecars that wrote
+   *  this field as a single object before this change get migrated
+   *  to ``[obj]`` on load. */
+  resistanceResults: Record<string, ResistanceResult[]>
   /** Resistance-window form state — lifted out of the component so
    *  the sidecar can persist it per recording. ``vStep`` is also
    *  auto-populated from the stimulus protocol when a new series is
@@ -2520,11 +2580,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             sidecarPopulated.cursor_analyses = true
           }
           if ((a as any).resistance && Object.keys((a as any).resistance).length > 0) {
-            // Per-series resistance results — sidecar-only (no
-            // legacy prefs slice). Hydrating them lights up the
-            // tree-navigator R badge and pre-loads the per-series
-            // result for the resistance window's "previously
-            // computed" view (when added).
             patch.resistanceResults = (a as any).resistance
             sidecarPopulated.resistance = true
           }
@@ -2583,11 +2638,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // before the sidecar existed). Each slice's load is gated on
       // ``sidecarPopulated`` so we never overwrite the sidecar's
       // value with stale prefs data.
+      let migratedFromPrefs = false
       if (recording?.filePath) {
         if (!sidecarPopulated.bursts) {
           const savedBursts = await _loadPersistedBursts(recording.filePath)
           if (savedBursts) {
             set({ fieldBursts: savedBursts })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
@@ -2599,6 +2656,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedBurstForm = await _loadPersistedBurstFormParams(recording.filePath)
           if (savedBurstForm) {
             set({ burstFormParams: savedBurstForm })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'burst-form-params-update', burstFormParams: savedBurstForm })
@@ -2610,6 +2668,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedIV = await _loadPersistedIVCurves(recording.filePath)
           if (savedIV) {
             set({ ivCurves: savedIV })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
@@ -2621,6 +2680,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedFPsp = await _loadPersistedFPsp(recording.filePath)
           if (savedFPsp) {
             set({ fpspCurves: savedFPsp })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
@@ -2632,6 +2692,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedCursor = await _loadPersistedCursors(recording.filePath)
           if (savedCursor) {
             set({ cursorAnalyses: savedCursor })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
@@ -2643,6 +2704,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedAP = await _loadPersistedAP(recording.filePath)
           if (savedAP) {
             set({ apAnalyses: savedAP })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
@@ -2654,6 +2716,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedEvents = await _loadPersistedEvents(recording.filePath)
           if (savedEvents) {
             set({ eventsAnalyses: savedEvents })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'events-update', eventsAnalyses: savedEvents })
@@ -2665,6 +2728,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedExcluded = await _loadPersistedExcluded(recording.filePath)
           if (savedExcluded) {
             set({ excludedSweeps: savedExcluded })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'excluded-update', excludedSweeps: savedExcluded })
@@ -2676,12 +2740,25 @@ export const useAppStore = create<AppState>((set, get) => ({
           const savedAveraged = await _loadPersistedAveraged(recording.filePath)
           if (savedAveraged) {
             set({ averagedSweeps: savedAveraged })
+            migratedFromPrefs = true
             try {
               const ch = new BroadcastChannel('neurotrace-sync')
               ch.postMessage({ type: 'averaged-update', averagedSweeps: savedAveraged })
               ch.close()
             } catch { /* ignore */ }
           }
+        }
+
+        // Eager prefs → sidecar migration. When legacy hydration
+        // pulled anything from the prefs file, force an immediate
+        // synchronous writeSidecar so the data lands in the
+        // ``.neurotrace`` sidecar BEFORE the user can navigate
+        // away. The debounced auto-save was supposed to do this
+        // but a subscriber-timing race left some prefs data
+        // stranded — the cohort backend reads only sidecars, so it
+        // never saw those analyses.
+        if (migratedFromPrefs) {
+          await _saveSidecar(recording.filePath, get())
         }
       }
       await get().selectSweep(0, 0, 0, 0)
@@ -2774,12 +2851,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Pick the viewport for THIS fetch:
       // - Same sweep (e.g. cursor drag): keep whatever the user has.
-      // - Different sweep: optimistically request [0, DEFAULT] — the backend
-      //   clamps to the actual sweep duration, so for short sweeps we get
-      //   everything in one round-trip with no waste.
-      // This avoids a double-fetch: we don't issue a full-range probe first.
+      // - Different sweep: probe with a NULL viewport so the backend
+      //   returns the full sweep, decimated to ``viewportMaxPoints``.
+      //   The decision to actually USE Full vs. windowed mode happens
+      //   after the response, based on series TYPE (sweepCount).
       const viewportForFetch: Viewport | null = sweepChanged
-        ? { start: 0, end: DEFAULT_VIEWPORT_SECONDS }
+        ? null
         : prevViewport
 
       const [traceResp, stimResp] = await Promise.all([
@@ -2792,11 +2869,32 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const duration: number = traceResp.duration ?? 0
 
-      // If the actual sweep is shorter than the default window, there's no
-      // viewport to speak of — switch to "Full" mode so the slider/bar know.
+      // Decide the post-fetch viewport mode based on series TYPE, not
+      // sweep duration:
+      //   * Episodic (sweepCount > 1): every sweep is a discrete
+      //     protocol-driven episode (test pulses, evoked responses,
+      //     fEPSPs, AP trains). Always open at full view regardless
+      //     of length — the user wants to see the whole episode.
+      //   * Continuous (sweepCount === 1) AND long enough to qualify
+      //     (duration > CONTINUOUS_SWEEP_THRESHOLD_S): a single
+      //     multi-minute sweep is almost always a spontaneous-events
+      //     or field recording. Open windowed at
+      //     DEFAULT_VIEWPORT_SECONDS so the user gets a navigable
+      //     starting view instead of a useless multi-minute aggregate.
+      //   * Single short sweep: still a one-shot evoked response →
+      //     full view.
+      // Same-sweep changes (cursor drag etc.) keep ``prevViewport``
+      // untouched.
+      const seriesInfo = recording.groups[group]?.series[series]
+      const sweepCount = seriesInfo?.sweepCount ?? 1
+      const isContinuous =
+        sweepCount === 1 && duration > CONTINUOUS_SWEEP_THRESHOLD_S
+
       let viewportNow: Viewport | null = viewportForFetch
-      if (sweepChanged && duration > 0 && duration <= DEFAULT_VIEWPORT_SECONDS) {
-        viewportNow = null
+      if (sweepChanged) {
+        viewportNow = isContinuous
+          ? { start: 0, end: DEFAULT_VIEWPORT_SECONDS }
+          : null
       }
 
       const updates: Partial<AppState> = {
@@ -4778,11 +4876,25 @@ useAppStore.subscribe((state) => {
   }
 })
 
+// All per-file persistence subscribers below skip while ``loading``
+// is true. ``openFile`` sets ``loading: true`` while it's in the
+// flush → clear-state → fetch → set-recording transition. Without
+// this gate, the ``set({ fpspCurves: {}, ... })`` clear call fired
+// the subscribers WITH state.recording.filePath still pointing at
+// the OLD file — they'd write empty data to the old file's prefs
+// entry (or schedule a phantom sidecar save with stale captured
+// path), wiping data the flush had just written. Same root cause
+// for the cohort backend seeing empty sidecars 10 minutes after
+// the user ran the analyses: the prefs subscriber wrote the
+// analyses, the sidecar one couldn't keep up across rapid file
+// switches because of the same race.
+
 // Burst-detection form state — writes whenever the user tweaks any
 // field in the FieldBurstWindow, so closing and reopening the window
 // (or restarting the app) restores the same method / params per series.
 let _lastPersistedBurstFormRef: Record<string, FieldBurstsParams> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.burstFormParams === _lastPersistedBurstFormRef) return
   _lastPersistedBurstFormRef = state.burstFormParams
   if (state.recording?.filePath) {
@@ -4793,6 +4905,7 @@ useAppStore.subscribe((state) => {
 // Same pattern for I-V curves.
 let _lastPersistedIVRef: Record<string, IVCurveData> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.ivCurves === _lastPersistedIVRef) return
   _lastPersistedIVRef = state.ivCurves
   if (state.recording?.filePath) {
@@ -4803,6 +4916,7 @@ useAppStore.subscribe((state) => {
 // fPSP persistence subscribe.
 let _lastPersistedFPspRef: Record<string, FPspData> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.fpspCurves === _lastPersistedFPspRef) return
   _lastPersistedFPspRef = state.fpspCurves
   if (state.recording?.filePath) {
@@ -4813,6 +4927,7 @@ useAppStore.subscribe((state) => {
 // Cursor-analysis persistence subscribe.
 let _lastPersistedCursorRef: Record<string, CursorAnalysisData> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.cursorAnalyses === _lastPersistedCursorRef) return
   _lastPersistedCursorRef = state.cursorAnalyses
   if (state.recording?.filePath) {
@@ -4823,6 +4938,7 @@ useAppStore.subscribe((state) => {
 // AP-analyses persistence subscribe.
 let _lastPersistedAPRef: Record<string, APData> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.apAnalyses === _lastPersistedAPRef) return
   _lastPersistedAPRef = state.apAnalyses
   if (state.recording?.filePath) {
@@ -4833,6 +4949,7 @@ useAppStore.subscribe((state) => {
 // Events-analyses persistence subscribe — same shape as APs.
 let _lastPersistedEventsRef: Record<string, EventsData> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.eventsAnalyses === _lastPersistedEventsRef) return
   _lastPersistedEventsRef = state.eventsAnalyses
   if (state.recording?.filePath) {
@@ -4843,6 +4960,7 @@ useAppStore.subscribe((state) => {
 // Excluded-sweeps persistence subscribe.
 let _lastPersistedExcludedRef: Record<string, number[]> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.excludedSweeps === _lastPersistedExcludedRef) return
   _lastPersistedExcludedRef = state.excludedSweeps
   if (state.recording?.filePath) {
@@ -4853,6 +4971,7 @@ useAppStore.subscribe((state) => {
 // Averaged-sweeps persistence subscribe.
 let _lastPersistedAveragedRef: Record<string, AveragedSweep[]> | null = null
 useAppStore.subscribe((state) => {
+  if (state.loading) return
   if (state.averagedSweeps === _lastPersistedAveragedRef) return
   _lastPersistedAveragedRef = state.averagedSweeps
   if (state.recording?.filePath) {
@@ -4900,6 +5019,10 @@ let _sidecarRefs = {
   recordingMeta: null as any,
 }
 useAppStore.subscribe((state) => {
+  // Same gate as the per-slice prefs subscribers above: skip while
+  // ``loading`` is true so the openFile clear-state transition
+  // can't schedule a phantom save with a stale filePath.
+  if (state.loading) return
   const filePath = state.recording?.filePath
   if (!filePath) return
   const next = {
@@ -4957,10 +5080,15 @@ declare global {
       openFileDialog: () => Promise<string | null>
       openFolderDialog: (defaultPath?: string) => Promise<string | null>
       saveFileDialog: (defaultName: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
+      writeTextFile: (targetPath: string, contents: string) => Promise<{ ok: boolean; error?: string }>
+      writeBinaryFile: (targetPath: string, base64: string) => Promise<{ ok: boolean; error?: string }>
       getPreferences: () => Promise<Record<string, unknown>>
       setPreferences: (prefs: Record<string, unknown>) => Promise<boolean>
       readSidecar: (recordingPath: string) => Promise<Record<string, unknown> | null>
       writeSidecar: (recordingPath: string, payload: Record<string, unknown>) => Promise<boolean>
+      readCohortSession: (sessionPath: string) => Promise<Record<string, unknown> | null>
+      writeCohortSession: (sessionPath: string, payload: Record<string, unknown>) => Promise<boolean>
+      openCohortSessionDialog: () => Promise<string | null>
       listFolderRecordings: (anchorPath: string) => Promise<{
         folder: string | null
         entries: Array<{

@@ -113,21 +113,31 @@ export function EventDetectionWindow({
   }, [totalSweeps, sweep])
 
   // ---- Viewport (viewport-based fetch + navigation) ----
-  // Default 1 s on open — long continuous recordings render fast at
-  // this scale; user expands from there with the zoom controls. The
-  // previous 10 s default made first paint sluggish on multi-minute
-  // sweeps because the backend had to decimate a much larger window.
+  // Series-TYPE-based default (matches the main viewer):
+  //   * Episodic series (sweepCount > 1): every sweep is a discrete
+  //     protocol-driven episode → full view always, regardless of
+  //     duration.
+  //   * Single long sweep (sweepCount === 1 AND duration > 60 s): a
+  //     continuous spontaneous-events / field recording → open at
+  //     the 1 s window so initial paint is cheap and the user gets
+  //     a navigable starting view.
+  //   * Single short sweep: one-shot evoked response → full view.
   const DEFAULT_VIEWPORT_S = 1
+  const CONTINUOUS_SWEEP_THRESHOLD_S = 60
   const [viewport, setViewport] = useState<Viewport>({ tStart: 0, tEnd: DEFAULT_VIEWPORT_S })
   const [sweepDurationS, setSweepDurationS] = useState(0)
   useEffect(() => {
-    // On sweep change, reset viewport to first ``DEFAULT_VIEWPORT_S``
-    // or full sweep, whichever is shorter.
-    setViewport({
-      tStart: 0,
-      tEnd: sweepDurationS > 0 ? Math.min(DEFAULT_VIEWPORT_S, sweepDurationS) : DEFAULT_VIEWPORT_S,
-    })
-  }, [group, series, sweep, sweepDurationS])
+    if (sweepDurationS <= 0) return
+    const isContinuous =
+      totalSweeps === 1 && sweepDurationS > CONTINUOUS_SWEEP_THRESHOLD_S
+    if (isContinuous) {
+      // Long single-sweep continuous recording → 1 s window.
+      setViewport({ tStart: 0, tEnd: DEFAULT_VIEWPORT_S })
+    } else {
+      // Episodic (or single short) sweep → full view.
+      setViewport({ tStart: 0, tEnd: sweepDurationS })
+    }
+  }, [group, series, sweep, sweepDurationS, totalSweeps])
   const shiftViewport = useCallback((factor: number) => {
     setViewport((v) => shiftViewportBy(v, sweepDurationS, factor))
   }, [sweepDurationS])

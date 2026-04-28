@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     print("NeuroTrace backend shutting down...")
 
 
-app = FastAPI(title="NeuroTrace Backend", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="NeuroTrace Backend", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,13 +56,31 @@ app.include_router(cohort_router, prefix="/api/cohort", tags=["cohort"])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.4.0"}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8321)
     parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Auto-reload the backend on Python file changes — useful "
+             "during dev so edits to api/* and analysis/* take effect "
+             "without manually restarting the server.",
+    )
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    if args.reload:
+        # Reload mode requires the import-string form so uvicorn can
+        # re-import the module on file change. The direct ``app``
+        # reference path doesn't support reload.
+        uvicorn.run(
+            "main:app",
+            host=args.host, port=args.port, log_level="info",
+            reload=True,
+            reload_dirs=["."],
+        )
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")

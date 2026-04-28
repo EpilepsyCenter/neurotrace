@@ -104,9 +104,15 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
     errors: string[]
   } | null>(null)
 
-  // Save status indicator for the off-store ("other") files.
+  // Save status — shared across active + off-store paths since the
+  // editor only ever shows one file at a time.
   const [savingPath, setSavingPath] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
+  // Per-file timestamp of last successful save. The header shows
+  // "Saved · just now" / "5s ago" so the user has positive
+  // confirmation that their edits hit disk — addresses the user
+  // request for an explicit save signal.
+  const [lastSavedAt, setLastSavedAt] = useState<Record<string, number>>({})
 
   // Consistency-checker modal (Phase A.4). Opens on demand; computes
   // near-duplicate tag clusters across every sidecar in the folder
@@ -220,41 +226,48 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   // Edit helpers — branch on whether we're editing the active record
   // or an off-store sidecar
   // ------------------------------------------------------------------
-  const broadcastMetaUpdate = useCallback((meta: SidecarMeta | null) => {
+  const broadcastMetaUpdate = useCallback((filePath: string, meta: SidecarMeta | null) => {
+    // Always carry the file_path the meta belongs to. The main
+    // window's listener verifies its current recording matches
+    // before adopting — without this, a tag edit racing with an
+    // openFile would land the previous file's tags into the new
+    // recording's state and silently save them to the wrong sidecar.
     channelRef.current?.postMessage({
       type: 'meta-update',
+      file_path: filePath,
       recordingMeta: meta,
     })
   }, [])
 
-  /** Apply an updater to the meta of the file at ``path``. Routes
-   *  through the store for the active recording (so the disk write
-   *  goes through the existing debounced subscriber) and through a
-   *  direct sidecar read-modify-write for any other file. */
+  /** Apply an updater to the meta of the file at ``path``. Always
+   *  writes directly to disk via ``writeSidecar`` — for both the
+   *  active recording AND off-store files. The previous design
+   *  routed active-recording edits through main's debounced
+   *  auto-save, which raced with openFile: a tag edit followed by
+   *  immediately opening a new file could either land the previous
+   *  file's tags into the new recording's state (broadcast arriving
+   *  too late) or just lose them entirely (no broadcast trigger to
+   *  schedule a save). Direct-write is race-free because persistence
+   *  happens at the moment of the user's action.
+   *
+   *  Main's auto-save still fires later via the broadcast → state
+   *  listener path, but it just re-writes the same content (the
+   *  metadata window already wrote it). Idempotent — minor disk
+   *  churn, no correctness cost.
+   */
   const updateMetaFor = useCallback(async (
     path: string,
     updater: (prev: SidecarMeta) => SidecarMeta,
   ) => {
-    if (path === recording?.filePath) {
-      const prev = useAppStore.getState().recordingMeta ?? {}
-      const next = updater(prev)
-      // Replace wholesale — `setRecordingMeta` does a shallow merge,
-      // which doesn't work for deletions (e.g. clearing all chips).
-      // Use the store directly to set the new object.
-      useAppStore.setState({ recordingMeta: next })
-      broadcastMetaUpdate(next)
-      // Reflect in left-pane entry too so the status dot updates.
-      setEntries((es) => es.map((e) => e.filePath === path
-        ? { ...e, hasSidecar: true, meta: next }
-        : e))
-      return
-    }
-    // Off-store: read sidecar, mutate, write back.
     const api = window.electronAPI
     if (!api?.readSidecar || !api?.writeSidecar) return
+    const isActive = path === recording?.filePath
     setSavingPath(path)
     setSaveError(null)
     try {
+      // Read existing sidecar (preserves all other slices —
+      // analyses, cursors, etc.), mutate only the meta block,
+      // write back.
       const existing = (await api.readSidecar(path)) ?? {}
       const prevMeta = (existing.meta as SidecarMeta | undefined) ?? {}
       const nextMeta = updater(prevMeta)
@@ -266,7 +279,20 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
       }
       const ok = await api.writeSidecar(path, payload)
       if (!ok) throw new Error('writeSidecar returned false')
-      setOtherMeta((m) => ({ ...m, [path]: nextMeta }))
+      setLastSavedAt((m) => ({ ...m, [path]: Date.now() }))
+
+      // UI sync. Active recording → update local store (so this
+      // window's own metadata UI re-renders) + broadcast to main
+      // (so the toolbar status dot, tree-navigator series chips,
+      // cohort cells all reflect the new tags live). The broadcast
+      // carries file_path so the main-window listener can verify
+      // it's still on this recording before adopting.
+      if (isActive) {
+        useAppStore.setState({ recordingMeta: nextMeta })
+        broadcastMetaUpdate(path, nextMeta)
+      } else {
+        setOtherMeta((m) => ({ ...m, [path]: nextMeta }))
+      }
       setEntries((es) => es.map((e) => e.filePath === path
         ? { ...e, hasSidecar: true, meta: nextMeta }
         : e))
@@ -276,6 +302,15 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
       setSavingPath(null)
     }
   }, [recording?.filePath, broadcastMetaUpdate])
+
+  /** Force a re-write of the current meta to disk — the manual
+   *  Save button. Useful as a safety net when the user wants
+   *  positive confirmation that their edits are persisted, and as
+   *  a way to flush in flight if anything went wrong with the
+   *  per-edit auto-save. */
+  const saveNow = useCallback(async (path: string) => {
+    await updateMetaFor(path, (prev) => prev)
+  }, [updateMetaFor])
   // ------------------------------------------------------------------
   // Batch-tag actions (Phase A.3)
   // ------------------------------------------------------------------
@@ -570,6 +605,13 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
                 else next.group_tags = kept
                 return next
               })}
+              onSetAnimalId={(animalId) => runBatch((prev) => {
+                const trimmed = animalId.trim()
+                const next = { ...prev }
+                if (trimmed) next.animal_id = trimmed
+                else delete next.animal_id
+                return next
+              })}
             />
           ) : !activePath ? (
             <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
@@ -586,7 +628,9 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
               seriesTagSuggestions={seriesTagPool}
               saving={savingPath === activePath}
               saveError={savingPath === null ? saveError : null}
+              lastSavedAt={lastSavedAt[activePath] ?? null}
               onUpdate={(updater) => updateMetaFor(activePath, updater)}
+              onSaveNow={() => saveNow(activePath)}
             />
           )}
         </div>
@@ -603,8 +647,8 @@ function FileEditor({
   filePath, fileName, meta, groups,
   isActiveRecording,
   fileTagSuggestions, seriesTagSuggestions,
-  saving, saveError,
-  onUpdate,
+  saving, saveError, lastSavedAt,
+  onUpdate, onSaveNow,
 }: {
   filePath: string
   fileName: string
@@ -615,12 +659,21 @@ function FileEditor({
   seriesTagSuggestions: string[]
   saving: boolean
   saveError: string | null
+  /** ms-since-epoch of the last successful save for this file.
+   *  Drives the "Saved · 5s ago" relative-time label that ticks
+   *  every few seconds via a small timer. */
+  lastSavedAt: number | null
   onUpdate: (updater: (prev: SidecarMeta) => SidecarMeta) => void
+  /** Force a re-write of the current meta. Wired to the Save
+   *  button — the user-facing safety net even though every chip /
+   *  field commit already auto-saves through ``onUpdate``. */
+  onSaveNow: () => Promise<void> | void
 }) {
   void filePath  // not currently displayed — fileName carries the label
   const fileTags = meta?.group_tags ?? []
   const seriesTags = meta?.series_tags ?? {}
   const cellId = meta?.cell_id ?? ''
+  const animalId = meta?.animal_id ?? ''
   const notes = meta?.notes ?? ''
 
   // Fall back to whatever series_tags keys exist in the sidecar when
@@ -685,7 +738,7 @@ function FileEditor({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 720 }}>
       {/* File header */}
       <div style={{
-        display: 'flex', alignItems: 'baseline', gap: 8,
+        display: 'flex', alignItems: 'center', gap: 8,
         paddingBottom: 6, borderBottom: '1px solid var(--border)',
       }}>
         <span style={{
@@ -698,35 +751,70 @@ function FileEditor({
             fontStyle: 'italic',
           }}>not open in main window — editing sidecar directly</span>
         )}
-        {saving && (
-          <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>
-            saving…
-          </span>
-        )}
-        {saveError && (
-          <span style={{ fontSize: 'var(--font-size-xs)', color: '#ef4444' }} title={saveError}>
-            save failed
-          </span>
-        )}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <SaveStatus
+            saving={saving}
+            saveError={saveError}
+            lastSavedAt={lastSavedAt}
+          />
+          <button
+            className="btn"
+            onClick={() => { void onSaveNow() }}
+            disabled={saving}
+            title="Force-save this file's metadata to disk. Auto-save also fires on every chip / field change; this is the explicit safety button."
+            style={{
+              padding: '4px 14px',
+              fontSize: 'var(--font-size-sm)',
+              fontWeight: 600,
+              background: 'var(--accent, #3b82f6)',
+              color: '#fff',
+              border: 'none',
+              opacity: saving ? 0.6 : 1,
+              cursor: saving ? 'wait' : 'pointer',
+            }}
+          >Save</button>
+        </div>
       </div>
 
-      {/* Cell ID */}
-      <Field label="Cell ID" hint="Optional human-readable identifier for this recording (e.g. cell_42).">
-        <input
-          type="text"
-          value={cellId}
-          onChange={(e) => updateField('cell_id', e.target.value)}
-          placeholder="cell_42"
-          style={{
-            width: '100%', padding: '4px 8px',
-            border: '1px solid var(--border)', borderRadius: 3,
-            background: 'var(--bg-primary)',
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-mono)',
-            fontSize: 'var(--font-size-base)',
-          }}
-        />
-      </Field>
+      {/* Cell ID + Animal ID — paired row. Cell ID identifies the
+          recording; Animal ID identifies the donor so the cohort
+          module can collapse cells from the same animal when the
+          user picks "N = animal". Both are free-text — any
+          consistent naming works (e.g. mouse_42, slice7_cell3). */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <Field label="Recording ID" hint="Optional human-readable identifier for this recording (works for cells, slices, field recordings, anything).">
+          <input
+            type="text"
+            value={cellId}
+            onChange={(e) => updateField('cell_id', e.target.value)}
+            placeholder="rec_42"
+            style={{
+              width: '100%', padding: '4px 8px',
+              border: '1px solid var(--border)', borderRadius: 3,
+              background: 'var(--bg-primary)',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--font-size-base)',
+            }}
+          />
+        </Field>
+        <Field label="Animal ID" hint="Multiple cells from the same animal share this ID — used by Cohort Analysis to group with N=animal.">
+          <input
+            type="text"
+            value={animalId}
+            onChange={(e) => updateField('animal_id', e.target.value)}
+            placeholder="mouse_07"
+            style={{
+              width: '100%', padding: '4px 8px',
+              border: '1px solid var(--border)', borderRadius: 3,
+              background: 'var(--bg-primary)',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--font-size-base)',
+            }}
+          />
+        </Field>
+      </div>
 
       {/* File-level tags */}
       <Field
@@ -836,6 +924,7 @@ function BatchEditor({
   onCancelSelection,
   onApplyFileTags,
   onRemoveFileTags,
+  onSetAnimalId,
 }: {
   checkedPaths: string[]
   fileTagSuggestions: string[]
@@ -843,9 +932,15 @@ function BatchEditor({
   onCancelSelection: () => void
   onApplyFileTags: (tags: string[]) => void
   onRemoveFileTags: (tags: string[]) => void
+  /** Set the same Animal ID on every selected file. Empty string
+   *  clears the field. Common pattern: select every recording from
+   *  one slice/animal at once and tag them with that animal's ID
+   *  in a single click. */
+  onSetAnimalId: (animalId: string) => void
 }) {
   const [addTags, setAddTags] = useState<string[]>([])
   const [removeTags, setRemoveTags] = useState<string[]>([])
+  const [animalIdDraft, setAnimalIdDraft] = useState('')
   const busy = progress !== null && progress.done < progress.total
 
   const apply = () => {
@@ -857,6 +952,10 @@ function BatchEditor({
     if (removeTags.length === 0) return
     onRemoveFileTags(removeTags)
     setRemoveTags([])
+  }
+  const applyAnimalId = () => {
+    onSetAnimalId(animalIdDraft)
+    setAnimalIdDraft('')
   }
 
   return (
@@ -894,6 +993,39 @@ function BatchEditor({
           }}>{p.split(/[/\\]/).pop()}</div>
         ))}
       </div>
+
+      <Field
+        label="Set Animal ID"
+        hint="Sets the same Animal ID on every selected file (overwrites any existing). Leave blank + Apply to clear. Common pattern: select all recordings from one animal, type the ID, Apply."
+      >
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <input
+            type="text"
+            value={animalIdDraft}
+            onChange={(e) => setAnimalIdDraft(e.target.value)}
+            placeholder="mouse_07"
+            disabled={busy}
+            style={{
+              flex: 1, padding: '4px 8px',
+              border: '1px solid var(--border)', borderRadius: 3,
+              background: 'var(--bg-primary)',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--font-size-base)',
+            }}
+          />
+          <button
+            className="btn"
+            onClick={applyAnimalId}
+            disabled={busy}
+            style={{
+              padding: '4px 12px', fontSize: 'var(--font-size-xs)',
+              background: 'var(--accent, #3b82f6)', color: '#fff',
+              border: 'none',
+            }}
+          >Apply</button>
+        </div>
+      </Field>
 
       <Field
         label="Add file tags"
@@ -1269,6 +1401,61 @@ function ConsistencyCheckModal({
         </div>
       </div>
     </div>
+  )
+}
+
+// Save status pill — "Saving…" / "Saved · 5s ago" / "Save failed".
+// Re-renders every few seconds to keep the relative time fresh
+// without the rest of the editor having to know about timers.
+function SaveStatus({ saving, saveError, lastSavedAt }: {
+  saving: boolean
+  saveError: string | null
+  lastSavedAt: number | null
+}) {
+  // Tick every 5s so "5s ago" → "10s ago" → "1m ago" updates without
+  // the user having to click anything. Cheap (single setState per
+  // tick); cleaner than a more frequent refresh.
+  const [, force] = useState(0)
+  useEffect(() => {
+    if (lastSavedAt == null) return
+    const id = setInterval(() => force((n) => n + 1), 5000)
+    return () => clearInterval(id)
+  }, [lastSavedAt])
+
+  if (saving) {
+    return (
+      <span style={{
+        fontSize: 'var(--font-size-xs)',
+        color: 'var(--text-muted)',
+      }}>saving…</span>
+    )
+  }
+  if (saveError) {
+    return (
+      <span
+        title={saveError}
+        style={{ fontSize: 'var(--font-size-xs)', color: '#ef4444' }}
+      >save failed</span>
+    )
+  }
+  if (lastSavedAt == null) {
+    return (
+      <span style={{
+        fontSize: 'var(--font-size-xs)',
+        color: 'var(--text-muted)',
+      }}>not yet saved this session</span>
+    )
+  }
+  const sec = Math.max(0, Math.floor((Date.now() - lastSavedAt) / 1000))
+  const label = sec < 5 ? 'just now'
+    : sec < 60 ? `${sec}s ago`
+    : sec < 3600 ? `${Math.floor(sec / 60)}m ago`
+    : `${Math.floor(sec / 3600)}h ago`
+  return (
+    <span style={{
+      fontSize: 'var(--font-size-xs)',
+      color: '#22c55e',
+    }}>Saved · {label}</span>
   )
 }
 

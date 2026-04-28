@@ -95,16 +95,35 @@ export function TagToast() {
     dismiss()
   }
 
-  const suppressForever = () => {
-    // Wholesale set so the strip-undefined logic in the store keeps
-    // a clean shape; the boolean flag itself is what `getMetaStatus`
-    // and the toast trigger consult.
+  const suppressForever = async () => {
+    // Persistence of the meta block is exclusively owned by direct
+    // writeSidecar calls — main's debounced auto-save preserves
+    // disk's meta verbatim (see _saveSidecar). So we MUST write
+    // the suppress flag to disk here, not just ``setState``.
     const prev = useAppStore.getState().recordingMeta ?? {}
     const next = { ...prev, suppressTagToast: true }
+    const api = window.electronAPI
+    if (api?.readSidecar && api?.writeSidecar) {
+      try {
+        const existing = (await api.readSidecar(filePath)) ?? {}
+        await api.writeSidecar(filePath, {
+          ...existing,
+          format: 'neurotrace-sidecar',
+          version: (existing as any).version ?? 2,
+          meta: next,
+        })
+      } catch { /* ignore */ }
+    }
+    // Local store + broadcast so this window's UI hides the toast
+    // and other windows refresh their meta view.
     useAppStore.setState({ recordingMeta: next })
     try {
       const ch = new BroadcastChannel('neurotrace-sync')
-      ch.postMessage({ type: 'meta-update', recordingMeta: next })
+      ch.postMessage({
+        type: 'meta-update',
+        file_path: filePath,
+        recordingMeta: next,
+      })
       ch.close()
     } catch { /* ignore */ }
     dismiss()

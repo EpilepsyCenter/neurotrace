@@ -42,6 +42,19 @@ interface Props {
   mainTrace?: number | null
 }
 
+// Recover a 1-based sweep number (or "avg X-Y" string) from a stored
+// ResistanceResult's ``source`` tag — purely for table display. Used
+// when rehydrating the per-series row list from store. Falls back to
+// ``null`` when the source doesn't match a known format and the
+// caller renders the row index instead.
+function _parseSweepFromSource(source: string | undefined): number | string | null {
+  if (!source) return null
+  const m = source.match(/^sweep\s+(\d+)/i)
+  if (m) return Number(m[1])
+  if (source.startsWith('avg') || source.startsWith('averaged')) return source
+  return null
+}
+
 // Cursor band colors mirror the other analysis windows for consistency.
 const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
@@ -257,22 +270,51 @@ export function ResistanceWindow({
   }, [currentGroup, currentSeries, totalSweeps])
 
   // Fetch persisted results on mount (global per file)
-  const fetchStored = useCallback(async () => {
-    if (!backendUrl || !filePath) return
-    try {
-      const resp = await fetch(`${backendUrl}/api/results/get`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ analysis_type: 'resistance', file_path: filePath, group: 0, series: 0 }),
-      })
-      if (resp.ok) {
-        const data = await resp.json()
-        setMeasurements(data.measurements || [])
-      }
-    } catch { /* ignore */ }
-  }, [backendUrl, filePath])
-
-  useEffect(() => { fetchStored() }, [fetchStored])
+  // Rehydrate the measurement table from the per-series store
+  // (``resistanceResults[g:s]``) whenever the user navigates to a
+  // different series — OR when this series' stored row list grows
+  // (a fresh run just appended to it).
+  //
+  // Within the same series, runs accumulate (single sweep + then
+  // averaged + then more single sweeps all pile up in the same
+  // table). Switching series swaps the entire table to whatever the
+  // new series has stored, which is empty for unanalyzed series.
+  //
+  // The previous backend-cache fetch (``/api/results/get`` keyed
+  // hard to ``group: 0, series: 0``) was vestigial — a leftover
+  // from before per-series sidecar persistence existed — and is
+  // dropped entirely.
+  const resistanceForCurrent = useAppStore(
+    (s) => s.resistanceResults[`${currentGroup}:${currentSeries}`]
+  )
+  useEffect(() => {
+    const rows = resistanceForCurrent ?? []
+    setMeasurements(rows.map((r, i) => ({
+      series: seriesLabel,
+      // We don't carry the original sweep index in the stored
+      // ResistanceResult shape — recover it from ``source`` when
+      // it parses, otherwise fall back to the row index for
+      // display only. Keeps the ECDF-style rebuild deterministic.
+      sweep: _parseSweepFromSource(r.source) ?? (i + 1),
+      rs: r.rs ?? null,
+      rin: r.rin ?? null,
+      cm: r.cm ?? null,
+      tau: r.tau ?? null,
+      fit_r_squared: null,
+      source: r.source ?? '',
+    })))
+    // Drop the fit overlay on series switch — it belongs to a
+    // previous series' trace and would be misaligned otherwise.
+    // Within-series re-runs just paint a new fit on top, so the
+    // ``fitTime != null`` test below leaves overlays alone for
+    // append-within-series cases by checking ``measurements`` count.
+    if ((resistanceForCurrent ?? []).length === 0) {
+      setFitTime(null)
+      setFitValues(null)
+      setFitStartOffset(0)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentGroup, currentSeries, resistanceForCurrent])
 
   const storeRows = async (rows: MeasurementRow[]) => {
     try {
@@ -359,17 +401,21 @@ export function ResistanceWindow({
     }
   }
 
-  // Push the latest resistance result into the per-series map AND
-  // broadcast it to the other windows. ResistanceWindow lives in its
-  // own Electron BrowserWindow with its own Zustand store instance,
-  // so a local ``setState`` would only light up things in *this*
-  // window — the main window (where the TreeNavigator's R badge
-  // lives) never sees it without a cross-window broadcast. Same
-  // pattern as ``_broadcastEvents`` etc. in the appStore.
-  const recordResistancePresence = useCallback((m: any, source: string) => {
-    if (!m) return
+  // Append a batch of rows to this series' stored resistance results.
+  // Within the same series, successive runs accumulate (single
+  // sweep → averaged → another single sweep all sit in the same
+  // table). Switching series swaps to that series' accumulated
+  // rows — see the rehydration effect below. The cohort extractor
+  // reduces the list to a per-cell scalar (mean Rs/Rin/Cm/τ).
+  //
+  // ResistanceWindow lives in its own Electron BrowserWindow with
+  // its own Zustand store instance; the broadcast bridges to the
+  // main window so the TreeNavigator's R badge sees it (same
+  // pattern as ``_broadcastEvents`` etc. in the appStore).
+  const appendResistanceRows = useCallback((measurements: any[], source: string) => {
+    if (measurements.length === 0) return
     const key = `${currentGroup}:${currentSeries}`
-    const result = {
+    const newRows = measurements.map((m) => ({
       baseline: Number(m.baseline ?? 0),
       peak_current: Number(m.peak_current ?? 0),
       steady_state_current: Number(m.steady_state_current ?? 0),
@@ -381,19 +427,31 @@ export function ResistanceWindow({
       steady_state_start_idx: m.steady_state_start_idx,
       pulse_end_idx: m.pulse_end_idx,
       source,
-    }
-    const nextResults = {
-      ...useAppStore.getState().resistanceResults,
-      [key]: result,
-    }
-    // Local store update so this window's UI sees the result too
-    // (the resistance results table can hydrate from here in the
-    // future).
+    }))
+    const prev = useAppStore.getState().resistanceResults
+    const existing = prev[key] ?? []
+    const nextResults = { ...prev, [key]: [...existing, ...newRows] }
     useAppStore.setState({ resistanceResults: nextResults })
-    // Cross-window: tell the main window so its TreeNavigator badge
-    // lights up. The main window's broadcast listener adopts the
-    // full map (last-write-wins by series key, same shape as the
-    // events / bursts / etc. broadcasts).
+    try {
+      const ch = new BroadcastChannel('neurotrace-sync')
+      ch.postMessage({
+        type: 'resistance-update',
+        resistanceResults: nextResults,
+      })
+      ch.close()
+    } catch { /* ignore */ }
+  }, [currentGroup, currentSeries])
+
+  // Drop this series' entire row set. Used by the in-window Clear
+  // button below; lets the user start fresh on a series without
+  // having to re-tag or close + reopen.
+  const clearResistanceRows = useCallback(() => {
+    const key = `${currentGroup}:${currentSeries}`
+    const prev = useAppStore.getState().resistanceResults
+    if (!(key in prev)) return
+    const nextResults = { ...prev }
+    delete nextResults[key]
+    useAppStore.setState({ resistanceResults: nextResults })
     try {
       const ch = new BroadcastChannel('neurotrace-sync')
       ch.postMessage({
@@ -419,11 +477,13 @@ export function ResistanceWindow({
       })
       if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
       const data = await resp.json()
-      const row = toRow(data.measurement, `sweep ${sweepIdx + 1}`, sweepIdx + 1)
-      setMeasurements([row])
-      await storeRows([row])
+      // Append into the per-series store; the rehydrate effect picks
+      // it up and updates the local ``measurements`` table. Storing
+      // separately to ``storeRows`` is the legacy backend cache; kept
+      // for now until that endpoint is retired.
+      await storeRows([toRow(data.measurement, `sweep ${sweepIdx + 1}`, sweepIdx + 1)])
       applyFit(data.measurement)
-      recordResistancePresence(data.measurement, `sweep ${sweepIdx + 1}`)
+      appendResistanceRows([data.measurement], `sweep ${sweepIdx + 1}`)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -461,11 +521,9 @@ export function ResistanceWindow({
       })
       if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
       const data = await resp.json()
-      const row = toRow(data.measurement, `avg ${from}–${to}`, `avg ${from}–${to}`)
-      setMeasurements([row])
-      await storeRows([row])
+      await storeRows([toRow(data.measurement, `avg ${from}–${to}`, `avg ${from}–${to}`)])
       applyFit(data.measurement)
-      recordResistancePresence(data.measurement, `averaged sweeps ${from}–${to}`)
+      appendResistanceRows([data.measurement], `averaged sweeps ${from}–${to}`)
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -483,6 +541,7 @@ export function ResistanceWindow({
       const excluded = new Set(useAppStore.getState()
         .excludedSweeps[`${currentGroup}:${currentSeries}`] ?? [])
       const rows: MeasurementRow[] = []
+      const measurements: any[] = []
       for (const swIdx of selectedSweepsList) {
         if (excluded.has(swIdx)) continue
         const resp = await fetch(`${backendUrl}/api/analysis/run`, {
@@ -497,13 +556,14 @@ export function ResistanceWindow({
         if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText)
         const data = await resp.json()
         rows.push(toRow(data.measurement, `sweep ${swIdx + 1}`, swIdx + 1))
-        // Last-write-wins: each sweep's measurement updates the
-        // per-series record. The badge appears as soon as the first
-        // sweep finishes.
-        recordResistancePresence(data.measurement, `sweep ${swIdx + 1}`)
+        measurements.push({ ...data.measurement, _swIdx: swIdx })
       }
-      setMeasurements(rows)
       await storeRows(rows)
+      // Append all rows in one shot so the badge + table see the
+      // batch atomically (and the broadcast fires once, not N times).
+      for (const m of measurements) {
+        appendResistanceRows([m], `sweep ${m._swIdx + 1}`)
+      }
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
@@ -532,23 +592,51 @@ export function ResistanceWindow({
         const swIdx = r.sweep_index ?? 0
         return toRow(r, `sweep ${swIdx + 1}`, swIdx + 1)
       })
-
-      // Take the last sweep's measurement as the "current" per-series
-      // record so the tree-navigator badge appears.
-      const lastResult = (data.results || [])[(data.results || []).length - 1]
-      if (lastResult) {
-        const swIdx = lastResult.sweep_index ?? 0
-        recordResistancePresence(lastResult, `sweep ${swIdx + 1} (of ${rows.length} run)`)
-      }
-
-      setMeasurements(rows)
       await storeRows(rows)
+      // Append every row from the batch; the rehydrate effect picks
+      // them up. One call so the broadcast fires once.
+      const measurementsWithSource = (data.results || []).map((r: any) => ({
+        m: r,
+        source: `sweep ${(r.sweep_index ?? 0) + 1}`,
+      }))
+      // Build all-at-once so we get a single store update + broadcast
+      // instead of N round trips.
+      const key = `${currentGroup}:${currentSeries}`
+      const prev = useAppStore.getState().resistanceResults
+      const newEntries = measurementsWithSource.map(({ m, source }: any) => ({
+        baseline: Number(m.baseline ?? 0),
+        peak_current: Number(m.peak_current ?? 0),
+        steady_state_current: Number(m.steady_state_current ?? 0),
+        rs: m.rs == null ? null : Number(m.rs),
+        rin: m.rin == null ? null : Number(m.rin),
+        cm: m.cm == null ? null : Number(m.cm),
+        tau: m.tau == null ? null : Number(m.tau),
+        peak_idx: m.peak_idx,
+        steady_state_start_idx: m.steady_state_start_idx,
+        pulse_end_idx: m.pulse_end_idx,
+        source,
+      }))
+      const nextResults = {
+        ...prev,
+        [key]: [...(prev[key] ?? []), ...newEntries],
+      }
+      useAppStore.setState({ resistanceResults: nextResults })
+      try {
+        const ch = new BroadcastChannel('neurotrace-sync')
+        ch.postMessage({ type: 'resistance-update', resistanceResults: nextResults })
+        ch.close()
+      } catch { /* ignore */ }
     } catch (err: any) { setError(err.message) }
     setLoading(false)
   }
 
   const clearResults = async () => {
-    setMeasurements([]); setFitTime(null); setFitValues(null)
+    // Drop this series' rows from the per-series store; the
+    // rehydrate effect picks up the now-empty entry and clears the
+    // local table + fit overlay.
+    clearResistanceRows()
+    // Legacy backend cache cleanup — kept until ``/api/results/*``
+    // is retired.
     try {
       await fetch(`${backendUrl}/api/results/clear`, {
         method: 'POST',

@@ -172,7 +172,14 @@ export function AnalysisWindow({ view }: { view: string }) {
         // so the toolbar status dot + any series-tag overlays update
         // without a round-trip through state-request.
         if (ev.data?.type === 'meta-update' && ev.data.recordingMeta !== undefined) {
-          useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          // Same file-path guard as CursorPanel — see the rationale
+          // there. Older broadcasts without ``file_path`` still
+          // pass through.
+          const targetPath = ev.data.file_path
+          const currentPath = useAppStore.getState().recording?.filePath
+          if (targetPath === undefined || targetPath === currentPath) {
+            useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          }
         }
         if (ev.data?.type === 'iv-update' && ev.data.ivCurves) {
           useAppStore.setState({ ivCurves: ev.data.ivCurves })

@@ -20,6 +20,7 @@ from api.bursts import router as bursts_router
 from api.ap import router as ap_router
 from api.events import router as events_router
 from api.cohort import router as cohort_router
+from api.trace_export import router as trace_export_router
 
 
 @asynccontextmanager
@@ -52,6 +53,7 @@ app.include_router(bursts_router, prefix="/api/bursts", tags=["bursts"])
 app.include_router(ap_router, prefix="/api/ap", tags=["ap"])
 app.include_router(events_router, prefix="/api/events", tags=["events"])
 app.include_router(cohort_router, prefix="/api/cohort", tags=["cohort"])
+app.include_router(trace_export_router, prefix="/api/trace_export", tags=["trace_export"])
 
 
 @app.get("/health")

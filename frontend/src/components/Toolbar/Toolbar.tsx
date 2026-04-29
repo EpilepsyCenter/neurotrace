@@ -357,6 +357,21 @@ export function Toolbar() {
         Cohort…
       </button>
 
+      {/* Trace Export — Phase C. Cross-recording publication-ready
+          figures. Always enabled (no recording dependency). */}
+      <button
+        className="btn"
+        onClick={async () => {
+          if (window.electronAPI?.openAnalysisWindow) {
+            await window.electronAPI.openAnalysisWindow('trace_export')
+          }
+        }}
+        title="Build publication-ready figures from sweeps across one or more recordings"
+        style={{ marginLeft: 4 }}
+      >
+        Export Traces…
+      </button>
+
       <div className="toolbar-separator" />
 
       <div className="toolbar-group" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

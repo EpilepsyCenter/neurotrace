@@ -165,9 +165,14 @@ ipcMain.handle('get-backend-url', () => {
   return `http://localhost:${backendPort}`
 })
 
-ipcMain.handle('open-file-dialog', async () => {
-  if (!mainWindow) return null
-  const result = await dialog.showOpenDialog(mainWindow, {
+ipcMain.handle('open-file-dialog', async (event) => {
+  // Parent the dialog to the calling window (not always the main one)
+  // — without this, the Trace Export window loses focus to the main
+  // app window after the user picks a file. Same fix already applied
+  // to ``open-folder-dialog``.
+  const sender = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+  if (!sender) return null
+  const result = await dialog.showOpenDialog(sender, {
     properties: ['openFile'],
     filters: [
       { name: 'Electrophysiology Files', extensions: ['dat', 'abf', 'h5', 'nwb', 'wcp', 'axgd', 'smr'] },
@@ -194,9 +199,10 @@ ipcMain.handle('open-folder-dialog', async (_event, defaultPath?: string) => {
   return result.canceled ? null : result.filePaths[0]
 })
 
-ipcMain.handle('save-file-dialog', async (_event, defaultName: string, filters: Electron.FileFilter[]) => {
-  if (!mainWindow) return null
-  const result = await dialog.showSaveDialog(mainWindow, {
+ipcMain.handle('save-file-dialog', async (event, defaultName: string, filters: Electron.FileFilter[]) => {
+  const sender = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+  if (!sender) return null
+  const result = await dialog.showSaveDialog(sender, {
     defaultPath: defaultName,
     filters: filters || [
       { name: 'CSV', extensions: ['csv'] },
@@ -371,12 +377,76 @@ ipcMain.handle('write-cohort-session', (_event, sessionPath: string, payload: Re
   }
 })
 
+// -----------------------------------------------------------------
+// Trace Export figure sessions (.neurotrace_figure) — Phase C
+// -----------------------------------------------------------------
+//
+// Cross-recording figure-state counterpart to ``.neurocohort``. Stores
+// the entire Trace Export window state (items + style + axes +
+// scalebar + legend + figure size) so users can resume the same
+// figure later without re-picking sources or re-styling. Same atomic
+// write pattern as the per-recording sidecar.
+
+ipcMain.handle('read-figure-session', (_event, sessionPath: string) => {
+  try {
+    if (!sessionPath) return null
+    if (!existsSync(sessionPath)) return null
+    const raw = readFileSync(sessionPath, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object'
+        && parsed.format === 'neurotrace-figure-session') {
+      return parsed
+    }
+    return null
+  } catch (err) {
+    console.error('Failed to read figure session:', err)
+    return null
+  }
+})
+
+ipcMain.handle('write-figure-session', (_event, sessionPath: string, payload: Record<string, unknown>) => {
+  try {
+    if (!sessionPath) return false
+    const tmp = `${sessionPath}.tmp`
+    const withMeta = {
+      format: 'neurotrace-figure-session',
+      version: 1,
+      saved_at: new Date().toISOString(),
+      ...payload,
+    }
+    writeFileSync(tmp, JSON.stringify(withMeta, null, 2), 'utf-8')
+    renameSync(tmp, sessionPath)
+    return true
+  } catch (err) {
+    console.error('Failed to write figure session:', err)
+    try { unlinkSync(`${sessionPath}.tmp`) } catch { /* ignore */ }
+    return false
+  }
+})
+
+ipcMain.handle('open-figure-session-dialog', async (event) => {
+  const sender = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+  if (!sender) return null
+  const result = await dialog.showOpenDialog(sender, {
+    title: 'Open figure session',
+    properties: ['openFile'],
+    filters: [
+      { name: 'NeuroTrace Figure Session', extensions: ['neurotrace_figure'] },
+    ],
+  })
+  return result.canceled || !result.filePaths.length ? null : result.filePaths[0]
+})
+
 // Dedicated open dialog with the .neurocohort filter pre-set so
 // users see only their session files. Returns the chosen path or
 // null if cancelled.
-ipcMain.handle('open-cohort-session-dialog', async () => {
-  if (!mainWindow) return null
-  const result = await dialog.showOpenDialog(mainWindow, {
+ipcMain.handle('open-cohort-session-dialog', async (event) => {
+  // Parent the dialog to the calling window so focus returns to the
+  // Cohort Analysis window after the user picks a file (was rooting
+  // to the main app window, same shape of bug as open-file-dialog).
+  const sender = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
+  if (!sender) return null
+  const result = await dialog.showOpenDialog(sender, {
     title: 'Open cohort session',
     properties: ['openFile'],
     filters: [
@@ -469,6 +539,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   events_browser: 'Events — Browser & Overlay',
   metadata: 'Metadata',
   cohort_analysis: 'Cohort Analysis',
+  trace_export: 'Trace Export',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',

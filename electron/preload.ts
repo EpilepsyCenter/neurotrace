@@ -78,6 +78,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openCohortSessionDialog: (): Promise<string | null> =>
     ipcRenderer.invoke('open-cohort-session-dialog'),
 
+  // Trace Export figure sessions (.neurotrace_figure). Same shape as
+  // the cohort session — atomic write, format-tagged JSON, dedicated
+  // open-dialog with the right filter so users see only figure files.
+  readFigureSession: (sessionPath: string): Promise<Record<string, unknown> | null> =>
+    ipcRenderer.invoke('read-figure-session', sessionPath),
+  writeFigureSession: (sessionPath: string, payload: Record<string, unknown>): Promise<boolean> =>
+    ipcRenderer.invoke('write-figure-session', sessionPath, payload),
+  openFigureSessionDialog: (): Promise<string | null> =>
+    ipcRenderer.invoke('open-figure-session-dialog'),
+
   // Folder listing for the Metadata window's left pane. ``anchorPath``
   // can be either a folder or a file inside it (we use the active
   // recording's path). Returns every recording-shaped file in the

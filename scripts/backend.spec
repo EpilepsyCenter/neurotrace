@@ -17,7 +17,7 @@ hidden += collect_submodules('uvicorn')
 # Our own packages are imported via `from api.files import router` etc.
 # which means PyInstaller's import graph needs them explicitly, since
 # SPECPATH lives outside backend/.
-for pkg in ('api', 'analysis', 'readers', 'macros', 'utils'):
+for pkg in ('api', 'analysis', 'readers', 'macros', 'utils', 'export'):
     hidden += collect_submodules(pkg)
 # Neo and Myokit both load plugins/data files at import time.
 hidden += collect_submodules('neo')

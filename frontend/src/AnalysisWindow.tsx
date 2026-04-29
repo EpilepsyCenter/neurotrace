@@ -13,6 +13,7 @@ import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/Eve
 import { EventsBrowserWindow } from './components/AnalysisWindows/EventsBrowserWindow'
 import { MetadataWindow } from './components/AnalysisWindows/MetadataWindow'
 import { CohortWindow } from './components/AnalysisWindows/CohortWindow'
+import { TraceExportWindow } from './components/AnalysisWindows/TraceExportWindow'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -237,6 +238,7 @@ export function AnalysisWindow({ view }: { view: string }) {
     events_browser: 'Events — Browser & Overlay',
     metadata: 'Metadata',
     cohort_analysis: 'Cohort Analysis',
+    trace_export: 'Trace Export',
     bursts: 'Burst Detection',
     kinetics: 'Kinetics & Fitting',
     field_potential: 'Field PSP',
@@ -378,6 +380,11 @@ export function AnalysisWindow({ view }: { view: string }) {
         ) : view === 'cohort_analysis' ? (
           <CohortWindow
             backendUrl={backendUrl}
+          />
+        ) : view === 'trace_export' ? (
+          <TraceExportWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
           />
         ) : (
           <div style={{

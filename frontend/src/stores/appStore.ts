@@ -5089,6 +5089,9 @@ declare global {
       readCohortSession: (sessionPath: string) => Promise<Record<string, unknown> | null>
       writeCohortSession: (sessionPath: string, payload: Record<string, unknown>) => Promise<boolean>
       openCohortSessionDialog: () => Promise<string | null>
+      readFigureSession: (sessionPath: string) => Promise<Record<string, unknown> | null>
+      writeFigureSession: (sessionPath: string, payload: Record<string, unknown>) => Promise<boolean>
+      openFigureSessionDialog: () => Promise<string | null>
       listFolderRecordings: (anchorPath: string) => Promise<{
         folder: string | null
         entries: Array<{

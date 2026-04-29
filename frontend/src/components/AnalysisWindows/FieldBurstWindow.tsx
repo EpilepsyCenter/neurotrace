@@ -4,6 +4,7 @@ import 'uplot/dist/uPlot.min.css'
 import { useAppStore, BurstRecord, FieldBurstsData, FieldBurstsParams } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { usePlotMenu } from '../common/PlotMenu'
 
 const MARKER_COLORS = {
   baseline: '#9e9e9e',
@@ -1029,6 +1030,10 @@ function BurstSweepViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu: onBurstContextMenu, menu: burstPlotMenu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'burst-trace',
+  })
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const justDoubleClickedRef = useRef(false)
@@ -1474,7 +1479,12 @@ function BurstSweepViewer({
         goEnd={goEnd}
       />
 
-      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onBurstContextMenu}
+        style={{ flex: 1, position: 'relative', minHeight: 0 }}
+      >
+        {burstPlotMenu}
         <canvas
           ref={overlayRef}
           style={{

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { useThemeStore } from '../../stores/themeStore'
+import { usePlotMenu } from './PlotMenu'
 
 /**
  * Simple stacked-subplot trace viewer used alongside the primary
@@ -235,12 +236,31 @@ export function OverlayTraceViewer({
       </div>
     )
   }
+  return <OverlayBody containerRef={containerRef} plotRef={plotRef} channelLabel={channel.label} />
+}
+
+function OverlayBody({
+  containerRef, plotRef, channelLabel,
+}: {
+  containerRef: React.RefObject<HTMLDivElement>
+  plotRef: React.RefObject<uPlot | null>
+  channelLabel: string
+}) {
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: channelLabel || 'overlay',
+  })
   return (
-    <div style={{
-      height: '100%', minHeight: 0,
-      border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%', minHeight: 0,
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+        position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )

@@ -12,6 +12,7 @@ import { CoefficientStepper } from '../common/CoefficientStepper'
 import {
   Viewport, SetViewport, ViewportBar, ViewportSlider, shiftViewportBy,
 } from '../common/ContinuousViewport'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Template Generator — separate Electron BrowserWindow.
@@ -756,6 +757,10 @@ function TemplateGeneratorViewer({
   void theme; void fontSize
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-template-gen',
+  })
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
   const templateRef = useRef(activeTemplate)
@@ -1116,7 +1121,13 @@ function TemplateGeneratorViewer({
           Drag the blue cursor band over a clean event, then click "Fit biexponential".
         </span>
       </div>
-      <div ref={containerRef} style={{ flex: 1, minHeight: 120 }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, minHeight: 120, position: 'relative' }}
+      >
+        {menu}
+      </div>
       <ViewportSlider viewport={viewport} sweepDuration={sweepDurationS} setViewport={setViewport} />
       {err && (
         <div style={{

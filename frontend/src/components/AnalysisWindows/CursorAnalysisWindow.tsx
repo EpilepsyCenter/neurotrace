@@ -6,6 +6,7 @@ import {
   CursorAnalysisData, CursorSlotConfig, CursorMeasurement,
 } from '../../stores/appStore'
 import { NumInput } from '../common/NumInput'
+import { usePlotMenu } from '../common/PlotMenu'
 
 // Stimfit-style cursor-analysis window.
 //
@@ -1219,6 +1220,10 @@ function MiniViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu: onPlotContextMenu, menu: plotMenu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'cursor-trace',
+  })
   // Latest state ref so hook callbacks (drawBands, drawFits, event
   // handlers) always see current values without needing to tear down
   // and rebuild uPlot on every cursor change.
@@ -1685,10 +1690,14 @@ function MiniViewer({
   useEffect(() => { plotRef.current?.redraw() }, [baseline, slots, measurements, previewSweep, displayYOffset])
 
   return (
-    <div style={{
-      height: '100%', border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)', position: 'relative',
-    }}>
+    <div
+      onContextMenu={onPlotContextMenu}
+      style={{
+        height: '100%', border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {plotMenu}
       <div style={{
         position: 'absolute', top: 4, right: 4, zIndex: 2,
         display: 'flex', gap: 6, alignItems: 'center',

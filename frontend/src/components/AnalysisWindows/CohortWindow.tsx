@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useThemeStore } from '../../stores/themeStore'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Cohort Analysis window — Phases B.2 + B.3.
@@ -2697,21 +2698,15 @@ function StatsResult({ metric, kind, result, graph, backendUrl, themeName,
           it carries its own viewBox; we drop it into a constrained
           height and let it scale fluidly to the card width. Click
           opens the modal — same behaviour as the Expand button so
-          users can hit either. */}
+          users can hit either. Right-click → Copy/Save SVG or PNG
+          via the shared PlotMenu. */}
       {graph && graph.format === 'svg' && displaySvg && (
-        <div
-          onClick={canOpenModal ? () => setModalOpen(true) : undefined}
-          title={canOpenModal ? 'Click to expand and edit axes / colours / labels.' : undefined}
-          style={{
-            background: 'var(--bg-primary)',
-            border: '1px solid var(--border)',
-            borderRadius: 3,
-            padding: 4,
-            marginBottom: result?.test ? 8 : 0,
-            overflow: 'hidden',
-            cursor: canOpenModal ? 'zoom-in' : 'default',
-          }}
-          dangerouslySetInnerHTML={{ __html: stripSvgFixedSize(displaySvg) }}
+        <CohortGraphInline
+          svg={displaySvg}
+          metric={metric}
+          canOpenModal={canOpenModal}
+          onOpenModal={() => setModalOpen(true)}
+          marginBottom={result?.test ? 8 : 0}
         />
       )}
       {modalOpen && canOpenModal && (
@@ -3349,17 +3344,8 @@ function GraphModal({
           </div>
         </div>
 
-        <div style={{
-          padding: 14,
-          overflow: 'auto',
-          background: 'var(--bg-primary)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <div
-            style={{ width: '100%', maxWidth: '100%' }}
-            dangerouslySetInnerHTML={{ __html: stripSvgFixedSize(currentSvg) }}
-          />
-        </div>
+        <CohortGraphModalView svg={currentSvg} metric={metric} />
+
 
         <div style={{
           borderLeft: '1px solid var(--border)',
@@ -3719,6 +3705,76 @@ const modalInputStyle: React.CSSProperties = {
   color: 'var(--text-primary)',
   border: '1px solid var(--border)',
   borderRadius: 2,
+}
+
+/**
+ * Inline cohort graph card with right-click → Copy/Save SVG/PNG via
+ * the shared ``usePlotMenu`` hook. Filename defaults to ``<metric>``
+ * so users get e.g. ``rate_hz.svg`` straight out of the dialog.
+ *
+ * Click still opens the modal (existing behavior) — the context
+ * menu intercepts right-click before that.
+ */
+function CohortGraphInline({
+  svg, metric, canOpenModal, onOpenModal, marginBottom,
+}: {
+  svg: string
+  metric: string
+  canOpenModal: boolean
+  onOpenModal: () => void
+  marginBottom: number
+}) {
+  const { onContextMenu, menu } = usePlotMenu({
+    getSvg: () => svg,
+    defaultName: metric,
+  })
+  return (
+    <div
+      onClick={canOpenModal ? onOpenModal : undefined}
+      onContextMenu={onContextMenu}
+      title={canOpenModal ? 'Click to expand and edit axes / colours / labels.' : undefined}
+      style={{
+        background: 'var(--bg-primary)',
+        border: '1px solid var(--border)',
+        borderRadius: 3,
+        padding: 4,
+        marginBottom,
+        overflow: 'hidden',
+        cursor: canOpenModal ? 'zoom-in' : 'default',
+        position: 'relative',
+      }}
+    >
+      {menu}
+      <div dangerouslySetInnerHTML={{ __html: stripSvgFixedSize(svg) }} />
+    </div>
+  )
+}
+
+/** Modal-view counterpart to ``CohortGraphInline`` — same right-click
+ *  affordances, no click-to-expand (we're already in the modal). */
+function CohortGraphModalView({ svg, metric }: { svg: string; metric: string }) {
+  const { onContextMenu, menu } = usePlotMenu({
+    getSvg: () => svg,
+    defaultName: metric,
+  })
+  return (
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        padding: 14,
+        overflow: 'auto',
+        background: 'var(--bg-primary)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        position: 'relative',
+      }}
+    >
+      {menu}
+      <div
+        style={{ width: '100%', maxWidth: '100%' }}
+        dangerouslySetInnerHTML={{ __html: stripSvgFixedSize(svg) }}
+      />
+    </div>
+  )
 }
 
 function ModalSection({ title, children }: { title: string; children: React.ReactNode }) {

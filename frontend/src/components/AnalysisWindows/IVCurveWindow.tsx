@@ -7,6 +7,7 @@ import { NumInput } from '../common/NumInput'
 import { ImSourceCard } from '../common/ImSourceCard'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
+import { usePlotMenu } from '../common/PlotMenu'
 
 const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
@@ -835,6 +836,10 @@ function IVPlot({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'iv-curve',
+  })
   const selectedRef = useRef<number | null>(null)
   selectedRef.current = entry?.selectedIdx ?? null
 
@@ -989,12 +994,17 @@ function IVPlot({
 
   void sweepByIdx  // kept for potential future use
   return (
-    <div style={{
-      height: '100%',
-      border: '1px solid var(--border)',
-      borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%',
+        border: '1px solid var(--border)',
+        borderRadius: 4,
+        background: 'var(--bg-primary)',
+        position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )
@@ -1146,6 +1156,10 @@ function TraceMiniViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'iv-trace',
+  })
 
   // Keep the latest cursors reachable from hook closures.
   const cursorsRef = useRef(cursors)
@@ -1532,7 +1546,13 @@ function TraceMiniViewer({
           style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
           title="Reset zoom to full sweep">Reset zoom</button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, minHeight: 120 }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, minHeight: 120, position: 'relative' }}
+      >
+        {menu}
+      </div>
       <div style={{
         padding: '2px 8px', fontSize: 'var(--font-size-label)',
         color: 'var(--text-muted)', fontStyle: 'italic',

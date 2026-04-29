@@ -14,6 +14,7 @@ import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
+import { usePlotMenu } from '../common/PlotMenu'
 
 // FPsp cursor→band mapping: baseline cursor pair → Baseline,
 // fit cursor pair → Volley, peak cursor pair → fEPSP.
@@ -1433,6 +1434,10 @@ function FPspMiniViewer({
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fpsp-trace',
+  })
   // Default tuned range (recomputed on each plot rebuild) and the
   // user's current zoom/pan range. Range callbacks prefer the user
   // ranges when set; reset clears them. Refs (not state) so wheel /
@@ -1763,7 +1768,12 @@ function FPspMiniViewer({
               )}
             </span>
           </div>
-          <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+          <div
+            ref={containerRef}
+            onContextMenu={onContextMenu}
+            style={{ flex: 1, position: 'relative', minHeight: 0 }}
+          >
+            {menu}
             <canvas ref={overlayRef}
               style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5, width: '100%', height: '100%' }} />
           </div>
@@ -1889,6 +1899,10 @@ function FPspOverTimeGraph({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fpsp-over-time',
+  })
   const selectedRef = useRef<number | null>(null)
   selectedRef.current = entry?.selectedIdx ?? null
 
@@ -2114,11 +2128,15 @@ function FPspOverTimeGraph({
   }
 
   return (
-    <div style={{
-      height: '100%',
-      border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )
@@ -2325,6 +2343,10 @@ function FPspSweepViewer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fpsp-sweep',
+  })
 
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
@@ -2830,7 +2852,13 @@ function FPspSweepViewer({
           style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
           title="Reset zoom to full sweep">Reset zoom</button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, minHeight: 120 }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, minHeight: 120, position: 'relative' }}
+      >
+        {menu}
+      </div>
       <div style={{
         padding: '2px 8px', fontSize: 'var(--font-size-label)',
         color: 'var(--text-muted)', fontStyle: 'italic',
@@ -3049,6 +3077,10 @@ function IOScatter({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fpsp-io-curve',
+  })
   // Mirror the selected index into a ref so the draw hook picks up
   // selection changes without having to rebuild the plot — which, if
   // left in the rebuild-deps, made the scatter visibly flash and the
@@ -3218,11 +3250,15 @@ function IOScatter({
     )
   }
   return (
-    <div style={{
-      height: '100%',
-      border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )
@@ -3379,6 +3415,10 @@ function PPRScatter({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fpsp-ppr',
+  })
   const selectedRef = useRef<number | null>(entry?.selectedIdx ?? null)
   selectedRef.current = entry?.selectedIdx ?? null
 
@@ -3538,11 +3578,15 @@ function PPRScatter({
     )
   }
   return (
-    <div style={{
-      height: '100%',
-      border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )

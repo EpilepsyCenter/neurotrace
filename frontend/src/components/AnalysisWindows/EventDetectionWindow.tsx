@@ -12,6 +12,7 @@ import { NumInput } from '../common/NumInput'
 import {
   Viewport, SetViewport, ViewportBar, ViewportSlider, shiftViewportBy,
 } from '../common/ContinuousViewport'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Event detection & analysis — Phase 1 (expanded).
@@ -1905,6 +1906,10 @@ function EventsSweepViewer({
   const rootRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-sweep',
+  })
   const primedDiscardIdxRef = useRef<number | null>(null)
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
@@ -2729,7 +2734,13 @@ function EventsSweepViewer({
           prime / discard · drag cursor band: move · wheel: zoom
         </span>
       </div>
-      <div ref={containerRef} style={{ flex: 1, minHeight: 120 }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, minHeight: 120, position: 'relative' }}
+      >
+        {menu}
+      </div>
       <ViewportSlider viewport={viewport} sweepDuration={sweepDurationS} setViewport={setViewport} />
       {err && (
         <div style={{
@@ -2852,6 +2863,10 @@ function AmplitudeHistogram({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-amp-hist',
+  })
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 5) return null
@@ -3008,11 +3023,17 @@ function AmplitudeHistogram({
             : <span style={{ color: 'var(--text-muted)' }}>Need ≥ 5 events.</span>}
         </span>
       </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{
+          flex: 1, minHeight: 0,
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)', position: 'relative',
+        }}
+      >
+        {menu}
+      </div>
     </div>
   )
 }
@@ -3035,6 +3056,10 @@ function EventRatePlot({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-rate',
+  })
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length === 0 || entry.sweepLengthS <= 0) return null
@@ -3148,11 +3173,16 @@ function EventRatePlot({
           </span>
         )}
       </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{
+          flex: 1, minHeight: 0,
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)', position: 'relative',
+        }}
+      >
+        {menu}
         {(!entry || entry.events.length === 0) && (
           <div style={{
             padding: 16, textAlign: 'center',
@@ -3180,6 +3210,10 @@ function AmpVsTimeScatter({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-amp-vs-time',
+  })
 
   const data = useMemo(() => {
     if (!entry || entry.events.length === 0) return null
@@ -3277,11 +3311,17 @@ function AmpVsTimeScatter({
           ? <span>n = {data.xs.length}</span>
           : <span style={{ color: 'var(--text-muted)' }}>Run detection first.</span>}
       </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }} />
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{
+          flex: 1, minHeight: 0,
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)', position: 'relative',
+        }}
+      >
+        {menu}
+      </div>
     </div>
   )
 }
@@ -3305,6 +3345,10 @@ function IEIHistogram({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-iei',
+  })
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 2) return null
@@ -3438,11 +3482,16 @@ function IEIHistogram({
           </span>
         )}
       </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{
+          flex: 1, minHeight: 0,
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)', position: 'relative',
+        }}
+      >
+        {menu}
         {(!entry || entry.events.length < 2) && (
           <div style={{
             padding: 16, textAlign: 'center',

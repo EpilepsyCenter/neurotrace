@@ -4,6 +4,7 @@ import 'uplot/dist/uPlot.min.css'
 import { useAppStore, CursorPositions, STIMULUS_TRACE_INDEX } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { ViewportBar, ViewportSlider } from './ViewportBar'
+import { usePlotMenu } from '../common/PlotMenu'
 
 // Palette for non-primary recorded channels. Must match TracesDropdown.
 const ADDITIONAL_CHANNEL_COLOR_VARS = [
@@ -705,6 +706,18 @@ export function TraceViewer() {
   const currentSeries = useAppStore((s) => s.currentSeries)
   const saveSeriesAxisRange = useAppStore((s) => s.saveSeriesAxisRange)
   const getSeriesAxisRange = useAppStore((s) => s.getSeriesAxisRange)
+
+  // Right-click → Copy / Save PNG. Canvas-only (no SVG round-trip
+  // for the live viewer; if the user wants vector they go through
+  // the Trace Export window).
+  const fileNameForExport = useAppStore((s) => s.recording?.fileName ?? null)
+  const baseName = fileNameForExport
+    ? fileNameForExport.replace(/\.[^.]+$/, '') + `_g${currentGroup + 1}s${currentSeries + 1}`
+    : 'trace'
+  const { onContextMenu: onPlotContextMenu, menu: plotMenu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: baseName,
+  })
 
   // Create / recreate uPlot when data or overlays change
   // ================================================================
@@ -1800,7 +1813,9 @@ export function TraceViewer() {
         onMouseUp={traceData ? handleMouseUp : undefined}
         onMouseLeave={traceData ? handleMouseUp : undefined}
         onWheel={traceData ? handleWheel : undefined}
+        onContextMenu={onPlotContextMenu}
       >
+        {plotMenu}
         {!traceData && (
           <div
             style={{

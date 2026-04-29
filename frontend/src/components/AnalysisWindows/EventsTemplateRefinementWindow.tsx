@@ -8,6 +8,7 @@ import {
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { CoefficientStepper } from '../common/CoefficientStepper'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Template Refinement — separate Electron BrowserWindow.
@@ -329,6 +330,10 @@ function AveragePlot({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-template-refine',
+  })
 
   useEffect(() => {
     const container = containerRef.current
@@ -432,11 +437,15 @@ function AveragePlot({
     )
   }
   return (
-    <div style={{
-      height: '100%',
-      border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )

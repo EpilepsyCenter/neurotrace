@@ -6,6 +6,7 @@ import {
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { usePlotMenu } from '../common/PlotMenu'
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -123,6 +124,10 @@ export function ResistanceWindow({
 
   const traceChartRef = useRef<HTMLDivElement>(null)
   const tracePlotRef = useRef<uPlot | null>(null)
+  const { onContextMenu: onResContextMenu, menu: resPlotMenu } = usePlotMenu({
+    getCanvas: () => tracePlotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'resistance-trace',
+  })
 
   // Splitters — both persist to Electron prefs under resistanceWindowUI
   // so the layout survives window reopens. Same recipe as AP/FPsp/IV.
@@ -1426,7 +1431,13 @@ export function ResistanceWindow({
                 Reset zoom
               </button>
             </div>
-            <div ref={traceChartRef} style={{ flex: 1, minHeight: 120 }} />
+            <div
+              ref={traceChartRef}
+              onContextMenu={onResContextMenu}
+              style={{ flex: 1, minHeight: 120, position: 'relative' }}
+            >
+              {resPlotMenu}
+            </div>
             <div style={{
               position: 'absolute', bottom: 4, left: 10, zIndex: 2,
               fontSize: 'var(--font-size-label)', color: 'var(--text-muted)',

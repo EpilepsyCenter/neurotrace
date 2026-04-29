@@ -7,6 +7,7 @@ import {
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Events — Browser & Overlay window.
@@ -284,6 +285,10 @@ function EventBrowserPanel({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'event-browser',
+  })
   const [preMs, setPreMs] = useState(10)
   const [winMs, setWinMs] = useState(60)
   const [respectFilter, setRespectFilter] = useState(true)
@@ -686,11 +691,17 @@ function EventBrowserPanel({
               color: 'var(--text-muted)', fontSize: 10, fontStyle: 'italic',
             }}>scroll = zoom X · Alt+scroll = zoom Y · drag = pan · dbl-click = reset</span>
           </div>
-          <div ref={containerRef} style={{
-            flex: 1, minHeight: 0,
-            border: '1px solid var(--border)', borderRadius: 4,
-            background: 'var(--bg-primary)',
-          }} />
+          <div
+            ref={containerRef}
+            onContextMenu={onContextMenu}
+            style={{
+              flex: 1, minHeight: 0,
+              border: '1px solid var(--border)', borderRadius: 4,
+              background: 'var(--bg-primary)', position: 'relative',
+            }}
+          >
+            {menu}
+          </div>
         </div>
       </div>
     </div>
@@ -711,6 +722,10 @@ function AllEventsOverlayPanel({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'events-overlay',
+  })
   const [data, setData] = useState<{
     time: number[]; traces: (number | null)[][]
     mean: (number | null)[]; sdLo: (number | null)[]; sdHi: (number | null)[]
@@ -907,11 +922,16 @@ function AllEventsOverlayPanel({
           color: 'var(--text-muted)', fontSize: 10, fontStyle: 'italic',
         }}>scroll = zoom · drag = pan · dbl-click = reset</span>
       </div>
-      <div ref={containerRef} style={{
-        flex: 1, minHeight: 0,
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{
+          flex: 1, minHeight: 0,
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)', position: 'relative',
+        }}
+      >
+        {menu}
         {(!entry || entry.events.length === 0) && (
           <div style={{
             padding: 16, textAlign: 'center',

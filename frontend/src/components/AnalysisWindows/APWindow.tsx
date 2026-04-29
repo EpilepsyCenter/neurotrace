@@ -12,6 +12,7 @@ import { NumInput } from '../common/NumInput'
 import { ImSourceCard } from '../common/ImSourceCard'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
+import { usePlotMenu } from '../common/PlotMenu'
 
 /**
  * Action Potentials analysis window.
@@ -1483,6 +1484,10 @@ function APFICurve({
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'fi-curve',
+  })
   const fi = entry.fiCurve
 
   useEffect(() => {
@@ -1596,10 +1601,14 @@ function APFICurve({
     )
   }
   return (
-    <div style={{
-      height: '100%', border: '1px solid var(--border)', borderRadius: 4,
-      background: 'var(--bg-primary)',
-    }}>
+    <div
+      onContextMenu={onContextMenu}
+      style={{
+        height: '100%', border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)', position: 'relative',
+      }}
+    >
+      {menu}
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
     </div>
   )
@@ -1726,6 +1735,10 @@ function APPhasePlotPanel({
   void hideMarkers  // not yet used inside the loop; reserved for future per-spike marker dots
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'phase-plot',
+  })
   // Default 10 ms window — big enough to capture the full AP loop
   // (rising phase → peak → repolarisation → AHP back to baseline).
   const [windowMs, setWindowMs] = useState(10)
@@ -2026,10 +2039,14 @@ function APPhasePlotPanel({
           )
         })()}
       </div>
-      <div style={{ flex: 1, minHeight: 0, position: 'relative',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-      }}>
+      <div
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, minHeight: 0, position: 'relative',
+          border: '1px solid var(--border)', borderRadius: 4,
+          background: 'var(--bg-primary)',
+        }}
+      >
+        {menu}
         {/* Always-mounted plot container so ResizeObserver attaches
             on first mount, not after data arrives. The empty-state
             overlay sits on top via absolute positioning when the plot
@@ -2100,6 +2117,10 @@ function APSweepViewer({
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'ap-sweep',
+  })
 
   const xRangeRef = useRef<[number, number] | null>(null)
   const yRangeRef = useRef<[number, number] | null>(null)
@@ -2591,7 +2612,12 @@ function APSweepViewer({
           style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
           title="Reset X+Y to data bounds">Reset zoom</button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, position: 'relative', minHeight: 0 }}
+      >
+        {menu}
         <canvas ref={overlayRef}
           style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5, width: '100%', height: '100%' }} />
       </div>
@@ -2723,6 +2749,10 @@ function APSpikesOverlayViewer({
   const containerRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const plotRef = useRef<uPlot | null>(null)
+  const { onContextMenu, menu } = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'ap-spikes-overlay',
+  })
   const [windowMs, setWindowMs] = useState(15)
 
   // Spikes to display: the user's checkbox set, or fall back to the
@@ -3146,7 +3176,12 @@ function APSpikesOverlayViewer({
           </label>
         </span>
       </div>
-      <div ref={containerRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+      <div
+        ref={containerRef}
+        onContextMenu={onContextMenu}
+        style={{ flex: 1, position: 'relative', minHeight: 0 }}
+      >
+        {menu}
         <canvas ref={overlayRef}
           style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5, width: '100%', height: '100%' }} />
       </div>

@@ -67,7 +67,10 @@ EXCLUDES = [
     'tensorflow', 'keras', 'jax', 'jaxlib',
     'sklearn', 'sympy',
     'pyarrow',
-    'PIL', 'Pillow',
+    # PIL/Pillow USED to live here, but matplotlib.colors imports PIL
+    # at module load (for image colormap support), so excluding it
+    # crashes the bundled backend on import. Same shape of bug as the
+    # earlier pandas/matplotlib exclusion fixed in v0.4.0.
     'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
     'wx', 'tk',
     'pytest', 'sphinx', 'docutils',

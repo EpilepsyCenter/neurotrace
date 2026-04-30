@@ -372,13 +372,35 @@ function _broadcastAP(apAnalyses: Record<string, APData>) {
  *  as bursts / APs: keyed filePath → `${group}:${series}` → EventsData.
  *  The main trace viewer reads this back on file open so users see
  *  their previous detections as dots without having to re-run. */
+/** Forward-compatible deserialization of saved ``EventsData``. Old
+ *  sidecars / prefs blobs predate fields added to ``EventsParams`` —
+ *  spreading the current defaults underneath ensures every blob has a
+ *  full shape regardless of when it was serialized. Idempotent.
+ *  Without this NumInputs bound to new fields show ``undefined``. */
+function _migrateEventsAnalyses(
+  raw: Record<string, any> | null | undefined,
+): Record<string, EventsData> | null {
+  if (!raw) return null
+  const defaults = defaultEventsParams()
+  const out: Record<string, EventsData> = {}
+  for (const [key, ent] of Object.entries(raw)) {
+    if (!ent || typeof ent !== 'object') continue
+    const merged: EventsData = {
+      ...(ent as EventsData),
+      params: { ...defaults, ...((ent as any).params ?? {}) },
+    }
+    out[key] = merged
+  }
+  return out
+}
+
 async function _loadPersistedEvents(filePath: string): Promise<Record<string, EventsData> | null> {
   const api = window.electronAPI
   if (!api?.getPreferences || !filePath) return null
   try {
     const prefs = (await api.getPreferences()) ?? {}
     const store = prefs.savedEventsAnalyses as Record<string, any> | undefined
-    return store?.[filePath] ?? null
+    return _migrateEventsAnalyses(store?.[filePath] ?? null)
   } catch { return null }
 }
 
@@ -636,7 +658,18 @@ export function defaultEventsParams(): EventsParams {
     riseHighPct: 90,
     decayPct: 37,
     decaySearchMs: 30,
+    baselineMethod: 'auto',
+    // Order 2 (quadratic) handles the typical "drift-then-settle"
+    // shape most slow-VC recordings show without bending into the
+    // events themselves. Order 1 = linear drift; orders > 3 risk
+    // tracking the event tails. Users can crank it for unusual cases.
+    baselinePolyOrder: 2,
+    decayEndpointMethod: 'first_cross',
+    biexpMinR2: null,
+    showEventFits: false,
     amplitudeMinAbs: 5,
+    useRmsAmpFloor: false,
+    ampFloorRmsMultiplier: 3,
     amplitudeMaxAbs: 2000,
     minIEIMs: 5,
     minIeiMs: 5,   // duplicate — backend expects min_iei_ms
@@ -1344,8 +1377,39 @@ export interface EventsParams {
   riseHighPct: number
   decayPct: number
   decaySearchMs: number
+  /** Per-event baseline detection method.
+   *  - ``'auto'``       — Jonas line-intersect + local mean window
+   *    (default; matches EE's automatic baseline).
+   *  - ``'polynomial'`` — fit a low-order polynomial to the whole
+   *    sweep with event-side samples clipped, then read the baseline
+   *    off that curve at each event's foot. Drift-aware; preferred
+   *    when slow-trend baselines outpace what the rolling-median
+   *    detrend can flatten without ringing. */
+  baselineMethod: 'auto' | 'polynomial'
+  baselinePolyOrder: number
+  /** Decay-endpoint detection: ``'first_cross'`` (default) returns to
+   *  baseline within the search window; ``'entire'`` always uses the
+   *  far edge of ``decaySearchMs``. ``entire`` gives a deterministic
+   *  integration window when events overlap heavily. */
+  decayEndpointMethod: 'first_cross' | 'entire'
+  /** Minimum biexp R² for an event to be retained. ``null`` disables
+   *  the filter. Auto-detected events only — manual adds bypass like
+   *  every other exclusion guard. */
+  biexpMinR2: number | null
+  /** Render thin black biexp-fit curves over each visible event in
+   *  the main viewer. Off by default to keep the viewer uncluttered;
+   *  toggle on to QC the fits visually before tightening R². */
+  showEventFits: boolean
   // Exclusion
   amplitudeMinAbs: number                   // abs(amplitude) cutoff
+  /** When true, the effective minimum-amplitude floor used during
+   *  detection is ``max(amplitudeMinAbs, ampFloorRmsMultiplier × |rmsValue|)``.
+   *  Lets template (correlation/deconvolution) methods reject events
+   *  smaller than n × baseline-noise without conflating the absolute
+   *  floor. ``rmsValue`` must be computed first (cursor band → Compute
+   *  RMS); if it's null this toggle is a no-op. */
+  useRmsAmpFloor: boolean
+  ampFloorRmsMultiplier: number             // n × RMS, default 3
   amplitudeMaxAbs: number                   // above → rejected as artefact
   minIEIMs: number
   aucMinAbs: number | null                  // null = off
@@ -1401,7 +1465,21 @@ export interface EventRow {
   biexpTauDecayMs: number | null
   biexpB0: number | null
   biexpB1: number | null
+  /** Goodness-of-fit on the biexp model — 1 = perfect, ~0 = no
+   *  better than mean-only, < 0 = worse than mean. Null when the fit
+   *  didn't run (window too short etc). */
+  biexpR2: number | null
   manual: boolean
+  /** Multi-template detection only — 0-based index into the templates
+   *  list active during the run. Backend tags it from argmax of the
+   *  per-template detection measure (correlation) or from the merged
+   *  union (deconvolution). Null for single-template, threshold, and
+   *  manual events. The viewer uses it to color the peak marker. */
+  templateIdx: number | null
+  /** Curation group (1–5). Set manually via the digit-key + click
+   *  flow on the main events viewer. Null = ungrouped. Used for
+   *  filtering / coloring. Round-trips via the .neurotrace sidecar. */
+  group: number | null
 }
 
 export interface EventsData {
@@ -1968,6 +2046,16 @@ interface AppState {
   /** Remove an event (by table index). Appends its peak time to the
    *  manual-removed list so re-runs honor the deletion. */
   removeEvent: (group: number, series: number, idx: number) => Promise<void>
+  /** Replace one event row in-place — Edit-Kinetics drag mode. The
+   *  caller has already round-tripped the new row through the backend
+   *  (with foot / decay-endpoint overrides applied); this action just
+   *  splices it in and broadcasts. The event's index is preserved so
+   *  navigation / selection stays put. */
+  replaceEvent: (group: number, series: number, idx: number, row: EventRow) => void
+  /** Assign or clear the curation group for one event. ``groupNum``
+   *  must be 1–5 or null (clear). Round-trips via the .neurotrace
+   *  sidecar like any other event field. */
+  setEventGroup: (group: number, series: number, idx: number, groupNum: number | null) => void
 
   // Template library actions
   saveEventsTemplate: (template: EventsTemplate) => void
@@ -2550,8 +2638,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           // versions (or the metadata-only sidecar path) might have
           // serialized.
           if (a.events && Object.keys(a.events).length > 0) {
-            patch.eventsAnalyses = a.events
-            post({ type: 'events-update', eventsAnalyses: a.events })
+            // Backfill any params fields added since this sidecar was
+            // written so new UI controls don't bind to ``undefined``.
+            const migrated = _migrateEventsAnalyses(a.events) ?? a.events
+            patch.eventsAnalyses = migrated
+            post({ type: 'events-update', eventsAnalyses: migrated })
             sidecarPopulated.events = true
           }
           if (a.bursts && Object.keys(a.bursts).length > 0) {
@@ -4332,7 +4423,21 @@ export const useAppStore = create<AppState>((set, get) => ({
         rise_high_pct: params.riseHighPct,
         decay_pct: params.decayPct,
         decay_search_ms: params.decaySearchMs,
-        amplitude_min_abs: params.amplitudeMinAbs,
+        baseline_method: params.baselineMethod,
+        baseline_poly_order: params.baselinePolyOrder,
+        decay_endpoint_method: params.decayEndpointMethod,
+        biexp_min_r2: params.biexpMinR2,
+        amplitude_min_abs: (
+          // When the user picks "× RMS" mode for Min |amp|, the floor
+          // is derived from the quiet-region RMS instead of the
+          // absolute value (the absolute is preserved on params for
+          // mode-toggle round-trip). Falls back to the absolute when
+          // RMS hasn't been computed yet — silent no-op so the run
+          // still completes; the Min-amp card surfaces the warning.
+          params.useRmsAmpFloor && params.rmsValue != null
+            ? params.ampFloorRmsMultiplier * Math.abs(params.rmsValue)
+            : params.amplitudeMinAbs
+        ),
         amplitude_max_abs: params.amplitudeMaxAbs,
         auc_min_abs: params.aucMinAbs,
         rise_max_ms: params.riseMaxMs,
@@ -4470,7 +4575,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         biexpTauDecayMs: e.biexp_tau_decay_ms == null ? null : Number(e.biexp_tau_decay_ms),
         biexpB0: e.biexp_b0 == null ? null : Number(e.biexp_b0),
         biexpB1: e.biexp_b1 == null ? null : Number(e.biexp_b1),
+        biexpR2: e.biexp_r2 == null ? null : Number(e.biexp_r2),
         manual: Boolean(e.manual),
+        templateIdx: e.template_idx == null ? null : Number(e.template_idx),
+        group: e.group == null ? null : Number(e.group),
       }))
 
       const dmRaw = data.detection_measure
@@ -4731,7 +4839,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           biexpTauDecayMs: e.biexp_tau_decay_ms == null ? null : Number(e.biexp_tau_decay_ms),
           biexpB0: e.biexp_b0 == null ? null : Number(e.biexp_b0),
           biexpB1: e.biexp_b1 == null ? null : Number(e.biexp_b1),
+          biexpR2: e.biexp_r2 == null ? null : Number(e.biexp_r2),
           manual: true,
+          templateIdx: null,
+          group: null,
         }
       }
     } catch {
@@ -4789,6 +4900,34 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedIdx: nextSelected,
       manualEdits: { addedTimes: nextAdded, removedTimes: nextRemoved },
     }
+    set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
+    _broadcastEvents(get().eventsAnalyses)
+  },
+
+  replaceEvent: (group, series, idx, row) => {
+    const key = `${group}:${series}`
+    const entry = get().eventsAnalyses[key]
+    if (!entry || idx < 0 || idx >= entry.events.length) return
+    const nextEvents = entry.events.slice()
+    nextEvents[idx] = row
+    const updated: EventsData = { ...entry, events: nextEvents }
+    set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
+    _broadcastEvents(get().eventsAnalyses)
+  },
+
+  setEventGroup: (group, series, idx, groupNum) => {
+    const key = `${group}:${series}`
+    const entry = get().eventsAnalyses[key]
+    if (!entry || idx < 0 || idx >= entry.events.length) return
+    const valid = groupNum == null
+      ? null
+      : (Number.isInteger(groupNum) && groupNum >= 1 && groupNum <= 5
+          ? groupNum : null)
+    const cur = entry.events[idx]
+    if (cur.group === valid) return
+    const nextEvents = entry.events.slice()
+    nextEvents[idx] = { ...cur, group: valid }
+    const updated: EventsData = { ...entry, events: nextEvents }
     set((s) => ({ eventsAnalyses: { ...s.eventsAnalyses, [key]: updated } }))
     _broadcastEvents(get().eventsAnalyses)
   },

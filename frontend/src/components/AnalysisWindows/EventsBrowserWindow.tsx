@@ -292,11 +292,102 @@ function EventBrowserPanel({
   const [preMs, setPreMs] = useState(10)
   const [winMs, setWinMs] = useState(60)
   const [respectFilter, setRespectFilter] = useState(true)
+  // Edit-Kinetics drag mode. ``primed`` is the landmark the user has
+  // selected to move; the next click on the plot sets the new
+  // position and triggers a backend re-measure. Off by default so
+  // accidental clicks don't move kinetics.
+  const [editMode, setEditMode] = useState(false)
+  const [primed, setPrimed] = useState<'foot' | 'decay' | null>(null)
+  const [editBusy, setEditBusy] = useState(false)
+  const replaceEvent = useAppStore((s) => s.replaceEvent)
 
   const idx = entry?.selectedIdx ?? (entry && entry.events.length > 0 ? 0 : null)
   const ev: EventRow | null = entry && idx != null && idx >= 0 && idx < entry.events.length
     ? entry.events[idx]
     : null
+
+  /** Send a foot / decay-endpoint override for the current event to
+   *  the backend, then replace the event row with the response. The
+   *  click time is in seconds RELATIVE to the peak (the plot's x is
+   *  centred on the peak); we add the absolute peak time to get sweep
+   *  coordinates. ``which`` controls which override field is sent. */
+  const editKineticsCommit = useCallback(async (which: 'foot' | 'decay', clickRelS: number) => {
+    if (!entry || !ev || idx == null) return
+    const absS = ev.peakTimeS + clickRelS
+    setEditBusy(true)
+    try {
+      const body: Record<string, any> = {
+        group: entry.group, series: entry.series,
+        sweep: ev.sweep ?? entry.sweep, trace: entry.channel,
+        direction: entry.params.peakDirection,
+        peak_idx: ev.peakIdx,
+        baseline_search_ms: entry.params.baselineSearchMs,
+        avg_baseline_ms: entry.params.avgBaselineMs,
+        avg_peak_ms: entry.params.avgPeakMs,
+        rise_low_pct: entry.params.riseLowPct,
+        rise_high_pct: entry.params.riseHighPct,
+        decay_pct: entry.params.decayPct,
+        decay_search_ms: entry.params.decaySearchMs,
+        decay_endpoint_method: entry.params.decayEndpointMethod,
+        // Match the original detection's pre-processing so the
+        // re-measure runs against the same trace.
+        filter_enabled: entry.params.filterEnabled,
+        filter_type: entry.params.filterType,
+        filter_low: entry.params.filterLow,
+        filter_high: entry.params.filterHigh,
+        filter_order: entry.params.filterOrder,
+        detrend_enabled: entry.params.detrendEnabled,
+        detrend_window_ms: entry.params.detrendWindowMs,
+      }
+      if (which === 'foot') body.foot_time_s = absS
+      else body.decay_endpoint_time_s = absS
+      const resp = await fetch(`${backendUrl}/api/events/edit_kinetics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) throw new Error(String(resp.status))
+      const out = await resp.json()
+      const e = out.event
+      if (!e) throw new Error('no event in response')
+      // Map the backend snake_case → frontend camelCase. Same shape as
+      // EventRow elsewhere in the store.
+      const row: EventRow = {
+        sweep: Number(e.sweep ?? 0),
+        peakIdx: Number(e.peak_idx),
+        peakTimeS: Number(e.peak_time_s),
+        peakVal: Number(e.peak_val),
+        footIdx: Number(e.foot_idx),
+        footTimeS: Number(e.foot_time_s),
+        baselineVal: Number(e.baseline_val),
+        amplitude: Number(e.amplitude),
+        riseTimeMs: e.rise_time_ms == null ? null : Number(e.rise_time_ms),
+        decayTimeMs: e.decay_time_ms == null ? null : Number(e.decay_time_ms),
+        halfWidthMs: e.half_width_ms == null ? null : Number(e.half_width_ms),
+        auc: e.auc == null ? null : Number(e.auc),
+        decayEndpointIdx: e.decay_endpoint_idx == null ? null : Number(e.decay_endpoint_idx),
+        decayTauMs: e.decay_tau_ms == null ? null : Number(e.decay_tau_ms),
+        biexpTauRiseMs: e.biexp_tau_rise_ms == null ? null : Number(e.biexp_tau_rise_ms),
+        biexpTauDecayMs: e.biexp_tau_decay_ms == null ? null : Number(e.biexp_tau_decay_ms),
+        biexpB0: e.biexp_b0 == null ? null : Number(e.biexp_b0),
+        biexpB1: e.biexp_b1 == null ? null : Number(e.biexp_b1),
+        biexpR2: e.biexp_r2 == null ? null : Number(e.biexp_r2),
+        manual: true,
+        // Preserve the existing event's template tag + group across an
+        // edit-kinetics adjustment — the user is fine-tuning landmarks,
+        // not redetecting from a different template, and they don't
+        // expect their group assignment to evaporate.
+        templateIdx: ev.templateIdx,
+        group: ev.group,
+      }
+      replaceEvent(entry.group, entry.series, idx, row)
+    } catch (err) {
+      console.error('edit_kinetics failed', err)
+    } finally {
+      setEditBusy(false)
+      setPrimed(null)
+    }
+  }, [backendUrl, entry, ev, idx, replaceEvent])
 
   // Keyboard nav — ← / → step through events. Ignores inputs so
   // users can type into the window/pre fields without flipping events.
@@ -537,6 +628,40 @@ function EventBrowserPanel({
     }
   }, [winData, ev, entry])
 
+  // Edit-Kinetics click capture — when a landmark is primed, the next
+  // click on the plot's overlay layer is consumed as the new position.
+  // Attaches over the zoom/pan handler in capture phase so the drag
+  // handler doesn't swallow the click. Released as soon as the click
+  // commits (or the user presses Esc).
+  useEffect(() => {
+    if (!primed) return
+    const u = plotRef.current
+    if (!u) return
+    const over = (u as any).over as HTMLDivElement | null
+    if (!over) return
+    over.style.cursor = 'crosshair'
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      const rect = over.getBoundingClientRect()
+      const px = e.clientX - rect.left
+      const t = u.posToVal(px, 'x')
+      if (!isFinite(t)) return
+      e.stopPropagation()
+      e.preventDefault()
+      void editKineticsCommit(primed, t)
+    }
+    over.addEventListener('pointerdown', onDown, { capture: true })
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPrimed(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      over.removeEventListener('pointerdown', onDown, { capture: true } as any)
+      window.removeEventListener('keydown', onKey)
+      over.style.cursor = ''
+    }
+  }, [primed, editKineticsCommit])
+
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -622,7 +747,65 @@ function EventBrowserPanel({
             Discard
           </button>
         )}
+        {/* Edit-Kinetics drag mode. Toggles a panel of "move" buttons
+            for foot / decay-endpoint; when one is primed the cursor
+            becomes a crosshair and the next click on the trace sets
+            the new landmark, triggering a backend re-measure. Esc
+            cancels a primed move without touching the kinetics. */}
+        {ev && (
+          <button className="btn"
+            onClick={() => { setEditMode((v) => !v); setPrimed(null) }}
+            style={{
+              padding: '3px 10px',
+              background: editMode ? '#42a5f5' : undefined,
+              color: editMode ? '#fff' : undefined,
+            }}
+            title="Manually drag the foot / decay endpoint of this event">
+            {editMode ? 'Edit ON' : 'Edit kinetics'}
+          </button>
+        )}
       </div>
+      {editMode && ev && (
+        <div style={{
+          display: 'flex', gap: 6, alignItems: 'center',
+          padding: '4px 8px', borderRadius: 4,
+          background: 'var(--bg-secondary)',
+          border: '1px solid var(--border)',
+          fontSize: 'var(--font-size-label)',
+        }}>
+          <span style={{ color: 'var(--text-muted)' }}>Move:</span>
+          <button className="btn"
+            onClick={() => setPrimed('foot')}
+            disabled={editBusy}
+            style={{
+              padding: '2px 10px',
+              background: primed === 'foot' ? '#9e9e9e' : undefined,
+              color: primed === 'foot' ? '#fff' : undefined,
+            }}
+            title="Click the trace to reposition the foot / baseline anchor">
+            Foot
+          </button>
+          <button className="btn"
+            onClick={() => setPrimed('decay')}
+            disabled={editBusy}
+            style={{
+              padding: '2px 10px',
+              background: primed === 'decay' ? '#ab47bc' : undefined,
+              color: primed === 'decay' ? '#fff' : undefined,
+            }}
+            title="Click the trace to reposition the decay endpoint">
+            Decay end
+          </button>
+          {primed && (
+            <span style={{
+              color: 'var(--text-muted)', fontStyle: 'italic',
+            }}>
+              click the trace to set… (Esc cancels)
+            </span>
+          )}
+          {editBusy && <span style={{ color: 'var(--text-muted)' }}>re-measuring…</span>}
+        </div>
+      )}
 
       {/* Kinetics card + mini plot side-by-side */}
       <div style={{
@@ -730,6 +913,10 @@ function AllEventsOverlayPanel({
     time: number[]; traces: (number | null)[][]
     mean: (number | null)[]; sdLo: (number | null)[]; sdHi: (number | null)[]
     nIncluded: number
+    /** Per-trace event index (into ``entry.events``) for the rows in
+     *  ``traces``. Backend may exclude events whose window runs off the
+     *  edge of the sweep, so this is not always ``[0, 1, 2, …]``. */
+    rowIdxToEventIdx: number[]
   } | null>(null)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -737,6 +924,141 @@ function AllEventsOverlayPanel({
   const [beforeMs, setBeforeMs] = useState(5)
   const [afterMs, setAfterMs] = useState(50)
   const [respectFilter, setRespectFilter] = useState(true)
+  // Shift / Scale display options — client-side transforms applied
+  // before rendering. Not persisted to the analysis (this is purely
+  // about how the overlay LOOKS); distance ranking + highlight use
+  // the same transformed values so what you see is what's compared.
+  // EE's convention is "scale before shift"; we follow it.
+  type ShiftMode = 'none' | 'demean' | 'align' | 'first'
+  type ScaleMode = 'none' | 'amplitude' | 'std'
+  const [shiftMode, setShiftMode] = useState<ShiftMode>('none')
+  const [scaleMode, setScaleMode] = useState<ScaleMode>('none')
+
+  // ---- Most-Distant browsing state ----
+  // Tracks the rank into the L2-distance-sorted list (0 = most distant
+  // from the mean event, 1 = next, …). ``null`` = no event highlighted
+  // (the panel is in plain "all events overlaid" mode). The actual
+  // event index in the entry is read off ``distances[rank].rowIdx``.
+  const [distantRank, setDistantRank] = useState<number | null>(null)
+  const removeEvent = useAppStore((s) => s.removeEvent)
+
+  /** Transformed-for-display version of the fetched overlay data —
+   *  scale-then-shift applied per row (EE's convention), then mean +
+   *  ±1 SD recomputed across the transformed rows so the envelope
+   *  matches what's drawn. ``data`` (raw) is kept around for nothing
+   *  in particular but retained as the source of truth in case we
+   *  need it later. Same row-count + time array as ``data``. */
+  const displayData = useMemo(() => {
+    if (!data) return null
+    const { time, traces, rowIdxToEventIdx, nIncluded } = data
+    if (shiftMode === 'none' && scaleMode === 'none') return data
+    // Find the aligned-zero index — t=0 in the time array. Used by the
+    // 'align' shift mode (subtract the value at the alignment anchor
+    // so every event passes through 0 at t=0).
+    let alignIdx = 0
+    let bestAbs = Infinity
+    for (let i = 0; i < time.length; i++) {
+      const a = Math.abs(time[i])
+      if (a < bestAbs) { bestAbs = a; alignIdx = i }
+    }
+    const newTraces: (number | null)[][] = traces.map((row) => {
+      // Skip null rows (events whose window ran off the sweep edge).
+      if (row.every((v) => v == null)) return row.slice()
+      // Pull non-null samples for stat computations.
+      const xs: number[] = []
+      for (const v of row) if (v != null) xs.push(v)
+      if (xs.length === 0) return row.slice()
+      // Scale first.
+      let scale = 1
+      if (scaleMode === 'amplitude') {
+        const mn = Math.min(...xs); const mx = Math.max(...xs)
+        const span = mx - mn
+        if (span > 0 && isFinite(span)) scale = 1 / span
+      } else if (scaleMode === 'std') {
+        const mean = xs.reduce((s, v) => s + v, 0) / xs.length
+        let s2 = 0
+        for (const v of xs) s2 += (v - mean) * (v - mean)
+        const sd = Math.sqrt(s2 / Math.max(1, xs.length - 1))
+        if (sd > 0 && isFinite(sd)) scale = 1 / sd
+      }
+      const scaled = row.map((v) => v == null ? null : v * scale)
+      // Shift second.
+      let shift = 0
+      if (shiftMode === 'demean') {
+        let s = 0; let n = 0
+        for (const v of scaled) if (v != null) { s += v; n++ }
+        shift = n > 0 ? s / n : 0
+      } else if (shiftMode === 'align') {
+        const a = scaled[alignIdx]
+        if (a != null) shift = a
+      } else if (shiftMode === 'first') {
+        // Use the first non-null sample of the (scaled) row.
+        for (const v of scaled) if (v != null) { shift = v; break }
+      }
+      if (shift === 0) return scaled
+      return scaled.map((v) => v == null ? null : v - shift)
+    })
+    // Recompute mean + sd from transformed rows so the envelope tracks
+    // what's drawn rather than the raw fetched mean.
+    const m: (number | null)[] = []
+    const lo: (number | null)[] = []
+    const hi: (number | null)[] = []
+    for (let i = 0; i < time.length; i++) {
+      const col: number[] = []
+      for (const row of newTraces) {
+        const v = row[i]; if (v != null) col.push(v)
+      }
+      if (col.length === 0) { m.push(null); lo.push(null); hi.push(null); continue }
+      const mean = col.reduce((s, v) => s + v, 0) / col.length
+      let s2 = 0; for (const v of col) s2 += (v - mean) * (v - mean)
+      const sd = col.length > 1 ? Math.sqrt(s2 / (col.length - 1)) : 0
+      m.push(mean); lo.push(mean - sd); hi.push(mean + sd)
+    }
+    return { time, traces: newTraces, mean: m, sdLo: lo, sdHi: hi,
+             nIncluded, rowIdxToEventIdx }
+  }, [data, shiftMode, scaleMode])
+
+  /** L2 distance from each event's trace to the mean event, sorted
+   *  descending. Rows whose backend window ran off the edge of the
+   *  sweep (all-null trace) are excluded — they have no shape to
+   *  compare. Recomputed whenever the overlay data changes. */
+  const distances = useMemo(() => {
+    const dd = displayData
+    if (!dd || dd.traces.length === 0) return []
+    const mean = dd.mean
+    if (mean.length === 0) return []
+    const out: { rowIdx: number; distance: number }[] = []
+    for (let r = 0; r < dd.traces.length; r++) {
+      const row = dd.traces[r]
+      let acc = 0
+      let counted = 0
+      for (let i = 0; i < row.length; i++) {
+        const v = row[i], m = mean[i]
+        if (v == null || m == null) continue
+        const d = v - m
+        acc += d * d
+        counted++
+      }
+      if (counted === 0) continue
+      out.push({ rowIdx: r, distance: Math.sqrt(acc / counted) })
+    }
+    out.sort((a, b) => b.distance - a.distance)
+    return out
+  }, [displayData])
+
+  // Reset distance ranking whenever the displayed data changes
+  // (refetch OR shift/scale toggle) — otherwise rank would point at a
+  // stale row index or stale distance.
+  useEffect(() => { setDistantRank(null) }, [displayData])
+
+  /** Row index of the currently-highlighted event (null = none). Used
+   *  by the draw hook to bold-trace the selected row in blue. */
+  const highlightedRowIdx = (distantRank != null && distances[distantRank])
+    ? distances[distantRank].rowIdx : null
+  const highlightedRowIdxRef = useRef<number | null>(highlightedRowIdx)
+  highlightedRowIdxRef.current = highlightedRowIdx
+  const dataRef = useRef(displayData)
+  dataRef.current = displayData
 
   useEffect(() => {
     if (!backendUrl || !entry || entry.events.length === 0) {
@@ -769,14 +1091,19 @@ function AllEventsOverlayPanel({
         }),
       }).then((r) => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
         .then((d) => {
+          const traces = (d.traces ?? []).map((row: any[]) =>
+            row.map((x: any) => x == null ? null : Number(x)))
+          // Backend preserves a 1:1 row↔event mapping by emitting an
+          // all-null row for events whose window would run off the
+          // sweep edge. The L2-distance ranking below ignores those.
           setData({
             time: (d.time_s ?? []).map((x: any) => Number(x)),
-            traces: (d.traces ?? []).map((row: any[]) =>
-              row.map((x) => x == null ? null : Number(x))),
+            traces,
             mean: (d.mean ?? []).map((x: any) => x == null ? null : Number(x)),
             sdLo: (d.sd_lo ?? []).map((x: any) => x == null ? null : Number(x)),
             sdHi: (d.sd_hi ?? []).map((x: any) => x == null ? null : Number(x)),
             nIncluded: Number(d.n_included ?? 0),
+            rowIdxToEventIdx: traces.map((_: any, i: number) => i),
           })
           setLoading(false)
         })
@@ -790,17 +1117,18 @@ function AllEventsOverlayPanel({
     if (!container) return
     let teardown: (() => void) | null = null
     if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!data || data.time.length === 0) return
+    const dd = displayData
+    if (!dd || dd.time.length === 0) return
     const frame = requestAnimationFrame(() => {
       const w = Math.max(container.clientWidth, 200)
       const h = Math.max(container.clientHeight, 120)
       const aligned: uPlot.AlignedData = [
-        data.time as any,
-        ...(data.traces.map((row) => row as any) as any[]),
-        data.mean as any,
+        dd.time as any,
+        ...(dd.traces.map((row) => row as any) as any[]),
+        dd.mean as any,
       ]
       const seriesDefs: uPlot.Series[] = [{}]
-      for (let i = 0; i < data.traces.length; i++) {
+      for (let i = 0; i < dd.traces.length; i++) {
         seriesDefs.push({
           stroke: 'rgba(128,128,128,0.35)', width: 0.8, spanGaps: false,
         })
@@ -821,7 +1149,10 @@ function AllEventsOverlayPanel({
           { stroke: cssVar('--chart-axis'),
             grid: { stroke: cssVar('--chart-grid'), width: 1 },
             ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-            size: 55, label: 'Δ baseline',
+            size: 55,
+            label: scaleMode === 'amplitude' ? 'amp = 1'
+                 : scaleMode === 'std' ? 'σ = 1'
+                 : 'Δ baseline',
             font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
           },
         ],
@@ -829,30 +1160,53 @@ function AllEventsOverlayPanel({
         series: seriesDefs,
         hooks: {
           draw: [(u) => {
-            if (data.sdLo.length !== data.time.length
-                || data.sdHi.length !== data.time.length) return
+            if (dd.sdLo.length !== dd.time.length
+                || dd.sdHi.length !== dd.time.length) return
             const ctx = u.ctx
             ctx.save()
             ctx.fillStyle = 'rgba(229, 115, 115, 0.18)'
             ctx.beginPath()
             let started = false
-            for (let i = 0; i < data.time.length; i++) {
-              const v = data.sdHi[i]
+            for (let i = 0; i < dd.time.length; i++) {
+              const v = dd.sdHi[i]
               if (v == null) continue
-              const px = u.valToPos(data.time[i], 'x', true)
+              const px = u.valToPos(dd.time[i], 'x', true)
               const py = u.valToPos(v, 'y', true)
               if (!started) { ctx.moveTo(px, py); started = true }
               else ctx.lineTo(px, py)
             }
-            for (let i = data.time.length - 1; i >= 0; i--) {
-              const v = data.sdLo[i]
+            for (let i = dd.time.length - 1; i >= 0; i--) {
+              const v = dd.sdLo[i]
               if (v == null) continue
-              const px = u.valToPos(data.time[i], 'x', true)
+              const px = u.valToPos(dd.time[i], 'x', true)
               const py = u.valToPos(v, 'y', true)
               ctx.lineTo(px, py)
             }
             ctx.closePath()
             ctx.fill()
+            // Most-Distant highlight — overdraw the currently selected
+            // event's trace in bright blue, on top of the gray stack.
+            // Reading from refs keeps the plot from rebuilding when the
+            // user steps through events; uPlot's draw hook re-fires on
+            // redraw(), which we trigger via a useEffect below.
+            const rIdx = highlightedRowIdxRef.current
+            const cur = dataRef.current
+            if (rIdx != null && cur && cur.traces[rIdx]) {
+              const row = cur.traces[rIdx]
+              ctx.strokeStyle = '#42a5f5'
+              ctx.lineWidth = 2
+              ctx.beginPath()
+              let drawing = false
+              for (let i = 0; i < cur.time.length; i++) {
+                const v = row[i]
+                if (v == null) { drawing = false; continue }
+                const px = u.valToPos(cur.time[i], 'x', true)
+                const py = u.valToPos(v, 'y', true)
+                if (!drawing) { ctx.moveTo(px, py); drawing = true }
+                else ctx.lineTo(px, py)
+              }
+              ctx.stroke()
+            }
             ctx.restore()
           }],
         },
@@ -864,7 +1218,7 @@ function AllEventsOverlayPanel({
       cancelAnimationFrame(frame)
       if (teardown) teardown()
     }
-  }, [data, alignMode])
+  }, [displayData, alignMode])
 
   useEffect(() => {
     const el = containerRef.current
@@ -878,6 +1232,42 @@ function AllEventsOverlayPanel({
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  // Cheap redraw when the highlight rank changes — avoids rebuilding
+  // the whole uPlot instance for every step through the distance list.
+  useEffect(() => { plotRef.current?.redraw() }, [highlightedRowIdx])
+
+  // ---- Most-Distant nav handlers ----
+  const stepDistant = useCallback((delta: number) => {
+    if (distances.length === 0) return
+    setDistantRank((r) => {
+      const start = r ?? -1
+      const next = start + delta
+      if (next < 0) return 0
+      if (next >= distances.length) return distances.length - 1
+      return next
+    })
+  }, [distances])
+
+  const enterDistantMode = useCallback(() => {
+    if (distances.length === 0) return
+    setDistantRank((r) => r ?? 0)
+  }, [distances])
+
+  const exitDistantMode = useCallback(() => setDistantRank(null), [])
+
+  /** Delete the currently-highlighted event from the analysis. The
+   *  store removal flows back through the entry → re-fetches the
+   *  overlay data → distances recompute → distantRank reset to null
+   *  via the data-change effect above. The user can then click "Most
+   *  distant" again to keep curating. */
+  const deleteHighlighted = useCallback(() => {
+    if (highlightedRowIdx == null || !entry) return
+    void removeEvent(entry.group, entry.series, highlightedRowIdx)
+  }, [highlightedRowIdx, entry, removeEvent])
+
+  const distantInfo = (distantRank != null && distances[distantRank])
+    ? distances[distantRank] : null
 
   return (
     <div style={{
@@ -910,6 +1300,30 @@ function AllEventsOverlayPanel({
             onChange={(e) => setRespectFilter(e.target.checked)} />
           <span>Filter</span>
         </label>
+        {/* Display transforms — scale-then-shift, EE convention. None
+            by default. Mean + ±1 SD envelope are recomputed from the
+            transformed traces so the red mean tracks the gray cloud. */}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+               title="Per-event amplitude rescale before plotting">
+          <span style={{ color: 'var(--text-muted)' }}>Scale</span>
+          <select value={scaleMode}
+            onChange={(e) => setScaleMode(e.target.value as ScaleMode)}>
+            <option value="none">none</option>
+            <option value="amplitude">amp → 1</option>
+            <option value="std">σ → 1</option>
+          </select>
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+               title="Per-event vertical shift before plotting">
+          <span style={{ color: 'var(--text-muted)' }}>Shift</span>
+          <select value={shiftMode}
+            onChange={(e) => setShiftMode(e.target.value as ShiftMode)}>
+            <option value="none">none</option>
+            <option value="demean">demean</option>
+            <option value="align">{alignMode}=0</option>
+            <option value="first">first=0</option>
+          </select>
+        </label>
         {data && (
           <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
             {data.nIncluded} / {entry?.events.length ?? 0} events
@@ -917,6 +1331,69 @@ function AllEventsOverlayPanel({
         )}
         {loading && <span style={{ color: 'var(--text-muted)' }}>loading…</span>}
         {err && <span style={{ color: '#e57373' }}>⚠ {err}</span>}
+        {/* Most-Distant outlier curation. Steps through events sorted
+            by L2 distance from the mean event (most-distant first).
+            Highlighted event is drawn in blue; Delete removes it and
+            the overlay refetches automatically. */}
+        <span style={{
+          marginLeft: 8, paddingLeft: 8,
+          borderLeft: '1px solid var(--border)',
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+        }}>
+          {distantRank == null ? (
+            <button className="btn"
+              onClick={enterDistantMode}
+              disabled={distances.length === 0}
+              style={{ padding: '2px 8px' }}
+              title="Step through events from most distant to nearest (L2 from mean)">
+              Most distant
+            </button>
+          ) : (
+            <>
+              <button className="btn"
+                onClick={() => stepDistant(-1)}
+                disabled={distantRank <= 0}
+                style={{ padding: '2px 6px' }}
+                title="More distant">
+                ◀
+              </button>
+              <span style={{
+                fontFamily: 'var(--font-mono)', minWidth: 90,
+                textAlign: 'center',
+              }}>
+                #{distantRank + 1} / {distances.length}
+                {distantInfo && (
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {' '}· d={distantInfo.distance.toFixed(2)}
+                  </span>
+                )}
+              </span>
+              <button className="btn"
+                onClick={() => stepDistant(1)}
+                disabled={distantRank >= distances.length - 1}
+                style={{ padding: '2px 6px' }}
+                title="Less distant">
+                ▶
+              </button>
+              <button className="btn"
+                onClick={deleteHighlighted}
+                disabled={highlightedRowIdx == null}
+                style={{
+                  padding: '2px 8px',
+                  background: '#c62828', color: '#fff',
+                }}
+                title="Delete this event from the analysis">
+                Del
+              </button>
+              <button className="btn"
+                onClick={exitDistantMode}
+                style={{ padding: '2px 6px' }}
+                title="Exit Most-Distant mode">
+                ✕
+              </button>
+            </>
+          )}
+        </span>
         <span style={{ flex: 1 }} />
         <span style={{
           color: 'var(--text-muted)', fontSize: 10, fontStyle: 'italic',

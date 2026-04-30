@@ -15,6 +15,16 @@ import React, { useCallback, useEffect, useState } from 'react'
  *   return <div onContextMenu={onContextMenu}>{...children}{menu}</div>
  */
 
+export interface PlotMenuExtraItem {
+  /** Visible label. Empty string renders a separator divider. */
+  label: string
+  /** Optional right-side hint text. */
+  hint?: string
+  /** Click handler. The menu auto-closes after the click. Omit for
+   *  disabled / informational items. */
+  onClick?: () => void
+}
+
 export interface PlotMenuSources {
   /** Returns the canvas to copy/save as PNG, or null if unavailable
    *  (e.g. before a uPlot rebuild has populated the ref). */
@@ -23,6 +33,11 @@ export interface PlotMenuSources {
   getSvg?: () => string | null
   /** Default base filename used in Save dialogs (no extension). */
   defaultName?: string
+  /** Caller-supplied items prepended above the Copy / Save block.
+   *  Re-evaluated every time the menu opens (callback) so callers can
+   *  pass live state (e.g. "Open in Event Browser at event #42")
+   *  without rebuilding the source object. */
+  getExtraItems?: () => PlotMenuExtraItem[]
 }
 
 interface MenuPos { x: number; y: number }
@@ -36,7 +51,8 @@ export function usePlotMenu(sources: PlotMenuSources) {
     // empty-state menus on a viewer with nothing rendered yet).
     const hasCanvas = sources.getCanvas?.() != null
     const hasSvg = sources.getSvg?.() != null
-    if (!hasCanvas && !hasSvg) return
+    const hasExtra = (sources.getExtraItems?.()?.length ?? 0) > 0
+    if (!hasCanvas && !hasSvg && !hasExtra) return
     e.preventDefault()
     setPos({ x: e.clientX, y: e.clientY })
   }, [sources])
@@ -195,6 +211,22 @@ function PlotContextMenu({ x, y, sources, onClose }: PlotContextMenuProps) {
         overflow: 'hidden',
       }}
     >
+      {(() => {
+        const extra = sources.getExtraItems?.() ?? []
+        if (extra.length === 0) return null
+        return (
+          <>
+            {extra.map((it, i) => it.label === '' ? (
+              <Divider key={`div-${i}`} />
+            ) : (
+              <Item key={`x-${i}`} label={it.label} hint={it.hint}
+                onClick={it.onClick ? () => { it.onClick!(); onClose() } : undefined}
+                disabled={!it.onClick} />
+            ))}
+            <Divider />
+          </>
+        )
+      })()}
       {hasSvg && (
         <>
           <Item label="Copy SVG" hint="paste into Illustrator" busy={busy === 'copy-svg'} onClick={copySvg} />

@@ -47,6 +47,7 @@ from analysis.events import (
     _gaussian_fit_to_histogram,          # for deconvolution cutoff overlay
     run_events, average_detected_events,
     measure_event_kinetics,              # for /add_manual
+    fit_polynomial_baseline,             # for /baseline_curve
     EventRecord,
 )
 
@@ -331,6 +332,16 @@ class DetectRequest(BaseModel):
     rise_high_pct: float = 90.0
     decay_pct: float = 37.0
     decay_search_ms: float = 30.0
+    # Per-event baseline detection method. 'auto' = Jonas line-intersect
+    # + local mean (default). 'polynomial' = fit a low-order polynomial
+    # to the whole sweep (event-side tail clipped) and read the
+    # baseline off that curve at each foot — drift-aware.
+    baseline_method: str = "auto"
+    baseline_poly_order: int = 2
+    # Decay-endpoint method: 'first_cross' (default) or 'entire'.
+    decay_endpoint_method: str = "first_cross"
+    # Min biexp R² for retaining an event. None disables.
+    biexp_min_r2: Optional[float] = None
 
     # Exclusion
     amplitude_min_abs: float = 5.0
@@ -503,6 +514,10 @@ def _detect_iter(req: "DetectRequest"):
                     rise_high_pct=req.rise_high_pct,
                     decay_pct=req.decay_pct,
                     decay_search_ms=req.decay_search_ms,
+                    baseline_method=req.baseline_method,
+                    baseline_poly_order=req.baseline_poly_order,
+                    decay_endpoint_method=req.decay_endpoint_method,
+                    biexp_min_r2=req.biexp_min_r2,
                     amplitude_min_abs=req.amplitude_min_abs,
                     amplitude_max_abs=req.amplitude_max_abs,
                     auc_min_abs=req.auc_min_abs,
@@ -966,6 +981,123 @@ async def add_manual(req: AddManualRequest):
 
 
 # ---------------------------------------------------------------------------
+# /edit_kinetics — re-measure ONE event with manual foot / decay overrides
+# ---------------------------------------------------------------------------
+
+class EditKineticsRequest(BaseModel):
+    group: int
+    series: int
+    sweep: int
+    trace: int
+    direction: str = "negative"
+    # The peak the user wants to re-measure. Frontend sends the index
+    # (sample) that's already on the event; we don't refine it again.
+    peak_idx: int
+    # User's new landmark — exactly one is set per request. Null means
+    # "leave the auto-detected one in place" (so the frontend can pick
+    # which kinetic to override without sending the other one).
+    foot_time_s: Optional[float] = None
+    decay_endpoint_time_s: Optional[float] = None
+    # Pre-detection pipeline — must match what was used during the
+    # original detection so the trace seen here is the same one the
+    # event was measured on. Frontend forwards the active params.
+    filter_enabled: bool = False
+    filter_type: str = "bandpass"
+    filter_low: float = 1.0
+    filter_high: float = 500.0
+    filter_order: int = 4
+    detrend_enabled: bool = False
+    detrend_window_ms: float = 500.0
+    # Kinetics knobs — same as /detect; passed through to
+    # measure_event_kinetics so the recompute matches the original.
+    baseline_search_ms: float = 10.0
+    avg_baseline_ms: float = 1.0
+    avg_peak_ms: float = 0.0
+    rise_low_pct: float = 10.0
+    rise_high_pct: float = 90.0
+    decay_pct: float = 37.0
+    decay_search_ms: float = 30.0
+    decay_endpoint_method: str = "first_cross"
+
+
+@router.post("/edit_kinetics")
+async def edit_kinetics(req: EditKineticsRequest):
+    """Re-measure a single event with a user-supplied foot / endpoint.
+
+    The Edit-Kinetics drag mode in the events browser sends one of
+    these on each click. We rebuild the same trace the detector saw
+    (detrend → filter), then re-run ``measure_event_kinetics`` on the
+    event's existing peak with the override applied. Returns one full
+    event row the frontend can splice in to replace the old one.
+    """
+    values, sr, _units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    if req.detrend_enabled:
+        try:
+            from scipy.ndimage import median_filter
+            w = max(3, int(round(req.detrend_window_ms / 1000.0 * sr)))
+            if w % 2 == 0:
+                w += 1
+            base = median_filter(values, size=w, mode="nearest")
+            values = values - base
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Detrend failed: {e}")
+    if req.filter_enabled:
+        try:
+            values = _apply_pre_detection_filter(values, sr, {
+                "filter_enabled": True,
+                "filter_type": req.filter_type,
+                "filter_low": req.filter_low,
+                "filter_high": req.filter_high,
+                "filter_order": req.filter_order,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
+    n = len(values)
+    foot_override = (int(round(req.foot_time_s * sr))
+                     if req.foot_time_s is not None else None)
+    decay_override = (int(round(req.decay_endpoint_time_s * sr))
+                      if req.decay_endpoint_time_s is not None else None)
+    kin = measure_event_kinetics(
+        np.asarray(values, dtype=float), sr, int(req.peak_idx),
+        direction=req.direction,
+        baseline_search_ms=req.baseline_search_ms,
+        avg_baseline_ms=req.avg_baseline_ms,
+        avg_peak_ms=req.avg_peak_ms,
+        rise_low_pct=req.rise_low_pct,
+        rise_high_pct=req.rise_high_pct,
+        decay_pct=req.decay_pct,
+        decay_search_ms=req.decay_search_ms,
+        decay_endpoint_method=req.decay_endpoint_method,
+        foot_idx_override=foot_override,
+        decay_endpoint_idx_override=decay_override,
+    )
+    rec = EventRecord(
+        sweep=req.sweep,
+        peak_idx=kin.peak_idx,
+        peak_time_s=float(kin.peak_idx) / sr,
+        peak_val=kin.peak_val,
+        foot_idx=kin.foot_idx,
+        foot_time_s=float(kin.foot_idx) / sr,
+        baseline_val=kin.baseline_val,
+        amplitude=kin.amplitude,
+        rise_time_ms=kin.rise_time_ms,
+        decay_time_ms=kin.decay_time_ms,
+        half_width_ms=kin.half_width_ms,
+        auc=kin.auc,
+        decay_endpoint_idx=kin.decay_endpoint_idx,
+        decay_tau_ms=kin.decay_tau_ms,
+        biexp_tau_rise_ms=kin.biexp_tau_rise_ms,
+        biexp_tau_decay_ms=kin.biexp_tau_decay_ms,
+        biexp_b0=kin.biexp_b0,
+        biexp_b1=kin.biexp_b1,
+        biexp_r2=kin.biexp_r2,
+        manual=True,
+    )
+    _ = n  # keep n referenced for clarity; clamping happens inside measure_event_kinetics
+    return {"event": rec.to_dict()}
+
+
+# ---------------------------------------------------------------------------
 # /overlay — stack all events aligned on peak / foot for QC display
 # ---------------------------------------------------------------------------
 
@@ -1174,4 +1306,105 @@ async def detection_measure(req: DetectionMeasureRequest):
         "n_raw_samples": int(len(dm_arr)),
         "method": label,
         **extra,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /baseline_curve — polynomial baseline curve for visualization
+# ---------------------------------------------------------------------------
+
+class BaselineCurveRequest(BaseModel):
+    """Inputs for the polynomial-baseline overlay shown on the events
+    viewer when ``baseline_method == 'polynomial'``. Mirrors the
+    ``/detection_measure`` endpoint's preprocessing pipeline (detrend →
+    Butterworth filter) so the curve is computed on the EXACT trace
+    detection runs against, not the raw signal."""
+    group: int
+    series: int
+    sweep: int
+    trace: int
+    direction: str = "negative"
+    poly_order: int = 2
+    # Same pre-processing pipeline as /detect.
+    filter_enabled: bool = False
+    filter_type: str = "bandpass"
+    filter_low: float = 1.0
+    filter_high: float = 500.0
+    filter_order: int = 4
+    detrend_enabled: bool = False
+    detrend_window_ms: float = 500.0
+    # Optional viewport slicing (full sample-rate); when omitted the
+    # whole sweep is returned (decimated if it would exceed the cap).
+    t_start_s: Optional[float] = None
+    t_end_s: Optional[float] = None
+
+
+@router.post("/baseline_curve")
+async def baseline_curve(req: BaselineCurveRequest):
+    """Return the polynomial baseline curve for one sweep (decimated).
+
+    The polynomial fit runs on the WHOLE sweep so the curve at the
+    edges is anchored — slicing at the request stage would bias the fit
+    toward whichever end of the viewport the user is looking at. Same
+    decimation cap as ``/detection_measure`` (500k points).
+    """
+    values, sr, _units = _trace_for(req.group, req.series, req.sweep, req.trace)
+    # Match the run_events preprocessing pipeline exactly: detrend
+    # (rolling median) then bandpass / lowpass / highpass.
+    if req.detrend_enabled:
+        try:
+            from scipy.ndimage import median_filter
+            w = max(3, int(round(req.detrend_window_ms / 1000.0 * sr)))
+            if w % 2 == 0:
+                w += 1
+            base = median_filter(values, size=w, mode="nearest")
+            values = values - base
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Detrend failed: {e}")
+    if req.filter_enabled:
+        try:
+            values = _apply_pre_detection_filter(values, sr, {
+                "filter_enabled": True,
+                "filter_type": req.filter_type,
+                "filter_low": req.filter_low,
+                "filter_high": req.filter_high,
+                "filter_order": req.filter_order,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Filter failed: {e}")
+
+    try:
+        curve = fit_polynomial_baseline(
+            np.asarray(values, dtype=float), float(sr),
+            int(req.poly_order), req.direction,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Polynomial fit failed: {e}")
+
+    n = len(curve)
+    if req.t_start_s is not None and req.t_end_s is not None:
+        i0 = max(0, int(round(req.t_start_s * sr)))
+        i1 = min(n, int(round(req.t_end_s * sr)) + 1)
+        if i1 > i0:
+            curve_out = curve[i0:i1]
+            t_start_out = i0 / sr
+        else:
+            curve_out = curve
+            t_start_out = 0.0
+    else:
+        curve_out = curve
+        t_start_out = 0.0
+
+    if len(curve_out) > 500_000:
+        stride = int(np.ceil(len(curve_out) / 500_000))
+        curve_out = curve_out[::stride]
+        dt = stride / sr
+    else:
+        dt = 1.0 / sr
+    return {
+        "values": [float(v) for v in curve_out],
+        "dt_s": float(dt),
+        "t_start_s": float(t_start_out),
+        "n_raw_samples": int(len(curve_out)),
+        "poly_order": int(req.poly_order),
     }

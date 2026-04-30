@@ -649,6 +649,11 @@ class EventKinetics:
     biexp_tau_decay_ms: Optional[float] = None
     biexp_b0: Optional[float] = None
     biexp_b1: Optional[float] = None
+    # Goodness-of-fit on the biexp — 1 = perfect, 0 = no better than
+    # mean-model, negative = worse than mean-model. Used by the
+    # "min R²" exclusion filter in ``run_events`` and to label the
+    # fit overlay's quality in the UI.
+    biexp_r2: Optional[float] = None
 
 
 def _find_rise_crossing(
@@ -717,6 +722,43 @@ def _find_rise_crossing_near_peak(
     return 0
 
 
+def fit_polynomial_baseline(
+    values: np.ndarray, sr: float, order: int, direction: str,
+    *, percentile: float = 20.0,
+) -> np.ndarray:
+    """Fit a low-order polynomial baseline curve robust to events.
+
+    ``order`` of 1–5 covers most drift shapes; higher orders quickly
+    start tracking the events themselves. The fit uses only samples on
+    the *opposite* side of the events: for ``direction='negative'``
+    (downward EPSCs) we drop the bottom ``percentile`` of samples
+    before fitting, so events don't drag the baseline down. Returns a
+    float array of the same length as ``values`` ready to be indexed
+    by per-event foot index.
+    """
+    n = len(values)
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    order = max(1, int(order))
+    if n < order + 1:
+        return np.full(n, float(np.mean(values)), dtype=float)
+    t = np.arange(n, dtype=float) / sr
+    pct = float(np.clip(percentile, 0.0, 49.0))
+    if direction == "negative":
+        # Negative events pull the trace below the baseline → drop the
+        # bottom `pct` percent of samples (the event-side tail).
+        thresh = float(np.percentile(values, pct))
+        mask = values >= thresh
+    else:
+        thresh = float(np.percentile(values, 100.0 - pct))
+        mask = values <= thresh
+    if mask.sum() < order + 1:
+        coeffs = np.polyfit(t, values, order)
+    else:
+        coeffs = np.polyfit(t[mask], values[mask], order)
+    return np.polyval(coeffs, t).astype(float)
+
+
 def measure_event_kinetics(
     values: np.ndarray, sr: float, peak_idx: int,
     *,
@@ -735,6 +777,28 @@ def measure_event_kinetics(
     rise_high_pct: float = 90.0,
     decay_pct: float = 37.0,
     decay_search_ms: float = 30.0,
+    # How the decay endpoint is chosen post-peak:
+    #   'first_cross' — first sample that returns to baseline within
+    #     the search window (closest fallback if no crossing). Default;
+    #     matches the prior behaviour and EE's "First Baseline Cross".
+    #   'entire'      — endpoint is fixed at peak + decay_search_ms,
+    #     regardless of where the trace actually returns to baseline.
+    #     Matches EE's "Entire Search Region". Useful when events
+    #     overlap heavily and crossings are ambiguous — gives a
+    #     consistent integration window.
+    decay_endpoint_method: str = "first_cross",
+    # Pre-computed per-sample baseline curve (e.g. polynomial drift
+    # estimate). When supplied, ``baseline`` is read off this curve at
+    # the foot index instead of averaging the local pre-event window —
+    # gives a drift-aware baseline for slow-baseline-trend recordings.
+    # Length must equal ``len(values)``.
+    baseline_curve: Optional[np.ndarray] = None,
+    # Manual kinetics edits — when a value is provided, the auto-detected
+    # landmark is REPLACED with the user-supplied sample index and the
+    # downstream measurements (amplitude, rise, decay, FWHM, AUC, fit τ)
+    # are recomputed against it. Used by the Edit-Kinetics drag mode.
+    foot_idx_override: Optional[int] = None,
+    decay_endpoint_idx_override: Optional[int] = None,
 ) -> EventKinetics:
     """Compute per-event kinetics around a detected peak.
 
@@ -872,6 +936,32 @@ def measure_event_kinetics(
             bb = max(ba + 1, foot_idx + 1)
             baseline = float(np.mean(values[ba:bb]))
 
+    # User foot override — Edit-Kinetics drag mode. Takes precedence
+    # over auto-detected foot. Baseline is recomputed as the local mean
+    # ending at the new foot (or read off baseline_curve below).
+    if foot_idx_override is not None:
+        try:
+            new_foot = int(np.clip(int(foot_idx_override), 0, max(0, peak_idx)))
+            foot_idx = new_foot
+            bl_avg_samples = max(1, int(round(avg_baseline_ms / 1000.0 * sr)))
+            ba = max(0, foot_idx - bl_avg_samples)
+            bb = max(ba + 1, foot_idx + 1)
+            baseline = float(np.mean(values[ba:bb]))
+        except (TypeError, ValueError):
+            pass
+
+    # Drift-aware baseline override — when a per-sample baseline curve
+    # was passed in (typically a polynomial fit to the whole sweep),
+    # read the baseline value off that curve at the foot index. Skips
+    # the local-mean step since the polynomial already captures the
+    # slow-trend baseline. The foot index itself is unchanged — it's
+    # still the Jonas line-intersect; only the *value* is replaced.
+    if baseline_curve is not None and len(baseline_curve) == n:
+        try:
+            baseline = float(baseline_curve[foot_idx])
+        except (IndexError, ValueError):
+            pass
+
     amplitude = peak_val - baseline  # signed
 
     # ---- Rise time on refined baseline/peak ----
@@ -899,13 +989,30 @@ def measure_event_kinetics(
     dec_b = min(n, peak_idx + decay_samples + 1)
     post = values[dec_a:dec_b]
     decay_endpoint_idx: Optional[int] = None
-    if post.size > 1:
+    if decay_endpoint_method == "entire":
+        # Fixed endpoint at the far edge of the search window. EE's
+        # "Entire Search Region" — gives a deterministic integration
+        # window when events overlap and baseline crossings are noisy.
+        if dec_b > dec_a:
+            decay_endpoint_idx = int(dec_b - 1)
+    elif post.size > 1:
         i_back = _find_rise_crossing(post, baseline, baseline, rising=False)
         if i_back is not None:
             decay_endpoint_idx = int(dec_a + i_back)
         else:
             # No full return — use the sample closest to baseline.
             decay_endpoint_idx = int(dec_a + np.argmin(np.abs(post - baseline)))
+
+    # User decay-endpoint override — Edit-Kinetics drag mode. Takes
+    # precedence over auto-detected endpoint. Clamp to (peak, n) so a
+    # nonsense click can't break the downstream slicing.
+    if decay_endpoint_idx_override is not None:
+        try:
+            new_dep = int(np.clip(int(decay_endpoint_idx_override),
+                                  peak_idx + 1, n - 1))
+            decay_endpoint_idx = new_dep
+        except (TypeError, ValueError):
+            pass
 
     # ---- Decay time to decay_pct of amplitude ----
     if amplitude == 0 or decay_endpoint_idx is None:
@@ -989,6 +1096,7 @@ def measure_event_kinetics(
     biexp_tau_decay_ms: Optional[float] = None
     biexp_b0: Optional[float] = None
     biexp_b1: Optional[float] = None
+    biexp_r2: Optional[float] = None
     if (decay_endpoint_idx is not None
             and decay_endpoint_idx - foot_idx >= 6
             and amplitude != 0):
@@ -1008,6 +1116,7 @@ def measure_event_kinetics(
             biexp_b1 = fit.b1
             biexp_tau_rise_ms = fit.tau_rise_s * 1000.0
             biexp_tau_decay_ms = fit.tau_decay_s * 1000.0
+            biexp_r2 = float(fit.r_squared)
         except (RuntimeError, ValueError):
             pass
 
@@ -1027,6 +1136,7 @@ def measure_event_kinetics(
         biexp_tau_decay_ms=biexp_tau_decay_ms,
         biexp_b0=biexp_b0,
         biexp_b1=biexp_b1,
+        biexp_r2=biexp_r2,
     )
 
 
@@ -1056,7 +1166,22 @@ class EventRecord:
     biexp_tau_decay_ms: Optional[float] = None
     biexp_b0: Optional[float] = None
     biexp_b1: Optional[float] = None
+    # R² of the per-event biexp fit. ``None`` when the fit didn't run
+    # (window too short, degenerate amplitude, scipy failure). Used by
+    # the "min R²" filter and surfaced in the UI as fit-quality colour.
+    biexp_r2: Optional[float] = None
     manual: bool = False
+    # Multi-template detection only — 0-based index into the templates
+    # list at run time identifying which template's similarity measure
+    # produced this peak. None for single-template, threshold method,
+    # and manually-added events. Persists round-trip so the UI can
+    # color peaks by template across windows / sessions.
+    template_idx: Optional[int] = None
+    # User-assigned curation group (1–5; None = ungrouped). Used for
+    # filtering / coloring in the results table + viewer markers.
+    # Round-trips through the .neurotrace sidecar like every other
+    # field. Detection never sets this; assignment is purely manual.
+    group: Optional[int] = None
 
     def to_dict(self) -> dict:
         return {
@@ -1082,7 +1207,10 @@ class EventRecord:
                 else float(self.biexp_tau_decay_ms),
             "biexp_b0": None if self.biexp_b0 is None else float(self.biexp_b0),
             "biexp_b1": None if self.biexp_b1 is None else float(self.biexp_b1),
+            "biexp_r2": None if self.biexp_r2 is None else float(self.biexp_r2),
             "manual": bool(self.manual),
+            "template_idx": None if self.template_idx is None else int(self.template_idx),
+            "group": None if self.group is None else int(self.group),
         }
 
 
@@ -1115,9 +1243,24 @@ def run_events(
     rise_high_pct: float = 90.0,
     decay_pct: float = 37.0,
     decay_search_ms: float = 30.0,
+    # Per-event baseline detection method:
+    #   'auto'       — Jonas line-intersect + local mean (default)
+    #   'polynomial' — fit a low-order polynomial to the whole sweep
+    #                  (events excluded by percentile clipping) and
+    #                  read the baseline off the curve at each foot.
+    # Useful for recordings with slow drift the rolling-median detrend
+    # over-smooths.
+    baseline_method: str = "auto",
+    baseline_poly_order: int = 2,
+    # Decay-endpoint method: 'first_cross' (default) or 'entire'.
+    # See measure_event_kinetics docstring.
+    decay_endpoint_method: str = "first_cross",
     # exclusion
     amplitude_min_abs: float = 5.0,
     amplitude_max_abs: float = 2000.0,
+    # Reject events whose biexp R² falls below this. None disables.
+    # Auto-detected events only — manual adds always pass.
+    biexp_min_r2: Optional[float] = None,
     auc_min_abs: Optional[float] = None,
     rise_max_ms: Optional[float] = None,
     decay_max_ms: Optional[float] = None,
@@ -1172,6 +1315,11 @@ def run_events(
     if not tmpl_list and template is not None and len(template) >= 4:
         tmpl_list = [np.asarray(template, dtype=float)]
 
+    # Per-peak template index — populated only for multi-template runs
+    # so the frontend can color markers by which template fired. ``None``
+    # entries (single-template / threshold / manual) leave the marker at
+    # the default color.
+    peak_template_idxs: list[Optional[int]] = []
     if method == "template_correlation":
         if not tmpl_list:
             raise ValueError("template_correlation requires a template of ≥ 4 samples")
@@ -1181,6 +1329,7 @@ def run_events(
                 cutoff=cutoff, direction=direction, min_iei_ms=min_iei_ms,
             )
             detection_measure = _sliding_correlation(x, tmpl_list[0])
+            peak_template_idxs = [None] * len(peak_idxs)
         else:
             # Pointwise max of correlation traces across templates.
             # Align to shortest output length (len N − W_max + 1).
@@ -1200,6 +1349,12 @@ def run_events(
             snap = max(1, int(round(0.5 * min_iei_ms / 1000.0 * sr)))
             peak_idxs = []
             for pi in peak_idxs_raw:
+                # Tag template by argmax across templates AT the raw
+                # peak position (where r_max was found) — that's where
+                # the per-template r is the actual contributor, not the
+                # snapped sample which may be a few ms off.
+                t_idx = int(np.argmax(stacked[:, pi]))
+                peak_template_idxs.append(t_idx)
                 a = max(0, pi - snap); b = min(len(x), pi + snap + 1)
                 if b <= a + 1:
                     peak_idxs.append(pi); continue
@@ -1216,12 +1371,15 @@ def run_events(
                 direction=direction, min_iei_ms=min_iei_ms,
             )
             detection_measure = decon
+            peak_template_idxs = [None] * len(peak_idxs)
         else:
             # Union of per-template peak sets. Deconvolution traces
             # differ in amplitude per template (different b1) so we
             # can't just stack + max; detect per-template and merge.
+            # Track which template each candidate came from so we can
+            # carry the tag through the merge step.
             sign = -1 if direction == "negative" else 1
-            all_peaks: list[int] = []
+            all_peaks: list[tuple[int, int]] = []   # (peak_idx, template_idx)
             primary_decon: Optional[np.ndarray] = None
             for i, t in enumerate(tmpl_list):
                 pidxs, decon_i, _mu, _sigma = detect_deconvolution(
@@ -1231,23 +1389,23 @@ def run_events(
                 )
                 if i == 0:
                     primary_decon = decon_i
-                all_peaks.extend(int(p) for p in pidxs)
-            # Merge: sort, then enforce min_iei — when two peaks from
-            # different templates are within min_iei_ms of each other,
-            # keep the one whose trace extremum is larger.
-            all_peaks.sort()
+                all_peaks.extend((int(p), i) for p in pidxs)
+            # Merge: sort by peak idx, then enforce min_iei — when two
+            # peaks from different templates are within min_iei_ms of
+            # each other, keep the one whose trace extremum is larger.
+            all_peaks.sort(key=lambda pt: pt[0])
             min_dist = max(1, int(round(min_iei_ms / 1000.0 * sr)))
-            merged: list[int] = []
-            for pi in all_peaks:
-                if merged and pi - merged[-1] < min_dist:
-                    # Keep whichever has the larger absolute deflection.
-                    prev_v = abs(float(x[merged[-1]]))
+            merged: list[tuple[int, int]] = []
+            for pi, tidx in all_peaks:
+                if merged and pi - merged[-1][0] < min_dist:
+                    prev_v = abs(float(x[merged[-1][0]]))
                     this_v = abs(float(x[pi]))
                     if this_v > prev_v:
-                        merged[-1] = pi
+                        merged[-1] = (pi, tidx)
                 else:
-                    merged.append(pi)
-            peak_idxs = merged
+                    merged.append((pi, tidx))
+            peak_idxs = [pi for pi, _ in merged]
+            peak_template_idxs = [tidx for _, tidx in merged]
             detection_measure = primary_decon
     elif method == "threshold":
         if threshold_value is None:
@@ -1257,8 +1415,15 @@ def run_events(
             threshold=threshold_value, direction=direction,
             min_iei_ms=min_iei_ms,
         )
+        peak_template_idxs = [None] * len(peak_idxs)
     else:
         raise ValueError(f"Unknown method: {method!r}")
+
+    # Sanity: the template-idx list MUST be the same length as the peak
+    # list at every transformation step below. Re-pad here in case any
+    # detector forgot to populate it (defensive — shouldn't happen).
+    if len(peak_template_idxs) != len(peak_idxs):
+        peak_template_idxs = [None] * len(peak_idxs)
 
     # ---- Step 1.5: apply manual skip regions ----
     # Drop any detected peak whose time falls inside a skip region.
@@ -1266,8 +1431,9 @@ def run_events(
     # event inside a skip region if the region was too aggressive.
     peak_idxs = list(peak_idxs)
     if skip_regions:
-        kept = []
-        for pi in peak_idxs:
+        kept_idx: list[int] = []
+        kept_tidx: list[Optional[int]] = []
+        for pi, ti in zip(peak_idxs, peak_template_idxs):
             t = pi / sr
             drop = False
             for r in skip_regions:
@@ -1275,8 +1441,10 @@ def run_events(
                     drop = True
                     break
             if not drop:
-                kept.append(pi)
-        peak_idxs = kept
+                kept_idx.append(pi)
+                kept_tidx.append(ti)
+        peak_idxs = kept_idx
+        peak_template_idxs = kept_tidx
 
     # ---- Step 2: apply manual edits (remove first, then add) ----
     manual_added_times = list(manual_added_times or [])
@@ -1286,15 +1454,18 @@ def run_events(
     if manual_removed_times and peak_idxs:
         rem_samples = [int(round(t * sr)) for t in manual_removed_times]
         tol = max(1, int(round(removed_tol_ms / 1000.0 * sr)))
-        kept_idx: list[int] = []
+        kept_idx2: list[int] = []
         kept_manual: list[bool] = []
-        for pi, mf in zip(peak_idxs, manual_flags):
+        kept_tidx2: list[Optional[int]] = []
+        for pi, mf, ti in zip(peak_idxs, manual_flags, peak_template_idxs):
             drop = any(abs(pi - rs) <= tol for rs in rem_samples)
             if not drop:
-                kept_idx.append(pi)
+                kept_idx2.append(pi)
                 kept_manual.append(mf)
-        peak_idxs = kept_idx
+                kept_tidx2.append(ti)
+        peak_idxs = kept_idx2
         manual_flags = kept_manual
+        peak_template_idxs = kept_tidx2
 
     if manual_added_times:
         sign = -1 if direction == "negative" else 1
@@ -1313,11 +1484,13 @@ def run_events(
                 continue
             peak_idxs.append(pi)
             manual_flags.append(True)
+            peak_template_idxs.append(None)  # manual events have no template
 
     # Sort by time for downstream stability.
     order = np.argsort(peak_idxs)
     peak_idxs = [peak_idxs[i] for i in order]
     manual_flags = [manual_flags[i] for i in order]
+    peak_template_idxs = [peak_template_idxs[i] for i in order]
 
     # ---- Step 3: per-event kinetics ----
     # Detection has finished; tell the caller we're entering kinetics
@@ -1327,6 +1500,22 @@ def run_events(
     # happens BEFORE this function is invoked for the threshold
     # method, or interleaved with the FFT for template methods.
     _tick(0.30)
+    # Compute the polynomial baseline curve once per sweep (if asked) —
+    # cheaper than re-fitting around each event, and the curve is
+    # explicitly meant to capture the slow trend across the whole
+    # recording. Done after detection so we know the events list (we
+    # don't actually use the events here, but in a future iteration we
+    # could mask them out for an even cleaner fit).
+    baseline_curve: Optional[np.ndarray] = None
+    if baseline_method == "polynomial":
+        try:
+            baseline_curve = fit_polynomial_baseline(
+                x, sr, baseline_poly_order, direction,
+            )
+        except Exception:
+            # Fitting can fail on degenerate data — fall back to auto
+            # silently rather than killing the whole detection.
+            baseline_curve = None
     records: list[EventRecord] = []
     n_total = len(peak_idxs)
     # Aim for ~20 ticks per sweep regardless of event count: tiny N
@@ -1335,7 +1524,7 @@ def run_events(
     # the network — under-ticking (the previous default of 40) made
     # single-sweep progress look stuck for several seconds at a time.
     tick_every = max(1, n_total // 20)
-    for i_ev, (pi, mf) in enumerate(zip(peak_idxs, manual_flags)):
+    for i_ev, (pi, mf, tidx) in enumerate(zip(peak_idxs, manual_flags, peak_template_idxs)):
         if n_total > 0 and (i_ev % tick_every) == 0:
             _tick(0.30 + 0.65 * (i_ev / n_total))
         k = measure_event_kinetics(
@@ -1348,6 +1537,8 @@ def run_events(
             rise_high_pct=rise_high_pct,
             decay_pct=decay_pct,
             decay_search_ms=decay_search_ms,
+            decay_endpoint_method=decay_endpoint_method,
+            baseline_curve=baseline_curve,
         )
         # ---- Step 4: exclusion (manual-added events bypass amp/auc guards) ----
         amp_abs = abs(k.amplitude)
@@ -1371,6 +1562,13 @@ def run_events(
             if fwhm_max_ms is not None and k.half_width_ms is not None \
                     and k.half_width_ms > fwhm_max_ms:
                 continue
+            # Biexp goodness-of-fit guard. We only check when the user
+            # opted in AND the fit actually ran (None r2 = couldn't
+            # fit; that's separate from a low-quality fit and we don't
+            # want to silently drop events whose window was too short).
+            if biexp_min_r2 is not None and k.biexp_r2 is not None \
+                    and k.biexp_r2 < biexp_min_r2:
+                continue
 
         records.append(EventRecord(
             sweep=sweep_index,
@@ -1391,7 +1589,9 @@ def run_events(
             biexp_tau_decay_ms=k.biexp_tau_decay_ms,
             biexp_b0=k.biexp_b0,
             biexp_b1=k.biexp_b1,
+            biexp_r2=k.biexp_r2,
             manual=mf,
+            template_idx=tidx,
         ))
     _tick(1.0)
     return records, detection_measure

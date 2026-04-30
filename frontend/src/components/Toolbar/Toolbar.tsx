@@ -302,6 +302,24 @@ export function Toolbar() {
 
       <div className="toolbar-separator" />
 
+      {/* Tags — opens the metadata window. Moved to the main toolbar
+          (vs the in-line Tags… that used to live next to the file
+          name) since tagging now works on closed files too: a user
+          may want to batch-tag a folder of recordings without any
+          file open. Workflow order in the toolbar reads tag → analyze
+          → aggregate, hence the position here before Analyses. */}
+      <button
+        className="btn"
+        onClick={async () => {
+          if (window.electronAPI?.openAnalysisWindow) {
+            await window.electronAPI.openAnalysisWindow('metadata')
+          }
+        }}
+        title="Open the metadata window to tag recordings (works without an open file)"
+      >
+        Tags…
+      </button>
+
       {/* Analyses dropdown */}
       <div style={{ position: 'relative' }} ref={analysesRef}>
         <button
@@ -378,23 +396,6 @@ export function Toolbar() {
         {recording && <MetaStatusDot />}
         <span className="toolbar-label">{recording ? recording.fileName : 'No file loaded'}</span>
         {recording && <FileTagChips />}
-        {recording && (
-          <button
-            className="btn"
-            onClick={async () => {
-              const api = window.electronAPI
-              if (api?.openAnalysisWindow) {
-                await api.openAnalysisWindow('metadata')
-              }
-            }}
-            title="Open the metadata window to tag this recording"
-            style={{
-              padding: '2px 8px', fontSize: 'var(--font-size-label)',
-              marginLeft: 4,
-            }}>
-            Tags…
-          </button>
-        )}
       </div>
 
       {loading && (

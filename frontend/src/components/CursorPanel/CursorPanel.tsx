@@ -228,6 +228,29 @@ export function CursorPanel() {
       const ch = new BroadcastChannel('neurotrace-sync')
       channelRef.current = ch
       ch.onmessage = (ev) => {
+        // Cross-window file close — when another window (currently
+        // the Batch window before kicking off a multi-file run)
+        // posts ``file-close``, clear the main window's per-recording
+        // state so its TraceViewer / TreeNavigator don't keep showing
+        // the closed file. Mirrors the slice list in the store's
+        // ``closeFile`` action.
+        if (ev.data?.type === 'file-close') {
+          useAppStore.setState({
+            recording: null,
+            currentGroup: 0, currentSeries: 0, currentSweep: 0, currentTrace: 0,
+            traceData: null,
+            overlayEntries: [], averageTrace: null, additionalTraces: {},
+            visibleTraces: {},
+            fieldBursts: {}, burstFormParams: {},
+            ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
+            apAnalyses: {}, eventsAnalyses: {},
+            excludedSweeps: {}, selectedSweeps: {}, averagedSweeps: {},
+            currentAveragedSweep: null,
+            resistanceResult: null, resistanceResults: {},
+            recordingMeta: null, recordingMetaReady: false,
+            showOverlay: false, showAverage: false,
+          })
+        }
         if (ev.data?.type === 'state-request' || ev.data?.type === 'cursor-request') {
           const state = useAppStore.getState()
           ch.postMessage({

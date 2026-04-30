@@ -73,7 +73,9 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   backendUrl: string
   fileInfo: FileInfo | null
 }) {
-  void backendUrl  // not yet — folder-scan endpoint comes in A.4
+  // backendUrl drives the on-demand /api/files/tree fetch below — used
+  // when the user picks a non-active file in the left pane and we need
+  // its group/series tree to render per-series tag chips.
 
   const recording = useAppStore((s) => s.recording)
   const storeMeta = useAppStore((s) => s.recordingMeta)
@@ -87,6 +89,11 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   const [entries, setEntries] = useState<FolderEntry[]>([])
   const [otherMeta, setOtherMeta] = useState<Record<string, SidecarMeta | null>>({})
   const [otherGroups, setOtherGroups] = useState<Record<string, any[] | null>>({})
+  // Per-file tree-fetch status — drives the loading indicator and
+  // prevents racing duplicate requests for the same path. ``loading``
+  // is per-path so switching between files mid-fetch behaves sanely.
+  const [treeLoading, setTreeLoading] = useState<Record<string, boolean>>({})
+  const [treeError, setTreeError] = useState<Record<string, string | null>>({})
 
   // Which file is currently being edited in the right pane. When null
   // we fall back to the active recording. When a non-active file is
@@ -133,13 +140,18 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   // ------------------------------------------------------------------
   // Folder listing
   // ------------------------------------------------------------------
+  // User-picked folder takes priority over auto-anchored folder. Lets
+  // users tag a directory of recordings without having one open. ``null``
+  // means "use the auto-anchor (active recording or most-recent)".
+  const [overrideFolder, setOverrideFolder] = useState<string | null>(null)
+
   const refreshFolder = useCallback(async () => {
     const api = window.electronAPI
     if (!api?.listFolderRecordings) return
-    // Anchor: active recording's path. If nothing loaded, try the most
-    // recent file from preferences (Phase A.1 spec — "most recent is
-    // fine"). A future iteration can add an "Open folder…" button.
-    let anchor = recording?.filePath ?? null
+    // Anchor priority: explicit user-picked folder → active recording →
+    // most-recent file from prefs. ``listFolderRecordings`` accepts
+    // either a folder path or a file path and figures out the parent.
+    let anchor = overrideFolder ?? recording?.filePath ?? null
     if (!anchor) {
       try {
         const prefs = await api.getPreferences()
@@ -172,7 +184,23 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
       }
       return next
     })
-  }, [recording?.filePath])
+  }, [overrideFolder, recording?.filePath])
+
+  /** Open a folder picker, point the metadata window at the result.
+   *  Clears the per-file caches so stale data from the previous folder
+   *  can't leak into the new one (different files may share a basename
+   *  across folders, etc.). */
+  const pickFolder = useCallback(async () => {
+    const api = window.electronAPI
+    const picked = await api?.openFolderDialog?.(overrideFolder ?? folder ?? undefined)
+    if (!picked) return
+    setOverrideFolder(picked)
+    setSelectedPath(null)
+    setOtherMeta({})
+    setOtherGroups({})
+    setTreeLoading({})
+    setTreeError({})
+  }, [overrideFolder, folder])
 
   useEffect(() => {
     refreshFolder()
@@ -187,13 +215,55 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
     ? storeMeta
     : (activePath ? (otherMeta[activePath] ?? null) : null)
 
+  // Lazy tree fetch for non-active files. /api/files/tree reads the
+  // recording into a local variable on the backend and returns its
+  // group/series tree without touching the active recording.
+  //
+  // Bug history: the previous version included ``otherGroups`` and
+  // ``treeLoading`` in the deps array, which the effect updates via
+  // ``setTreeLoading(...)`` itself. That triggered immediate re-runs +
+  // cleanup-driven cancellation of the in-flight fetch — the loading
+  // state stuck at ``true`` forever because the cancelled fetch never
+  // wrote the resolution back. Fixed by holding the in-flight set in
+  // a ref so the dep array contains only the trigger inputs (path).
+  const treeFetchInFlightRef = useRef<Set<string>>(new Set())
+  const otherGroupsRef = useRef(otherGroups)
+  otherGroupsRef.current = otherGroups
+  useEffect(() => {
+    if (!activePath || isActiveRecording || !backendUrl) return
+    if (otherGroupsRef.current[activePath] !== undefined) return
+    if (treeFetchInFlightRef.current.has(activePath)) return
+    treeFetchInFlightRef.current.add(activePath)
+    setTreeLoading((prev) => ({ ...prev, [activePath]: true }))
+    setTreeError((prev) => ({ ...prev, [activePath]: null }))
+    fetch(`${backendUrl}/api/files/tree`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: activePath }),
+    })
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((d) => {
+        const groups = Array.isArray(d?.groups) ? d.groups : []
+        setOtherGroups((prev) => ({ ...prev, [activePath]: groups }))
+      })
+      .catch((err) => {
+        setOtherGroups((prev) => ({ ...prev, [activePath]: null }))
+        setTreeError((prev) => ({
+          ...prev, [activePath]: String(err?.message ?? err),
+        }))
+      })
+      .finally(() => {
+        treeFetchInFlightRef.current.delete(activePath)
+        setTreeLoading((prev) => ({ ...prev, [activePath]: false }))
+      })
+  }, [activePath, isActiveRecording, backendUrl])
+
+  const activeTreeLoading = !!(activePath && treeLoading[activePath])
+  const activeTreeError = activePath ? (treeError[activePath] ?? null) : null
+
   // For per-series chip rows we need the recording's group/series
-  // tree. The active recording's tree comes from `recording.groups`.
-  // For non-active files we don't have the tree (we'd have to load
-  // the file in the backend) — fall back to whatever series_tags
-  // already exist in their sidecar so users can at least see + edit
-  // existing per-series tags. New per-series tags require opening
-  // the file in the main window.
+  // tree. The active recording's tree comes from `recording.groups`;
+  // closed files use the cache populated by the lazy fetch above.
   const activeGroups: any[] | null = isActiveRecording
     ? (recording?.groups ?? null)
     : (activePath ? (otherGroups[activePath] ?? null) : null)
@@ -373,12 +443,20 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   if (!folder) {
     return (
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', gap: 12,
         height: '100%', padding: 24, color: 'var(--text-muted)',
         fontStyle: 'italic',
       }}>
-        Open a recording to start tagging — the metadata window scans
-        the active file's folder for cohorts.
+        <span style={{ textAlign: 'center', maxWidth: 420 }}>
+          Pick a folder of recordings to tag, or open a file in the main
+          window — both produce the same per-folder list with editable
+          tags on every file.
+        </span>
+        <button className="btn btn-primary" onClick={pickFolder}
+          style={{ padding: '6px 14px' }}>
+          Pick folder…
+        </button>
       </div>
     )
   }
@@ -410,6 +488,12 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
           title="Find near-duplicate tags across the folder (e.g. typos, case variants)"
           style={{ padding: '2px 8px', fontSize: 'var(--font-size-base)' }}
         >Consistency check</button>
+        <button
+          className="btn"
+          onClick={pickFolder}
+          title="Switch to a different folder of recordings"
+          style={{ padding: '2px 8px', fontSize: 'var(--font-size-base)' }}
+        >Pick folder…</button>
         <button
           className="btn"
           onClick={() => refreshFolder()}
@@ -624,6 +708,8 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
               meta={activeMeta}
               groups={activeGroups}
               isActiveRecording={isActiveRecording}
+              treeLoading={activeTreeLoading}
+              treeError={activeTreeError}
               fileTagSuggestions={fileTagPool}
               seriesTagSuggestions={seriesTagPool}
               saving={savingPath === activePath}
@@ -646,6 +732,7 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
 function FileEditor({
   filePath, fileName, meta, groups,
   isActiveRecording,
+  treeLoading, treeError,
   fileTagSuggestions, seriesTagSuggestions,
   saving, saveError, lastSavedAt,
   onUpdate, onSaveNow,
@@ -655,6 +742,12 @@ function FileEditor({
   meta: SidecarMeta | null
   groups: any[] | null
   isActiveRecording: boolean
+  /** Tree-fetch status for non-active files. The parent runs an async
+   *  read against /api/files/tree the first time a closed file is
+   *  selected; until that resolves, the per-series chip section shows
+   *  a placeholder rather than an empty list. */
+  treeLoading: boolean
+  treeError: string | null
   fileTagSuggestions: string[]
   seriesTagSuggestions: string[]
   saving: boolean
@@ -834,14 +927,28 @@ function FileEditor({
         label="Per-series tags"
         hint="Mark which series captured what (e.g. test_pulse, IV, evoked). Drag the main viewer's tree to load a series, then add tags here."
       >
-        {seriesRows.length === 0 ? (
+        {treeLoading ? (
+          <div style={{
+            color: 'var(--text-muted)', fontStyle: 'italic',
+            padding: '4px 0', fontSize: 'var(--font-size-xs)',
+          }}>
+            Loading recording tree…
+          </div>
+        ) : treeError ? (
+          <div style={{
+            color: '#e57373', fontStyle: 'italic',
+            padding: '4px 0', fontSize: 'var(--font-size-xs)',
+          }}>
+            ⚠ Couldn't read recording tree: {treeError}
+          </div>
+        ) : seriesRows.length === 0 ? (
           <div style={{
             color: 'var(--text-muted)', fontStyle: 'italic',
             padding: '4px 0', fontSize: 'var(--font-size-xs)',
           }}>
             {isActiveRecording
               ? 'This recording has no series.'
-              : 'Open this file in the main window to tag its series.'}
+              : 'No series found in this recording.'}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

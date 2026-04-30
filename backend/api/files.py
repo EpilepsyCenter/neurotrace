@@ -66,3 +66,32 @@ async def close_file():
     global _current_recording
     _current_recording = None
     return {"status": "closed"}
+
+
+class TreeRequest(BaseModel):
+    file_path: str
+
+
+@router.post("/tree")
+async def file_tree(req: TreeRequest):
+    """Return a recording's group/series/channel tree without disturbing
+    the active recording.
+
+    Used by the Metadata window to render per-series tag chips for files
+    other than the one currently open. Body matches ``Recording.to_dict``
+    so the frontend can drop the result into its existing tree consumers
+    unchanged. The recording is read into a local variable and discarded
+    on return — ``_current_recording`` is left alone.
+    """
+    file_path = req.file_path
+    for reader in READERS:
+        if reader.can_read(file_path):
+            try:
+                rec = reader.read(file_path)
+                # Don't mutate the global active-recording state. Don't
+                # cache rec; let the GC reclaim the sample arrays as soon
+                # as the response is serialized.
+                return rec.to_dict()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
+    raise HTTPException(status_code=400, detail=f"Unsupported file format: {file_path}")

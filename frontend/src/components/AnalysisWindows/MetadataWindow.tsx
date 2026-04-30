@@ -127,14 +127,26 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   const [consistencyOpen, setConsistencyOpen] = useState(false)
 
   // Broadcast channel — for live meta-update sync to the main window
-  // when the user edits the active recording's tags.
+  // when the user edits the active recording's tags. Also listens
+  // for ``metadata-focus-file`` requests posted by the Batch window
+  // when the user clicks "Tag…" on a target row.
   const channelRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
     try {
       const ch = new BroadcastChannel('neurotrace-sync')
       channelRef.current = ch
+      ch.onmessage = (ev) => {
+        const data = ev.data as any
+        if (!data || data.type !== 'metadata-focus-file') return
+        const fp = String(data.file_path ?? '')
+        if (!fp) return
+        focusFile(fp)
+      }
       return () => ch.close()
     } catch { /* no-op */ }
+  // ``focusFile`` is declared below; it captures setters that are
+  // stable across renders, so this effect only needs to run once.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ------------------------------------------------------------------
@@ -185,6 +197,45 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
       return next
     })
   }, [overrideFolder, recording?.filePath])
+
+  /** Focus a specific file (typically posted by the Batch window when
+   *  the user clicks "Tag…" on an untagged row). Sets the override
+   *  folder to the file's parent directory and selects the file in
+   *  the left pane. The folder rescan + tree fetch then run as
+   *  normal. */
+  const focusFile = useCallback((filePath: string) => {
+    if (!filePath) return
+    const sep = filePath.lastIndexOf('/') >= 0 ? '/' : '\\'
+    const parent = filePath.includes(sep)
+      ? filePath.slice(0, filePath.lastIndexOf(sep))
+      : null
+    if (parent) setOverrideFolder(parent)
+    setSelectedPath(filePath)
+    setOtherMeta({})
+    setOtherGroups({})
+    setTreeLoading({})
+    setTreeError({})
+  }, [])
+
+  // One-shot focus pickup — when another window writes
+  // ``prefs.metadataFocusPath`` and then triggers our open, we
+  // consume + clear the pref on mount. Covers the "metadata window
+  // wasn't open yet" case that broadcast can't service.
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api?.getPreferences || !api.setPreferences) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const prefs = (await api.getPreferences()) ?? {}
+        const fp = prefs.metadataFocusPath
+        if (cancelled || typeof fp !== 'string' || !fp) return
+        focusFile(fp)
+        await api.setPreferences({ ...prefs, metadataFocusPath: undefined })
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [focusFile])
 
   /** Open a folder picker, point the metadata window at the result.
    *  Clears the per-file caches so stale data from the previous folder

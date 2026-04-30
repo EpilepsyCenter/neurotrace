@@ -7,6 +7,9 @@ import {
 } from '../../stores/appStore'
 import { NumInput } from '../common/NumInput'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 // Stimfit-style cursor-analysis window.
 //
@@ -1397,7 +1400,9 @@ function MiniViewer({
     const payload: uPlot.AlignedData = initialHasData
       ? [Array.from(initial!.time), Array.from(initial!.values)]
       : [[0, 1], [0, 0]]
+    const attachTip = attachHoverCoords(opts)
     plotRef.current = new uPlot(opts, payload, el)
+    attachTip(el)
 
     const over = el.querySelector<HTMLDivElement>('.u-over')
     const EDGE_THRESHOLD_PX = 6
@@ -1881,6 +1886,24 @@ function ResultsTabs({
 
   const fitCount = measurements.filter((m) => m.fit != null).length
 
+  // Multi-row selection + Copy-as-TSV for the visible rows. Each
+  // tab gets its own selection (resets when ``rows`` changes shape).
+  const sel = useRowSelection(rows.length)
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => {
+      if (sel.selectedIndexes.length === 0) return null
+      const headers = visible.map((c) =>
+        c.id === 'baseline' ? `Baseline (${traceUnit})` : c.label)
+      const cells = sel.selectedIndexes.map((i) =>
+        visible.map((c) => {
+          const v = c.value(rows[i], { traceUnit, fitFunctions })
+          return typeof v === 'string' ? v : (v == null ? '' : String(v))
+        }))
+      return buildTSV(headers, cells)
+    },
+  })
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{
@@ -1972,10 +1995,18 @@ function ResultsTabs({
             </thead>
             <tbody>
               {rows.map((m, i) => (
-                <tr key={i} style={{
-                  borderTop: '1px solid var(--border)',
-                  background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)',
-                }}>
+                <tr key={i}
+                  onClick={(ev) => sel.onRowClick(i, ev)}
+                  onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                    if (!sel.isSelected(i)) sel.setSelected([i])
+                  })}
+                  style={{
+                    borderTop: '1px solid var(--border)',
+                    background: sel.isSelected(i)
+                      ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                      : (i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)'),
+                    cursor: 'pointer',
+                  }}>
                   {visible.map((c) => (
                     <Td key={c.id}>{c.value(m, { traceUnit, fitFunctions })}</Td>
                   ))}
@@ -1984,6 +2015,7 @@ function ResultsTabs({
             </tbody>
           </table>
         )}
+        {copyMenu.menu}
       </div>
     </div>
   )

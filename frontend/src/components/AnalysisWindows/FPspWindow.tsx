@@ -15,6 +15,9 @@ import { NumInput } from '../common/NumInput'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 // FPsp cursor→band mapping: baseline cursor pair → Baseline,
 // fit cursor pair → Volley, peak cursor pair → fEPSP.
@@ -2198,6 +2201,31 @@ function FPspTable({
   entry: FPspData | undefined
   onSelect: (idx: number) => void
 }) {
+  const sel = useRowSelection(entry?.points.length ?? 0)
+  const u = entry?.responseUnit || ''
+  const headers = ['#', 'Series', 'Sweeps', `Baseline (${u})`,
+    `Volley amp (${u})`, `fEPSP amp (${u})`, 'Ratio', 'Slope / Amp']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const p = entry!.points[i]
+    const isLtp = entry!.seriesB != null && p.sourceSeries === entry!.seriesB
+    return [
+      i + 1,
+      `${isLtp ? 'LTP' : 'BL'} (${p.sourceSeries + 1})`,
+      p.sweepIndices.map((s) => s + 1).join(','),
+      p.baseline.toFixed(3),
+      p.volleyAmp.toFixed(3),
+      p.fepspAmp.toFixed(3),
+      p.ratio == null ? null : p.ratio.toFixed(3),
+      entry!.measurementMethod === 'amplitude'
+        ? p.fepspAmp.toFixed(3)
+        : (p.slope == null ? null : p.slope.toFixed(3)),
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (!entry || entry.points.length === 0) {
     return (
       <div style={{
@@ -2210,8 +2238,6 @@ function FPspTable({
       </div>
     )
   }
-
-  const u = entry.responseUnit || ''
 
   return (
     <div style={{
@@ -2242,12 +2268,20 @@ function FPspTable({
               : undefined
             const flaggedBg = p.flagged ? 'rgba(229,115,115,0.12)' : undefined
             const ltpBg = isLtp ? 'rgba(255,183,77,0.08)' : undefined
+            const multiBg = sel.isSelected(i)
+              ? 'var(--accent-muted, rgba(100,181,246,0.30))' : undefined
             return (
               <tr
                 key={i}
-                onClick={() => onSelect(i)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) onSelect(i)
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: selectedBg ?? flaggedBg ?? ltpBg ?? 'transparent',
+                  background: multiBg ?? selectedBg ?? flaggedBg ?? ltpBg ?? 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                 }}
@@ -2274,6 +2308,7 @@ function FPspTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -2589,7 +2624,9 @@ function FPspSweepViewer({
         ],
         hooks: { draw: [(u) => drawOverlays(u)] },
       }
+      const attachTip = attachHoverCoords(opts, { unitsRef: { current: traceUnits } })
       plotRef.current = new uPlot(opts, [traceTime, traceValues], container)
+      attachTip(container)
 
       const u = plotRef.current
       const over = container.querySelector<HTMLDivElement>('.u-over')
@@ -2987,6 +3024,28 @@ function IOTable({
   entry: FPspData | undefined
   onSelect: (idx: number) => void
 }) {
+  const sel = useRowSelection(entry?.points.length ?? 0)
+  const u = entry?.responseUnit || ''
+  const unit = entry?.ioUnit ?? 'µA'
+  const i0 = entry?.ioInitialIntensity ?? 0
+  const step = entry?.ioIntensityStep ?? 0
+  const headers = ['#', 'Sweep', `Intensity (${unit})`, `Baseline (${u})`,
+    `Volley (${u})`, `fEPSP amp (${u})`, 'Slope']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const p = entry!.points[i]
+    const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+    const intensity = i0 + sweepIdx * step
+    return [
+      i + 1, sweepIdx + 1, intensity.toFixed(2),
+      p.baseline.toFixed(3), p.volleyAmp.toFixed(3), p.fepspAmp.toFixed(3),
+      p.slope == null ? null : p.slope.toFixed(3),
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (!entry || entry.points.length === 0) {
     return (
       <div style={{
@@ -3001,10 +3060,6 @@ function IOTable({
       </div>
     )
   }
-  const u = entry.responseUnit || ''
-  const unit = entry.ioUnit ?? 'µA'
-  const i0 = entry.ioInitialIntensity ?? 0
-  const step = entry.ioIntensityStep ?? 0
 
   return (
     <div style={{
@@ -3033,12 +3088,20 @@ function IOTable({
             const selectedBg = i === entry.selectedIdx
               ? 'var(--bg-selected, rgba(100,181,246,0.2))'
               : undefined
+            const multiBg = sel.isSelected(i)
+              ? 'var(--accent-muted, rgba(100,181,246,0.30))' : undefined
             return (
               <tr
                 key={i}
-                onClick={() => onSelect(i)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) onSelect(i)
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: selectedBg ?? 'transparent',
+                  background: multiBg ?? selectedBg ?? 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                 }}
@@ -3055,6 +3118,7 @@ function IOTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -3322,6 +3386,28 @@ function PPRTable({
   onSelect: (idx: number) => void
   metric: 'amp' | 'slope'
 }) {
+  const sel = useRowSelection(entry?.points.length ?? 0)
+  const u = entry?.responseUnit || ''
+  const headers = ['#', 'Sweep', `R1 amp (${u})`, `R2 amp (${u})`,
+    'R1 slope', 'R2 slope', 'PPR (amp)', 'PPR (slope)']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const p = entry!.points[i]
+    const sweepIdx = p.sweepIndices[0] ?? p.meanSweepIndex
+    return [
+      i + 1, sweepIdx + 1,
+      p.fepspAmp.toFixed(3),
+      p.fepspAmp2 == null ? null : p.fepspAmp2.toFixed(3),
+      p.slope == null ? null : p.slope.toFixed(3),
+      p.slope2 == null ? null : p.slope2.toFixed(3),
+      p.pprAmp == null ? null : p.pprAmp.toFixed(3),
+      p.pprSlope == null ? null : p.pprSlope.toFixed(3),
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (!entry || entry.points.length === 0) {
     return (
       <div style={{
@@ -3336,7 +3422,6 @@ function PPRTable({
       </div>
     )
   }
-  const u = entry.responseUnit || ''
   const highlight = (which: 'amp' | 'slope') =>
     metric === which ? { background: 'rgba(100,181,246,0.12)' } : undefined
 
@@ -3371,12 +3456,20 @@ function PPRTable({
             const selectedBg = i === entry.selectedIdx
               ? 'var(--bg-selected, rgba(100,181,246,0.2))'
               : undefined
+            const multiBg = sel.isSelected(i)
+              ? 'var(--accent-muted, rgba(100,181,246,0.30))' : undefined
             return (
               <tr
                 key={i}
-                onClick={() => onSelect(i)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) onSelect(i)
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: selectedBg ?? 'transparent',
+                  background: multiBg ?? selectedBg ?? 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                 }}
@@ -3398,6 +3491,7 @@ function PPRTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }

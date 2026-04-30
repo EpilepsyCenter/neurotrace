@@ -8,6 +8,9 @@ import { ImSourceCard } from '../common/ImSourceCard'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 const BASELINE_COLOR_VAR = '--cursor-baseline'
 const PEAK_COLOR_VAR = '--cursor-peak'
@@ -1041,6 +1044,28 @@ function IVTable({
   entry: IVCurveData | undefined
   onSelect: (idx: number) => void
 }) {
+  const sel = useRowSelection(entry?.points.length ?? 0)
+  const stimUnit = entry?.stimUnit || ''
+  const respUnit = entry?.responseUnit || ''
+  const headers = ['#', 'Sweep', `Stim (${stimUnit})`, `Baseline (${respUnit})`,
+    `Steady-state (${respUnit})`, `Transient peak (${respUnit})`,
+    `Sag amp (${respUnit})`, 'Sag ratio', `Response (${respUnit})`]
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const p = entry!.points[i]
+    const resp = (entry!.responseMetric === 'peak' ? p.transientPeak : p.steadyState) - p.baseline
+    return [
+      i + 1, p.sweepIndex + 1,
+      p.stimLevel.toFixed(2),
+      p.baseline.toFixed(3), p.steadyState.toFixed(3), p.transientPeak.toFixed(3),
+      p.sagAmp.toFixed(3), p.sagRatio ?? null,
+      resp.toFixed(3),
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (!entry || entry.points.length === 0) {
     return (
       <div style={{
@@ -1053,9 +1078,6 @@ function IVTable({
       </div>
     )
   }
-
-  const stimUnit = entry.stimUnit || ''
-  const respUnit = entry.responseUnit || ''
 
   return (
     <div style={{
@@ -1085,9 +1107,19 @@ function IVTable({
             return (
               <tr
                 key={i}
-                onClick={() => onSelect(i)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) onSelect(i)
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: i === entry.selectedIdx ? 'var(--bg-selected, rgba(100,181,246,0.2))' : 'transparent',
+                  background: sel.isSelected(i)
+                    ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                    : i === entry.selectedIdx
+                      ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+                      : 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                 }}
@@ -1106,6 +1138,7 @@ function IVTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -1292,7 +1325,9 @@ function TraceMiniViewer({
         ],
         hooks: { draw: [(u) => drawOverlays(u)] },
       }
+      const attachTip = attachHoverCoords(opts, { unitsRef: { current: traceUnits } })
       plotRef.current = new uPlot(opts, [traceTime, traceValues], container)
+      attachTip(container)
 
       const u = plotRef.current
       const over = container.querySelector<HTMLDivElement>('.u-over')

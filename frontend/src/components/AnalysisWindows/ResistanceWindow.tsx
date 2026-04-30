@@ -7,6 +7,9 @@ import {
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -107,6 +110,26 @@ export function ResistanceWindow({
   const [error, setError] = useState<string | null>(null)
 
   const [measurements, setMeasurements] = useState<MeasurementRow[]>([])
+  // Multi-row selection + Copy-as-TSV for the results table.
+  const measSel = useRowSelection(measurements.length)
+  const measCopyMenu = useRowCopyMenu({
+    selectionCount: measSel.selectedIndexes.length,
+    getTSV: () => {
+      if (measSel.selectedIndexes.length === 0) return null
+      const headers = ['Series', 'Sweep', 'Rs (MΩ)', 'Rin (MΩ)',
+        'Cm (pF)', 'τ (ms)', 'R²']
+      const rows = measSel.selectedIndexes.map((i) => {
+        const r = measurements[i]
+        return [
+          r.series, r.sweep,
+          fmt(r.rs, 2, ''), fmt(r.rin, 2, ''),
+          fmt(r.cm, 2, ''), fmt(r.tau, 3, ''),
+          r.fit_r_squared == null ? '' : r.fit_r_squared.toFixed(4),
+        ]
+      })
+      return buildTSV(headers, rows)
+    },
+  })
 
   // Which sweep the embedded viewer is showing. Initialised from the main
   // window's current sweep and then updated locally via the prev/next
@@ -847,7 +870,9 @@ export function ResistanceWindow({
         },
       }
 
+      const attachTip = attachHoverCoords(opts)
       tracePlotRef.current = new uPlot(opts, payload, container)
+      attachTip(container)
 
       // --- wire up drag-to-move cursors + pan + wheel-zoom ---
       const u = tracePlotRef.current
@@ -1487,7 +1512,17 @@ export function ResistanceWindow({
                 </thead>
                 <tbody>
                   {measurements.map((row, i) => (
-                    <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)' }}>
+                    <tr key={i}
+                      onClick={(ev) => measSel.onRowClick(i, ev)}
+                      onContextMenu={(ev) => measCopyMenu.onContextMenu(ev, () => {
+                        if (!measSel.isSelected(i)) measSel.setSelected([i])
+                      })}
+                      style={{
+                        background: measSel.isSelected(i)
+                          ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                          : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
+                        cursor: 'pointer',
+                      }}>
                       <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.series}>{row.series}</td>
                       <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{row.sweep}</td>
                       <td style={{ padding: '2px 5px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>{fmt(row.rs, 1, '')}</td>
@@ -1504,6 +1539,7 @@ export function ResistanceWindow({
                 Results accumulate here as you run analyses.
               </div>
             )}
+            {measCopyMenu.menu}
           </div>
         </div>{/* close RIGHT panel */}
       </div>{/* close two-column body */}

@@ -22,7 +22,7 @@
  * picker. Folder/table and the run loop come in subsequent commits.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
 import { displayGroupSeries } from '../../utils/groupSeriesKey'
 
@@ -50,6 +50,61 @@ interface SidecarShape {
     resistance?: Record<string, AnyBlob[]>
   }
   forms?: Record<string, AnyBlob>
+}
+
+interface TargetEntry {
+  filePath: string
+  fileName: string
+  hasSidecar: boolean
+  /** File-level tags from the sidecar (or empty when none yet). */
+  fileTags: string[]
+  /** Series-level tags map; ``${group}:${series}`` → list of tags. */
+  seriesTags: Record<string, string[]>
+  /** Per-analysis-type list of (g:s[:subtype]) keys already present
+   *  in the sidecar's ``analyses.*``. Used to flag overwrite cells. */
+  existingAnalyses: Record<string, string[]>
+}
+
+interface RecipeMatch {
+  /** ``${group}:${series}`` keys in this file matching the recipe's
+   *  primary tag. Multiple = the analysis runs once per matched
+   *  series (consistent with EE's per-series duplication behaviour). */
+  primary: string[]
+  /** Per-role secondary matches (FPsp LTP role 'B' → post-tetanus
+   *  series). Empty for single-series analyses. */
+  secondary: Record<string, string[]>
+  /** True when at least one of the primary keys (with subtype
+   *  suffix where applicable) already has a result blob in this
+   *  file's sidecar. The runner skips such pairs unless overwrite. */
+  alreadyHasResults: boolean
+  /** True when the recipe is fully matchable in this file (primary
+   *  has ≥ 1 hit, AND every secondary role also has ≥ 1 hit). */
+  matched: boolean
+}
+
+/** Stable identifier for a recipe — used as a key in the
+ *  ``selections`` map and as a column header lookup. */
+function recipeId(r: BatchRecipe): string {
+  return `${r.analysisType}|${r.subtype ?? ''}|${r.sourceKey}|${r.tag}`
+}
+
+/** One unit of work the run loop produces from the selection map. */
+interface RunPlanItem {
+  recipe: BatchRecipe
+  match: RecipeMatch
+}
+interface RunPlanFile {
+  entry: TargetEntry
+  items: RunPlanItem[]
+}
+
+/** Per-file log entry shown in the summary panel. ``level`` colours
+ *  the row + lets the summary count successes / failures / skips. */
+interface RunLogEntry {
+  filePath: string
+  fileName: string
+  level: 'ok' | 'error' | 'skip'
+  message: string
 }
 
 /** One entry in the template's recipe set. The batch runner uses this
@@ -308,6 +363,322 @@ export function BatchWindow({ backendUrl }: Props) {
     await loadTemplate(path)
   }, [loadTemplate])
 
+  // ---------------------------------------------------------------
+  // Target folder + per-file table
+  // ---------------------------------------------------------------
+  const [targetFolder, setTargetFolder] = useState<string | null>(null)
+  const [targetEntries, setTargetEntries] = useState<TargetEntry[]>([])
+  const [targetLoading, setTargetLoading] = useState(false)
+  const [targetError, setTargetError] = useState<string | null>(null)
+  // Per-(file, recipe) opt-in. Keys are ``${filePath}||${recipeId}``;
+  // values are booleans. Default selection is "checked when there's a
+  // match", computed on scan; user clicks toggle individual cells.
+  const [selections, setSelections] = useState<Record<string, boolean>>({})
+  const [overwriteAll, setOverwriteAll] = useState(false)
+
+  const scanTargetFolder = useCallback(async (folder: string) => {
+    const api = window.electronAPI
+    if (!api?.listFolderRecordings) return
+    setTargetLoading(true)
+    setTargetError(null)
+    try {
+      const result = await api.listFolderRecordings(folder)
+      setTargetFolder(result.folder ?? folder)
+      // For each file we need: file_tags, series_tags, and the existing
+      // ``analyses.*`` keys (to flag overwrite). All available in the
+      // sidecar already loaded by listFolderRecordings via ``meta``;
+      // existing analyses we read separately since meta only carries
+      // the meta block.
+      const entries: TargetEntry[] = []
+      for (const e of result.entries) {
+        const meta = (e.meta ?? null) as SidecarMetaShape | null
+        let analyses: Record<string, string[]> = {}
+        if (e.hasSidecar && api.readSidecar) {
+          try {
+            const sc = (await api.readSidecar(e.filePath)) as SidecarShape | null
+            const a = sc?.analyses ?? {}
+            const collect = (label: string, slot: any) => {
+              if (slot && typeof slot === 'object') {
+                analyses[label] = Object.keys(slot)
+              }
+            }
+            collect('events', a.events); collect('bursts', a.bursts)
+            collect('ap', a.ap); collect('iv_curves', a.iv_curves)
+            collect('fpsp_curves', a.fpsp_curves)
+            collect('cursor_analyses', a.cursor_analyses)
+            collect('resistance', a.resistance)
+          } catch { /* leave analyses empty */ }
+        }
+        entries.push({
+          filePath: e.filePath, fileName: e.fileName,
+          hasSidecar: e.hasSidecar,
+          fileTags: meta?.group_tags ?? [],
+          seriesTags: meta?.series_tags ?? {},
+          existingAnalyses: analyses,
+        })
+      }
+      setTargetEntries(entries)
+    } catch (err: any) {
+      setTargetError(String(err?.message ?? err))
+    } finally {
+      setTargetLoading(false)
+    }
+  }, [])
+
+  const pickTargetFolder = useCallback(async () => {
+    const api = window.electronAPI
+    if (!api?.openFolderDialog) return
+    const folder = await api.openFolderDialog(targetFolder ?? undefined)
+    if (!folder) return
+    await scanTargetFolder(folder)
+  }, [targetFolder, scanTargetFolder])
+
+  /** Compute, for each (file, recipe) pair: which series in the file
+   *  match the recipe's primary tag, plus secondary-series matches
+   *  for cross-series analyses (FPsp LTP). Returned per-file so the
+   *  table render can iterate cheaply. */
+  const matches = useMemo(() => {
+    const out: Record<string, Record<string, RecipeMatch>> = {}
+    for (const ent of targetEntries) {
+      const perRecipe: Record<string, RecipeMatch> = {}
+      for (const r of recipes) {
+        const id = recipeId(r)
+        // Primary: any (g:s) in this file whose tags include r.tag.
+        const primary: string[] = []
+        for (const [k, ts] of Object.entries(ent.seriesTags)) {
+          if (ts.includes(r.tag) && !primary.includes(k)) primary.push(k)
+        }
+        // Secondary: same logic per role.
+        const secondary: Record<string, string[]> = {}
+        for (const [role, roleTags] of Object.entries(r.secondaryTags)) {
+          const hits: string[] = []
+          for (const [k, ts] of Object.entries(ent.seriesTags)) {
+            if (roleTags.some((t) => ts.includes(t)) && !hits.includes(k)) hits.push(k)
+          }
+          secondary[role] = hits
+        }
+        // Existing-results check: do any of the primary keys already
+        // have a result blob for this analysis type? For FPsp we also
+        // need to consider the subtype (fpsp_curves keys are 3-part).
+        const existingForType = ent.existingAnalyses[r.analysisType] ?? []
+        const alreadyHasResults = primary.some((pk) => {
+          if (r.subtype) {
+            return existingForType.includes(`${pk}:${r.subtype}`)
+          }
+          return existingForType.includes(pk)
+        })
+        perRecipe[id] = {
+          primary, secondary, alreadyHasResults,
+          matched: primary.length > 0
+            && Object.keys(r.secondaryTags).every((role) =>
+              (secondary[role]?.length ?? 0) > 0),
+        }
+      }
+      out[ent.filePath] = perRecipe
+    }
+    return out
+  }, [targetEntries, recipes])
+
+  // Whenever the matches table is recomputed, default-select every
+  // (file, recipe) pair that has a primary match — the user's
+  // expected starting state. Existing results also default to
+  // "skip" (off) unless overwriteAll is on. Manual toggles via
+  // ``selections`` override these computed defaults.
+  const effectiveSelected = useCallback((filePath: string, rId: string): boolean => {
+    const k = `${filePath}||${rId}`
+    if (k in selections) return selections[k]
+    const m = matches[filePath]?.[rId]
+    if (!m || !m.matched) return false
+    if (m.alreadyHasResults && !overwriteAll) return false
+    return true
+  }, [selections, matches, overwriteAll])
+
+  const toggleSelection = useCallback((filePath: string, rId: string) => {
+    setSelections((prev) => {
+      const k = `${filePath}||${rId}`
+      const cur = effectiveSelected(filePath, rId)
+      return { ...prev, [k]: !cur }
+    })
+  }, [effectiveSelected])
+
+  // ---------------------------------------------------------------
+  // Run loop
+  // ---------------------------------------------------------------
+  const [running, setRunning] = useState(false)
+  /** Soft-cancel flag — reads as a ref so the in-flight loop can
+   *  observe a cancel request without re-rendering. The loop checks
+   *  it between files and returns early; the current file finishes. */
+  const cancelRef = useRef(false)
+  const [currentFileIdx, setCurrentFileIdx] = useState(0)
+  const [filesPlanned, setFilesPlanned] = useState(0)
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null)
+  const [currentFileFraction, setCurrentFileFraction] = useState(0)
+  const [runLog, setRunLog] = useState<RunLogEntry[]>([])
+  const [runDone, setRunDone] = useState(false)
+
+  const appOpenFile = useAppStore((s) => s.openFile)
+  const appRunEvents = useAppStore((s) => s.runEvents)
+  const eventsTemplates = useAppStore((s) => s.eventsTemplates)
+
+  /** Plan the run — flatten the selection map into a list of work
+   *  items keyed by file. Each file gets a list of recipes the user
+   *  opted into AND that match in this file. */
+  const buildPlan = useCallback((): RunPlanFile[] => {
+    const plan: RunPlanFile[] = []
+    for (const ent of targetEntries) {
+      const items: RunPlanItem[] = []
+      const perRecipe = matches[ent.filePath] ?? {}
+      for (const r of recipes) {
+        const rId = recipeId(r)
+        if (!effectiveSelected(ent.filePath, rId)) continue
+        const m = perRecipe[rId]
+        if (!m || !m.matched) continue
+        items.push({ recipe: r, match: m })
+      }
+      if (items.length > 0) {
+        plan.push({ entry: ent, items })
+      }
+    }
+    return plan
+  }, [targetEntries, matches, recipes, effectiveSelected])
+
+  const totalSelected = useMemo(() => buildPlan()
+    .reduce((acc, f) => acc + f.items.length, 0),
+    [buildPlan])
+
+  /** Run a single events-detection recipe against the *currently open*
+   *  recording. We rely on the store's existing event-detection
+   *  pipeline (subscriber writes results to sidecar automatically),
+   *  so no manual sidecar I/O here. */
+  const runEventsRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const params = item.recipe.params as any  // EventsParams shape
+    // Look up the biexp template from the library by id. Templates
+    // are stored separately from per-file analyses; the library is
+    // shared across files so the same template id is valid here.
+    const tmplId = params.templateId
+    const template = tmplId
+      ? (eventsTemplates.entries[tmplId] ?? null)
+      : null
+    // Run once per matched (group, series) — multiple matches on the
+    // same file are normal (e.g. two series both tagged "mEPSC").
+    for (let i = 0; i < item.match.primary.length; i++) {
+      const key = item.match.primary[i]
+      const [g, s] = key.split(':').map(Number)
+      const channel = item.recipe.channel ?? 0
+      // Sweep arg: events typically run on a single starting sweep
+      // and use ``params.sweepMode`` ('current' / 'all') to expand.
+      // We pass 0 as the seed; the runner respects sweepMode.
+      const seedSweep = 0
+      const partFrac = (frac: number) => {
+        const before = i / item.match.primary.length
+        const within = frac / item.match.primary.length
+        fileFraction(before + within)
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await appRunEvents(g, s, channel, seedSweep, params, template, partFrac)
+    }
+  }, [appRunEvents, eventsTemplates])
+
+  const runBatch = useCallback(async () => {
+    const plan = buildPlan()
+    if (plan.length === 0) return
+    cancelRef.current = false
+    setRunning(true)
+    setRunDone(false)
+    setRunLog([])
+    setFilesPlanned(plan.length)
+    setCurrentFileIdx(0)
+
+    // Stash the user's currently-open file so we can restore at the
+    // end. ``recording`` may be null if they entered the batch
+    // window without opening anything first.
+    const originalPath = useAppStore.getState().recording?.filePath ?? null
+    const log: RunLogEntry[] = []
+
+    for (let i = 0; i < plan.length; i++) {
+      if (cancelRef.current) break
+      const file = plan[i]
+      setCurrentFileIdx(i)
+      setCurrentFileName(file.entry.fileName)
+      setCurrentFileFraction(0)
+      try {
+        await appOpenFile(file.entry.filePath)
+      } catch (err: any) {
+        log.push({
+          filePath: file.entry.filePath,
+          fileName: file.entry.fileName,
+          level: 'error',
+          message: `Couldn't open file: ${err?.message ?? err}`,
+        })
+        setRunLog([...log])
+        continue
+      }
+      // Per-recipe loop within this file. Equal-share progress per
+      // recipe — events streaming reports its own fraction which we
+      // map onto the within-file slice.
+      for (let j = 0; j < file.items.length; j++) {
+        if (cancelRef.current) break
+        const item = file.items[j]
+        const rec = `${ANALYSIS_LABELS[item.recipe.analysisType] ?? item.recipe.analysisType}` +
+          (item.recipe.subtype ? ` [${item.recipe.subtype}]` : '') +
+          ` · ${item.recipe.tag}`
+        const slice = (frac: number) => setCurrentFileFraction((j + frac) / file.items.length)
+        try {
+          if (item.recipe.analysisType === 'events') {
+            // eslint-disable-next-line no-await-in-loop
+            await runEventsRecipe(item, slice)
+            log.push({
+              filePath: file.entry.filePath,
+              fileName: file.entry.fileName,
+              level: 'ok',
+              message: `${rec} ✓`,
+            })
+          } else {
+            // Stub for other analyses — recipe extraction works for
+            // them, runner doesn't yet. Logged so the user can see
+            // what was skipped and fill in support per type.
+            log.push({
+              filePath: file.entry.filePath,
+              fileName: file.entry.fileName,
+              level: 'skip',
+              message: `${rec} — runner not yet wired for ${item.recipe.analysisType}`,
+            })
+          }
+        } catch (err: any) {
+          log.push({
+            filePath: file.entry.filePath,
+            fileName: file.entry.fileName,
+            level: 'error',
+            message: `${rec} failed: ${err?.message ?? err}`,
+          })
+        }
+        setRunLog([...log])
+      }
+      setCurrentFileFraction(1)
+    }
+
+    // Restore the user's original active recording (best effort —
+    // failures here aren't fatal, the user can re-open manually).
+    if (originalPath) {
+      try { await appOpenFile(originalPath) } catch { /* ignore */ }
+    }
+    setRunning(false)
+    setRunDone(true)
+    setCurrentFileName(null)
+    cancelRef.current = false
+  }, [buildPlan, appOpenFile, runEventsRecipe])
+
+  const cancelRun = useCallback(() => {
+    cancelRef.current = true
+  }, [])
+
+  const openCohort = useCallback(async () => {
+    const api = window.electronAPI
+    if (api?.openAnalysisWindow) await api.openAnalysisWindow('cohort_analysis')
+  }, [])
+
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', height: '100%',
@@ -332,10 +703,28 @@ export function BatchWindow({ backendUrl }: Props) {
             ? templatePath.split(/[/\\]/).pop()
             : 'No template selected'}
         </span>
-        <button className="btn btn-primary" onClick={pickTemplate}>
+        <button className="btn btn-primary" onClick={pickTemplate}
+          disabled={running}>
           {templatePath ? 'Change template…' : 'Pick template…'}
         </button>
       </div>
+
+      {/* RUN bar — drives the whole batch loop. The total-progress
+          fraction lives on the button as a CSS-painted overlay (same
+          pattern the Events RUN button uses). */}
+      <RunBar
+        running={running}
+        runDone={runDone}
+        canRun={recipes.length > 0 && totalSelected > 0}
+        totalSelected={totalSelected}
+        currentFileIdx={currentFileIdx}
+        filesPlanned={filesPlanned}
+        currentFileName={currentFileName}
+        currentFileFraction={currentFileFraction}
+        onRun={() => void runBatch()}
+        onCancel={cancelRun}
+        onOpenCohort={openCohort}
+      />
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12 }}>
         {!templatePath ? (
@@ -355,13 +744,38 @@ export function BatchWindow({ backendUrl }: Props) {
         ) : loadError ? (
           <div style={{ color: '#e57373' }}>⚠ {loadError}</div>
         ) : (
-          <RecipeList
-            recipes={recipes}
-            warnings={warnings}
-            meta={templateMeta}
-            diagAnalyses={diagAnalyses}
-            diagSeriesTags={diagSeriesTags}
-          />
+          <>
+            <RecipeList
+              recipes={recipes}
+              warnings={warnings}
+              meta={templateMeta}
+              diagAnalyses={diagAnalyses}
+              diagSeriesTags={diagSeriesTags}
+            />
+            {recipes.length > 0 && (
+              <div style={{ marginTop: 18, maxWidth: '100%' }}>
+                <TargetSection
+                  recipes={recipes}
+                  targetFolder={targetFolder}
+                  targetEntries={targetEntries}
+                  targetLoading={targetLoading}
+                  targetError={targetError}
+                  matches={matches}
+                  effectiveSelected={effectiveSelected}
+                  toggleSelection={toggleSelection}
+                  overwriteAll={overwriteAll}
+                  setOverwriteAll={setOverwriteAll}
+                  pickTargetFolder={pickTargetFolder}
+                  rescan={() => targetFolder && void scanTargetFolder(targetFolder)}
+                />
+              </div>
+            )}
+            {runLog.length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <RunLogPanel entries={runLog} />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -673,6 +1087,543 @@ function RecipeList({
       }}>
         Next step: pick a target folder. Files matching at least one
         recipe tag will be selectable for batch processing.
+      </div>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Target folder + per-file recipe-match table.
+// ---------------------------------------------------------------------------
+
+/** Open the Metadata (Tags) window focused on a specific file path.
+ *  Two-pronged delivery so we cover both "window already open" and
+ *  "window opens fresh after this call":
+ *    1. Stash the focus target in Electron prefs (one-shot — the
+ *       metadata window reads + clears on mount).
+ *    2. Broadcast a ``metadata-focus-file`` message for the live case.
+ *  Then call ``openAnalysisWindow('metadata')`` which is a no-op if
+ *  the window is already up. */
+async function openTagsForFile(filePath: string) {
+  const api = window.electronAPI
+  if (!api) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    await api.setPreferences({ ...prefs, metadataFocusPath: filePath })
+  } catch { /* fall through — broadcast still works for open windows */ }
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'metadata-focus-file', file_path: filePath })
+    ch.close()
+  } catch { /* ignore */ }
+  if (api.openAnalysisWindow) {
+    await api.openAnalysisWindow('metadata')
+  }
+}
+
+function TargetSection({
+  recipes, targetFolder, targetEntries, targetLoading, targetError,
+  matches, effectiveSelected, toggleSelection,
+  overwriteAll, setOverwriteAll,
+  pickTargetFolder, rescan,
+}: {
+  recipes: BatchRecipe[]
+  targetFolder: string | null
+  targetEntries: TargetEntry[]
+  targetLoading: boolean
+  targetError: string | null
+  matches: Record<string, Record<string, RecipeMatch>>
+  effectiveSelected: (filePath: string, rId: string) => boolean
+  toggleSelection: (filePath: string, rId: string) => void
+  overwriteAll: boolean
+  setOverwriteAll: React.Dispatch<React.SetStateAction<boolean>>
+  pickTargetFolder: () => Promise<void>
+  rescan: () => void
+}) {
+  // Recipe-column ordering: keep template order so the user reads the
+  // table left-to-right consistent with how recipes were derived.
+  const recipeCols = recipes
+  const fullyMatchedCount = useMemo(() => {
+    let n = 0
+    for (const ent of targetEntries) {
+      const any = recipeCols.some((r) => matches[ent.filePath]?.[recipeId(r)]?.matched)
+      if (any) n++
+    }
+    return n
+  }, [targetEntries, recipeCols, matches])
+
+  return (
+    <div style={{
+      borderTop: '1px solid var(--border)',
+      paddingTop: 14,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        marginBottom: 8,
+      }}>
+        <span style={{ fontWeight: 600 }}>Target folder:</span>
+        <span style={{
+          fontFamily: 'var(--font-mono)', flex: 1,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          color: targetFolder ? 'var(--text-primary)' : 'var(--text-muted)',
+        }} title={targetFolder ?? undefined}>
+          {targetFolder ?? 'No folder selected'}
+        </span>
+        {targetFolder && (
+          <button className="btn" onClick={rescan}
+            style={{ padding: '2px 8px', fontSize: 'var(--font-size-label)' }}
+            title="Re-scan the folder for sidecar updates">
+            Rescan
+          </button>
+        )}
+        <button className="btn btn-primary" onClick={pickTargetFolder}>
+          {targetFolder ? 'Change folder…' : 'Pick folder…'}
+        </button>
+      </div>
+
+      {targetError && (
+        <div style={{
+          color: '#e57373', marginBottom: 8,
+          fontSize: 'var(--font-size-label)',
+        }}>⚠ {targetError}</div>
+      )}
+
+      {targetLoading ? (
+        <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+          Scanning folder…
+        </div>
+      ) : !targetFolder ? (
+        <div style={{
+          color: 'var(--text-muted)', fontStyle: 'italic',
+          fontSize: 'var(--font-size-label)',
+          padding: '12px 0',
+        }}>
+          Pick a folder of recordings to apply the template's recipes
+          across. Files need at least one series-level tag matching a
+          recipe to be runnable — open Tags… on a target file to add
+          tags.
+        </div>
+      ) : targetEntries.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)' }}>
+          No recordings found in this folder.
+        </div>
+      ) : (
+        <>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            marginBottom: 8, fontSize: 'var(--font-size-label)',
+          }}>
+            <span style={{ color: 'var(--text-muted)' }}>
+              {targetEntries.length} file{targetEntries.length === 1 ? '' : 's'} ·{' '}
+              {fullyMatchedCount} matchable
+            </span>
+            <label style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              cursor: 'pointer',
+            }} title="Re-run analyses on files that already have results in their sidecar (otherwise those cells default to off).">
+              <input type="checkbox" checked={overwriteAll}
+                onChange={(e) => setOverwriteAll(e.target.checked)} />
+              <span>Overwrite existing results</span>
+            </label>
+          </div>
+
+          <div style={{
+            border: '1px solid var(--border)', borderRadius: 4,
+            overflow: 'auto',
+            maxHeight: 480,
+          }}>
+            <table style={{
+              borderCollapse: 'collapse', width: '100%',
+              fontSize: 'var(--font-size-label)',
+              fontFamily: 'var(--font-ui)',
+            }}>
+              <thead>
+                <tr style={{
+                  background: 'var(--bg-secondary)',
+                  position: 'sticky', top: 0, zIndex: 1,
+                }}>
+                  <th style={{
+                    ...thStyle, textAlign: 'left',
+                    minWidth: 220,
+                  }}>File</th>
+                  <th style={{ ...thStyle, textAlign: 'left', minWidth: 140 }}>
+                    Series tags
+                  </th>
+                  {recipeCols.map((r) => (
+                    <th key={recipeId(r)} style={{
+                      ...thStyle, textAlign: 'center',
+                      minWidth: 160,
+                    }} title={`${r.analysisType}${r.subtype ? ` [${r.subtype}]` : ''} on series tagged "${r.tag}"`}>
+                      <div style={{ fontWeight: 600 }}>
+                        {ANALYSIS_LABELS[r.analysisType] ?? r.analysisType}
+                        {r.subtype && (
+                          <span style={{
+                            marginLeft: 4,
+                            padding: '0 5px',
+                            border: '1px solid var(--border)',
+                            borderRadius: 8,
+                            background: 'var(--bg-primary)',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 'var(--font-size-xs)',
+                            fontWeight: 500,
+                            color: 'var(--text-muted)',
+                          }}>{r.subtype}</span>
+                        )}
+                      </div>
+                      <div style={{
+                        marginTop: 2,
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--accent, #64b5f6)',
+                        fontFamily: 'var(--font-mono)',
+                      }}>
+                        {r.tag}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {targetEntries.map((ent) => {
+                  const perRecipe = matches[ent.filePath] ?? {}
+                  const hasAnyMatch = recipeCols.some((r) =>
+                    perRecipe[recipeId(r)]?.matched)
+                  // Show the inline "Tag…" affordance whenever the
+                  // user can't run anything on this file as-is. Three
+                  // overlapping cases all collapse to "open Tags…":
+                  // no sidecar, no series-level tags, OR no recipe
+                  // matched any tagged series.
+                  const needsTagging = !ent.hasSidecar
+                    || Object.keys(ent.seriesTags).length === 0
+                    || !hasAnyMatch
+                  return (
+                    <tr key={ent.filePath} style={{
+                      borderTop: '1px solid var(--border)',
+                      opacity: hasAnyMatch ? 1 : 0.5,
+                    }}>
+                      <td style={tdStyle} title={ent.filePath}>
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                        }}>
+                          <span style={{ fontFamily: 'var(--font-mono)' }}>
+                            {ent.fileName}
+                          </span>
+                          {!ent.hasSidecar && (
+                            <span style={{
+                              color: '#e57373',
+                              fontSize: 'var(--font-size-xs)',
+                            }}>· no sidecar</span>
+                          )}
+                          {needsTagging && (
+                            <button className="btn"
+                              onClick={() => void openTagsForFile(ent.filePath)}
+                              style={{
+                                padding: '1px 8px',
+                                fontSize: 'var(--font-size-xs)',
+                                marginLeft: 'auto',
+                              }}
+                              title="Open this file in the Tags window so you can tag its series, then come back and rescan.">
+                              Tag…
+                            </button>
+                          )}
+                        </div>
+                        {ent.fileTags.length > 0 && (
+                          <div style={{
+                            marginTop: 2,
+                            display: 'flex', flexWrap: 'wrap', gap: 3,
+                          }}>
+                            {ent.fileTags.map((t) => (
+                              <span key={t} style={{
+                                padding: '0 5px',
+                                border: '1px solid var(--border)',
+                                borderRadius: 8,
+                                background: 'var(--bg-secondary)',
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: 'var(--font-size-xs)',
+                              }}>{t}</span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td style={tdStyle}>
+                        {Object.keys(ent.seriesTags).length === 0 ? (
+                          <span style={{
+                            color: 'var(--text-muted)', fontStyle: 'italic',
+                          }}>
+                            untagged
+                          </span>
+                        ) : (
+                          <div style={{
+                            display: 'flex', flexDirection: 'column', gap: 1,
+                            fontSize: 'var(--font-size-xs)',
+                            fontFamily: 'var(--font-mono)',
+                          }}>
+                            {Object.entries(ent.seriesTags)
+                              .sort(([a], [b]) => a.localeCompare(b))
+                              .map(([k, ts]) => (
+                                <div key={k}>
+                                  <span style={{
+                                    color: 'var(--text-muted)',
+                                  }}>{displayGroupSeries(k)}</span>
+                                  : {ts.join(', ')}
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </td>
+                      {recipeCols.map((r) => {
+                        const rId = recipeId(r)
+                        const m = perRecipe[rId]
+                        return (
+                          <td key={rId} style={{
+                            ...tdStyle, textAlign: 'center',
+                            verticalAlign: 'top',
+                          }}>
+                            <RecipeCell
+                              filePath={ent.filePath}
+                              recipe={r}
+                              match={m}
+                              checked={effectiveSelected(ent.filePath, rId)}
+                              overwriteAll={overwriteAll}
+                              onToggle={() => toggleSelection(ent.filePath, rId)}
+                            />
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function RecipeCell({
+  recipe, match, checked, overwriteAll, onToggle,
+}: {
+  filePath: string
+  recipe: BatchRecipe
+  match: RecipeMatch | undefined
+  checked: boolean
+  overwriteAll: boolean
+  onToggle: () => void
+}) {
+  if (!match || !match.matched) {
+    return (
+      <span style={{
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-xs)',
+      }}>
+        no match
+      </span>
+    )
+  }
+  const exists = match.alreadyHasResults
+  const showOverwriteHint = exists && !overwriteAll && !checked
+  return (
+    <label style={{
+      display: 'inline-flex', flexDirection: 'column', alignItems: 'center',
+      gap: 2, cursor: 'pointer',
+    }}>
+      <input type="checkbox" checked={checked} onChange={onToggle} />
+      <span style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 'var(--font-size-xs)',
+        color: 'var(--text-muted)',
+      }}>
+        {match.primary.map(displayGroupSeries).join(', ')}
+        {Object.entries(match.secondary).map(([role, hits]) => (
+          <span key={role}> + {hits.map(displayGroupSeries).join(', ')}</span>
+        ))}
+      </span>
+      {exists && (
+        <span style={{
+          fontSize: 'var(--font-size-xs)',
+          color: showOverwriteHint ? '#ffb74d' : 'var(--text-muted)',
+          fontStyle: 'italic',
+        }} title={recipe.analysisType + ' results already exist for this series'}>
+          {showOverwriteHint ? 'has results · skip' : 'overwrite'}
+        </span>
+      )}
+    </label>
+  )
+}
+
+const thStyle: React.CSSProperties = {
+  padding: '6px 10px',
+  borderBottom: '1px solid var(--border)',
+  textAlign: 'center',
+  fontWeight: 500,
+  color: 'var(--text-muted)',
+  whiteSpace: 'nowrap',
+}
+
+const tdStyle: React.CSSProperties = {
+  padding: '6px 10px',
+  verticalAlign: 'middle',
+}
+
+// ---------------------------------------------------------------------------
+// RUN bar — pinned under the template/folder pickers. RUN button doubles
+// as the overall progress indicator; cancel button lets users soft-stop.
+// ---------------------------------------------------------------------------
+
+function RunBar({
+  running, runDone, canRun, totalSelected,
+  currentFileIdx, filesPlanned, currentFileName, currentFileFraction,
+  onRun, onCancel, onOpenCohort,
+}: {
+  running: boolean
+  runDone: boolean
+  canRun: boolean
+  totalSelected: number
+  currentFileIdx: number
+  filesPlanned: number
+  currentFileName: string | null
+  currentFileFraction: number
+  onRun: () => void
+  onCancel: () => void
+  onOpenCohort: () => void
+}) {
+  // Total-progress fraction — files completed + within-file progress.
+  // Clamped to [0, 1] so a stale state can't push the bar past full.
+  const totalFrac = filesPlanned === 0
+    ? 0
+    : Math.max(0, Math.min(1,
+        (currentFileIdx + currentFileFraction) / filesPlanned))
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 10px',
+      borderBottom: '1px solid var(--border)',
+      background: 'var(--bg-primary)',
+      flexShrink: 0,
+    }}>
+      <button
+        className="btn btn-primary"
+        onClick={onRun}
+        disabled={!canRun || running}
+        style={{
+          minWidth: 120, padding: '6px 14px',
+          position: 'relative', overflow: 'hidden',
+          fontWeight: 600,
+        }}
+        title={canRun ? 'Run all selected recipes across the target files' : 'Pick a template + folder + at least one recipe to run'}>
+        {/* Progress overlay — covers the button left-to-right by
+            ``totalFrac``. Sits BEHIND the label via z-index. */}
+        {running && (
+          <span style={{
+            position: 'absolute', left: 0, top: 0, bottom: 0,
+            width: `${totalFrac * 100}%`,
+            background: 'rgba(255,255,255,0.25)',
+            transition: 'width 120ms linear',
+            pointerEvents: 'none',
+          }} />
+        )}
+        <span style={{ position: 'relative', zIndex: 1 }}>
+          {running
+            ? `Running… ${Math.round(totalFrac * 100)}%`
+            : runDone
+              ? `Run again (${totalSelected})`
+              : `Run ${totalSelected} task${totalSelected === 1 ? '' : 's'}`}
+        </span>
+      </button>
+      {running && (
+        <button className="btn" onClick={onCancel}
+          style={{ padding: '6px 14px' }}
+          title="Stop after the current file finishes">
+          Cancel
+        </button>
+      )}
+      <span style={{
+        flex: 1, color: 'var(--text-muted)',
+        fontSize: 'var(--font-size-label)',
+        fontFamily: 'var(--font-mono)',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+        {running && currentFileName
+          ? `${currentFileIdx + 1} / ${filesPlanned} — ${currentFileName} (${Math.round(currentFileFraction * 100)}%)`
+          : runDone
+            ? 'Done — review the log below.'
+            : ''}
+      </span>
+      {runDone && (
+        <button className="btn" onClick={onOpenCohort}
+          style={{ padding: '6px 14px' }}
+          title="Aggregate the freshly-written results in the cohort window">
+          Open in Cohort…
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Run log — per-file results + skips + errors. Grouped by file so a
+// 30-file batch with 3 recipes each doesn't drown the user in 90 rows.
+// ---------------------------------------------------------------------------
+
+function RunLogPanel({ entries }: { entries: RunLogEntry[] }) {
+  const byFile = useMemo(() => {
+    const m = new Map<string, { fileName: string; lines: RunLogEntry[] }>()
+    for (const e of entries) {
+      const cur = m.get(e.filePath)
+      if (cur) cur.lines.push(e)
+      else m.set(e.filePath, { fileName: e.fileName, lines: [e] })
+    }
+    return Array.from(m.entries())
+  }, [entries])
+  const totals = useMemo(() => {
+    let ok = 0, err = 0, skip = 0
+    for (const e of entries) {
+      if (e.level === 'ok') ok++
+      else if (e.level === 'error') err++
+      else skip++
+    }
+    return { ok, err, skip }
+  }, [entries])
+  return (
+    <div style={{
+      border: '1px solid var(--border)', borderRadius: 4,
+      padding: '8px 12px',
+      background: 'var(--bg-primary)',
+      fontSize: 'var(--font-size-label)',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        marginBottom: 6, fontWeight: 600,
+      }}>
+        Run log
+        <span style={{ color: '#66bb6a' }}>{totals.ok} ok</span>
+        {totals.err > 0 && <span style={{ color: '#e57373' }}>· {totals.err} error</span>}
+        {totals.skip > 0 && <span style={{ color: '#ffb74d' }}>· {totals.skip} skipped</span>}
+      </div>
+      <div style={{
+        display: 'flex', flexDirection: 'column', gap: 6,
+        maxHeight: 320, overflow: 'auto',
+      }}>
+        {byFile.map(([fp, { fileName, lines }]) => (
+          <div key={fp} style={{
+            paddingTop: 4, borderTop: '1px solid var(--border-subtle, var(--border))',
+          }}>
+            <div style={{
+              fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+            }} title={fp}>{fileName}</div>
+            <ul style={{ margin: '2px 0 4px 0', paddingLeft: 16 }}>
+              {lines.map((l, i) => (
+                <li key={i} style={{
+                  color: l.level === 'error' ? '#e57373'
+                       : l.level === 'skip' ? '#ffb74d'
+                       : 'var(--text-primary)',
+                }}>{l.message}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </div>
     </div>
   )

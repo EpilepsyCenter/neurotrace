@@ -525,14 +525,28 @@ export function EventDetectionWindow({
   }
 
   // ---- Cursor handling ----
+  // BroadcastChannel cached at component scope — opening + closing
+  // a fresh channel per pointer-move (the previous behaviour) was a
+  // ~1 ms hit each, and at 60 Hz dragging that's noticeable on top
+  // of the marker redraw cost.
+  const cursorBroadcastRef = useRef<BroadcastChannel | null>(null)
+  useEffect(() => {
+    try {
+      cursorBroadcastRef.current = new BroadcastChannel('neurotrace-sync')
+    } catch { /* ignore */ }
+    return () => {
+      try { cursorBroadcastRef.current?.close() } catch { /* ignore */ }
+      cursorBroadcastRef.current = null
+    }
+  }, [])
   const updateCursors = useCallback((next: Partial<CursorPositions>) => {
     setCursors(next)
     // Broadcast to the main window so its cursor bands move in lockstep.
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
       const merged = { ...useAppStore.getState().cursors, ...next }
-      ch.postMessage({ type: 'cursor-update', cursors: merged })
-      ch.close()
+      cursorBroadcastRef.current?.postMessage({
+        type: 'cursor-update', cursors: merged,
+      })
     } catch { /* ignore */ }
   }, [setCursors])
 
@@ -2399,44 +2413,50 @@ function EventsSweepViewer({
   // (max_points=0) — for long viewports uPlot will manage its own
   // rendering decimation, and for zoomed-in windows we get the full
   // temporal resolution needed for accurate event placement.
+  //
+  // Debounced (~80 ms) so a fast scroll / drag-pan / cursor move doesn't
+  // blast the trace endpoint with one fetch per pixel. The cleanup
+  // clears any pending timer so the LATEST viewport wins.
   useEffect(() => {
     if (!backendUrl) { setData(null); return }
-    const parts: string[] = [
-      `group=${group}`, `series=${series}`, `sweep=${sweep}`,
-      `trace=${channel}`, `max_points=0`,
-    ]
-    if (viewport) {
-      parts.push(`t_start=${viewport.tStart}`)
-      parts.push(`t_end=${viewport.tEnd}`)
-    }
-    // Pre-detection filter — feed the same params through the traces
-    // endpoint so the viewer shows the trace the detector will see.
-    if (params.filterEnabled) {
-      parts.push(`filter_type=${params.filterType}`)
-      parts.push(`filter_low=${params.filterLow}`)
-      parts.push(`filter_high=${params.filterHigh}`)
-      parts.push(`filter_order=${params.filterOrder}`)
-    }
-    const url = `${backendUrl}/api/traces/data?${parts.join('&')}`
     let cancelled = false
-    fetch(url)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d) => {
-        if (cancelled) return
-        const n = Number(d.n_samples ?? 0)
-        const sr = Number(d.sampling_rate ?? 1)
-        const durationS = sr > 0 ? n / sr : Number(d.duration ?? 0)
-        if (durationS > 0 && Math.abs(durationS - sweepDurationS) > 1e-3) {
-          setSweepDurationS(durationS)
-        }
-        setData({
-          time: new Float64Array(d.time ?? []),
-          values: new Float64Array(d.values ?? []),
+    const timer = setTimeout(() => {
+      const parts: string[] = [
+        `group=${group}`, `series=${series}`, `sweep=${sweep}`,
+        `trace=${channel}`, `max_points=0`,
+      ]
+      if (viewport) {
+        parts.push(`t_start=${viewport.tStart}`)
+        parts.push(`t_end=${viewport.tEnd}`)
+      }
+      // Pre-detection filter — feed the same params through the traces
+      // endpoint so the viewer shows the trace the detector will see.
+      if (params.filterEnabled) {
+        parts.push(`filter_type=${params.filterType}`)
+        parts.push(`filter_low=${params.filterLow}`)
+        parts.push(`filter_high=${params.filterHigh}`)
+        parts.push(`filter_order=${params.filterOrder}`)
+      }
+      const url = `${backendUrl}/api/traces/data?${parts.join('&')}`
+      fetch(url)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((d) => {
+          if (cancelled) return
+          const n = Number(d.n_samples ?? 0)
+          const sr = Number(d.sampling_rate ?? 1)
+          const durationS = sr > 0 ? n / sr : Number(d.duration ?? 0)
+          if (durationS > 0 && Math.abs(durationS - sweepDurationS) > 1e-3) {
+            setSweepDurationS(durationS)
+          }
+          setData({
+            time: new Float64Array(d.time ?? []),
+            values: new Float64Array(d.values ?? []),
+          })
+          setErr(null)
         })
-        setErr(null)
-      })
-      .catch((e) => { if (!cancelled) { setData(null); setErr(String(e)) } })
-    return () => { cancelled = true }
+        .catch((e) => { if (!cancelled) { setData(null); setErr(String(e)) } })
+    }, 80)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [backendUrl, group, series, sweep, channel, viewport,
       params.filterEnabled, params.filterType, params.filterLow,
       params.filterHigh, params.filterOrder, setSweepDurationS, sweepDurationS])
@@ -2446,6 +2466,7 @@ function EventsSweepViewer({
   // AND we have a template (deconvolution and correlation both
   // require one). Re-fires on viewport / cutoff / template / filter
   // changes so the overlay always tracks the visible trace.
+  // Debounced like the trace fetch above — same goal, same window.
   useEffect(() => {
     if (!params.showDetectionMeasure
         || !params.method.startsWith('template_')
@@ -2454,24 +2475,26 @@ function EventsSweepViewer({
       return
     }
     let cancelled = false
-    const method = params.method as 'template_correlation' | 'template_deconvolution'
-    const cutoff = method === 'template_correlation'
-      ? params.correlationCutoff
-      : params.deconvCutoffSd
-    const filterPayload = params.filterEnabled ? {
-      enabled: true, type: params.filterType,
-      low: params.filterLow, high: params.filterHigh, order: params.filterOrder,
-    } : null
-    fetchDm(
-      group, series, channel, sweep,
-      method, activeTemplate, cutoff, params.peakDirection,
-      params.deconvLowHz, params.deconvHighHz,
-      viewport.tStart, viewport.tEnd,
-      filterPayload,
-    )
-      .then((out) => { if (!cancelled) setDm(out) })
-      .catch(() => { if (!cancelled) setDm(null) })
-    return () => { cancelled = true }
+    const timer = setTimeout(() => {
+      const method = params.method as 'template_correlation' | 'template_deconvolution'
+      const cutoff = method === 'template_correlation'
+        ? params.correlationCutoff
+        : params.deconvCutoffSd
+      const filterPayload = params.filterEnabled ? {
+        enabled: true, type: params.filterType,
+        low: params.filterLow, high: params.filterHigh, order: params.filterOrder,
+      } : null
+      fetchDm(
+        group, series, channel, sweep,
+        method, activeTemplate, cutoff, params.peakDirection,
+        params.deconvLowHz, params.deconvHighHz,
+        viewport.tStart, viewport.tEnd,
+        filterPayload,
+      )
+        .then((out) => { if (!cancelled) setDm(out) })
+        .catch(() => { if (!cancelled) setDm(null) })
+    }, 80)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [
     fetchDm, group, series, channel, sweep,
     viewport,
@@ -2491,42 +2514,45 @@ function EventsSweepViewer({
   // Backend computes the fit on the WHOLE sweep (so the curve is
   // anchored at edges) and returns the requested slice. Refetches on
   // viewport / order / direction / filter / detrend changes.
+  // Debounced like the other viewport-driven fetches above.
   useEffect(() => {
     if (params.baselineMethod !== 'polynomial' || !viewport) {
       setBaselineCurve(null)
       return
     }
     let cancelled = false
-    const body = {
-      group, series, sweep, trace: channel,
-      direction: params.peakDirection,
-      poly_order: params.baselinePolyOrder,
-      filter_enabled: params.filterEnabled,
-      filter_type: params.filterType,
-      filter_low: params.filterLow,
-      filter_high: params.filterHigh,
-      filter_order: params.filterOrder,
-      detrend_enabled: params.detrendEnabled,
-      detrend_window_ms: params.detrendWindowMs,
-      t_start_s: viewport.tStart,
-      t_end_s: viewport.tEnd,
-    }
-    fetch(`${backendUrl}/api/events/baseline_curve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d) => {
-        if (cancelled) return
-        setBaselineCurve({
-          values: Array.isArray(d.values) ? d.values : [],
-          dtS: Number(d.dt_s ?? 1),
-          tStartS: Number(d.t_start_s ?? 0),
-        })
+    const timer = setTimeout(() => {
+      const body = {
+        group, series, sweep, trace: channel,
+        direction: params.peakDirection,
+        poly_order: params.baselinePolyOrder,
+        filter_enabled: params.filterEnabled,
+        filter_type: params.filterType,
+        filter_low: params.filterLow,
+        filter_high: params.filterHigh,
+        filter_order: params.filterOrder,
+        detrend_enabled: params.detrendEnabled,
+        detrend_window_ms: params.detrendWindowMs,
+        t_start_s: viewport.tStart,
+        t_end_s: viewport.tEnd,
+      }
+      fetch(`${backendUrl}/api/events/baseline_curve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       })
-      .catch(() => { if (!cancelled) setBaselineCurve(null) })
-    return () => { cancelled = true }
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((d) => {
+          if (cancelled) return
+          setBaselineCurve({
+            values: Array.isArray(d.values) ? d.values : [],
+            dtS: Number(d.dt_s ?? 1),
+            tStartS: Number(d.t_start_s ?? 0),
+          })
+        })
+        .catch(() => { if (!cancelled) setBaselineCurve(null) })
+    }, 80)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [backendUrl, group, series, sweep, channel, viewport,
       params.baselineMethod, params.baselinePolyOrder,
       params.peakDirection,
@@ -3248,6 +3274,29 @@ function EventsSweepViewer({
         over.setPointerCapture(ev.pointerId)
       }
 
+      // rAF-throttle for cursor-edge / cursor-band drags. Pointer-moves
+      // can fire faster than the browser's paint cycle on some setups,
+      // and each one triggers a full marker redraw via the cursors
+      // useEffect. Coalescing to one update per frame caps the redraw
+      // cost regardless of mouse-event rate. The cursor scheduling
+      // state captures the LATEST pointer position so the final frame
+      // always reflects the user's actual position.
+      let cursorRafId: number | null = null
+      let pendingCursor: Partial<CursorPositions> | null = null
+      const flushCursor = () => {
+        cursorRafId = null
+        if (pendingCursor) {
+          updateCursorsRef.current(pendingCursor)
+          pendingCursor = null
+        }
+      }
+      const scheduleCursor = (next: Partial<CursorPositions>) => {
+        pendingCursor = next
+        if (cursorRafId == null) {
+          cursorRafId = requestAnimationFrame(flushCursor)
+        }
+      }
+
       const onPointerMove = (ev: PointerEvent) => {
         const u = plotRef.current
         if (!u) return
@@ -3270,14 +3319,14 @@ function EventsSweepViewer({
         }
         if (drag.kind === 'cursor-edge') {
           const x = pxToX(pxX)
-          updateCursorsRef.current(drag.edge === 'start'
+          scheduleCursor(drag.edge === 'start'
             ? { baselineStart: x }
             : { baselineEnd: x })
           return
         }
         if (drag.kind === 'cursor-band') {
           const dx = pxToX(pxX) - pxToX(drag.startPxX)
-          updateCursorsRef.current({
+          scheduleCursor({
             baselineStart: drag.startStart + dx,
             baselineEnd: drag.startEnd + dx,
           })
@@ -3391,6 +3440,10 @@ function EventsSweepViewer({
         over.removeEventListener('pointerup', onPointerUp)
         over.removeEventListener('pointercancel', onPointerUp)
         over.removeEventListener('wheel', onWheel)
+        if (cursorRafId != null) {
+          cancelAnimationFrame(cursorRafId)
+          cursorRafId = null
+        }
       }
     })
     return () => cancelAnimationFrame(frame)

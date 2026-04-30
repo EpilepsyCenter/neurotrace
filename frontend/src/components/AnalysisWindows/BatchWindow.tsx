@@ -32,6 +32,22 @@ import { displayGroupSeries } from '../../utils/groupSeriesKey'
 // window decoupled from the per-analysis data definitions.
 type AnyBlob = Record<string, unknown>
 
+/** Every analysis-type slot the .neurotrace sidecar carries. The order
+ *  here matches the order of recipes shown in the table — events first
+ *  (most common), resistance last. Used both for iterating sidecar
+ *  slots during scan and for the recipe-extraction emit calls below
+ *  so the two loops stay in sync. */
+const ANALYSIS_TYPES = [
+  'events',
+  'bursts',
+  'ap',
+  'iv_curves',
+  'fpsp_curves',
+  'cursor_analyses',
+  'resistance',
+] as const
+type AnalysisType = (typeof ANALYSIS_TYPES)[number]
+
 interface SidecarMetaShape {
   group_tags?: string[]
   series_tags?: Record<string, string[]>
@@ -273,13 +289,10 @@ export function extractRecipes(sidecar: SidecarShape): {
     }
   }
 
-  emit('events', analyses.events as any)
-  emit('bursts', analyses.bursts as any)
-  emit('ap', analyses.ap as any)
-  emit('iv_curves', analyses.iv_curves as any)
-  emit('fpsp_curves', analyses.fpsp_curves as any)
-  emit('cursor_analyses', analyses.cursor_analyses as any)
-  emit('resistance', analyses.resistance as any)
+  for (const type of ANALYSIS_TYPES) {
+    emit(type, (analyses as Record<string, unknown>)[type] as
+      Record<string, AnyBlob | AnyBlob[]> | undefined)
+  }
 
   return { recipes, warnings }
 }
@@ -404,39 +417,34 @@ export function BatchWindow({ backendUrl }: Props) {
     try {
       const result = await api.listFolderRecordings(folder)
       setTargetFolder(result.folder ?? folder)
-      // For each file we need: file_tags, series_tags, and the existing
-      // ``analyses.*`` keys (to flag overwrite). All available in the
-      // sidecar already loaded by listFolderRecordings via ``meta``;
-      // existing analyses we read separately since meta only carries
-      // the meta block.
-      const entries: TargetEntry[] = []
-      for (const e of result.entries) {
+      // Read every file's sidecar in parallel — the previous loop
+      // awaited each ``readSidecar`` before starting the next, which
+      // serialised 100 file reads on big folders. ``Promise.all``
+      // lets Electron's IPC pipeline service them concurrently.
+      const sidecars = await Promise.all(result.entries.map((e) => {
+        if (!e.hasSidecar || !api.readSidecar) return Promise.resolve(null)
+        return (api.readSidecar(e.filePath) as Promise<SidecarShape | null>)
+          .catch(() => null)
+      }))
+      const entries: TargetEntry[] = result.entries.map((e, i) => {
         const meta = (e.meta ?? null) as SidecarMetaShape | null
-        let analyses: Record<string, string[]> = {}
-        if (e.hasSidecar && api.readSidecar) {
-          try {
-            const sc = (await api.readSidecar(e.filePath)) as SidecarShape | null
-            const a = sc?.analyses ?? {}
-            const collect = (label: string, slot: any) => {
-              if (slot && typeof slot === 'object') {
-                analyses[label] = Object.keys(slot)
-              }
-            }
-            collect('events', a.events); collect('bursts', a.bursts)
-            collect('ap', a.ap); collect('iv_curves', a.iv_curves)
-            collect('fpsp_curves', a.fpsp_curves)
-            collect('cursor_analyses', a.cursor_analyses)
-            collect('resistance', a.resistance)
-          } catch { /* leave analyses empty */ }
+        const sc = sidecars[i]
+        const a = sc?.analyses ?? {}
+        const analyses: Record<string, string[]> = {}
+        for (const type of ANALYSIS_TYPES) {
+          const slot = (a as Record<string, unknown>)[type]
+          if (slot && typeof slot === 'object') {
+            analyses[type] = Object.keys(slot as Record<string, unknown>)
+          }
         }
-        entries.push({
+        return {
           filePath: e.filePath, fileName: e.fileName,
           hasSidecar: e.hasSidecar,
           fileTags: meta?.group_tags ?? [],
           seriesTags: meta?.series_tags ?? {},
           existingAnalyses: analyses,
-        })
-      }
+        }
+      })
       setTargetEntries(entries)
     } catch (err: any) {
       setTargetError(String(err?.message ?? err))
@@ -624,9 +632,13 @@ export function BatchWindow({ backendUrl }: Props) {
     return plan
   }, [targetEntries, matches, recipes, effectiveSelected])
 
-  const totalSelected = useMemo(() => buildPlan()
-    .reduce((acc, f) => acc + f.items.length, 0),
-    [buildPlan])
+  /** Single canonical view of the run plan. Memoizing once and
+   *  reusing in ``totalSelected`` / ``conflicts`` / RunBar avoids
+   *  three independent ``buildPlan()`` traversals per render. */
+  const plan = useMemo(() => buildPlan(), [buildPlan])
+  const totalSelected = useMemo(
+    () => plan.reduce((acc, f) => acc + f.items.length, 0),
+    [plan])
 
   /** Multi-tag conflicts: a single ``${group}:${series}`` in a target
    *  file matches *multiple selected* recipes. Running both would
@@ -650,7 +662,6 @@ export function BatchWindow({ backendUrl }: Props) {
       seriesKey: string
       recipes: BatchRecipe[]
     }> = []
-    const plan = buildPlan()
     for (const file of plan) {
       // Group selected recipes by which g:s key they hit on this
       // file. We use the analysis type + subtype + sourceKey as a
@@ -675,7 +686,7 @@ export function BatchWindow({ backendUrl }: Props) {
       }
     }
     return out
-  }, [buildPlan])
+  }, [plan])
 
   /** Run a single events-detection recipe against the *currently open*
    *  recording. We rely on the store's existing event-detection
@@ -1215,7 +1226,7 @@ export function BatchWindow({ backendUrl }: Props) {
       {confirmOpen && (
         <ConfirmRunModal
           totalTasks={totalSelected}
-          totalFiles={buildPlan().length}
+          totalFiles={plan.length}
           activeRecordingName={recordingName}
           onConfirm={() => void confirmAndRun()}
           onCancel={() => setConfirmOpen(false)}
@@ -2009,6 +2020,17 @@ const tdStyle: React.CSSProperties = {
 // as the overall progress indicator; cancel button lets users soft-stop.
 // ---------------------------------------------------------------------------
 
+/** Tooltip copy for the RUN button — drove the disabled-state mystery
+ *  during testing (button greyed out with no explanation). Branched
+ *  out of an inline ternary chain that was hard to read. */
+function runButtonTitle(canRun: boolean, conflictCount: number): string {
+  if (canRun) return 'Run all selected recipes across the target files'
+  if (conflictCount > 0) {
+    return `${conflictCount} multi-tag conflict${conflictCount === 1 ? '' : 's'} — resolve below before running`
+  }
+  return 'Pick a template + folder + at least one recipe to run'
+}
+
 function RunBar({
   running, runDone, canRun, totalSelected,
   conflictCount,
@@ -2054,12 +2076,7 @@ function RunBar({
           position: 'relative', overflow: 'hidden',
           fontWeight: 600,
         }}
-        title={
-          canRun ? 'Run all selected recipes across the target files'
-            : conflictCount > 0
-              ? `${conflictCount} multi-tag conflict${conflictCount === 1 ? '' : 's'} — resolve below before running`
-              : 'Pick a template + folder + at least one recipe to run'
-        }>
+        title={runButtonTitle(canRun, conflictCount)}>
         {/* Progress overlay — covers the button left-to-right by
             ``totalFrac``. Sits BEHIND the label via z-index. */}
         {running && (

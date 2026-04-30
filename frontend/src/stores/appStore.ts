@@ -239,6 +239,33 @@ function _migrateEventsAnalyses(
 const SIDECAR_VERSION = 2
 const SIDECAR_DEBOUNCE_MS = 1000
 
+/** Slice values to apply when the active recording is closed —
+ *  shared between the store's ``closeFile`` action and the cross-
+ *  window ``file-close`` handler in CursorPanel so the two stay in
+ *  lockstep. Adding a new per-recording slice? Add it here so both
+ *  sites pick it up automatically. Returns a fresh object so each
+ *  caller gets its own (avoids accidental shared-mutation if Zustand
+ *  ever started reusing the reference). */
+export function fileCloseResetSlices(): Record<string, unknown> {
+  return {
+    recording: null,
+    currentGroup: 0, currentSeries: 0, currentSweep: 0, currentTrace: 0,
+    traceData: null,
+    overlayEntries: [],
+    averageTrace: null,
+    additionalTraces: {},
+    visibleTraces: {},
+    fieldBursts: {}, burstFormParams: {},
+    ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
+    apAnalyses: {}, eventsAnalyses: {},
+    excludedSweeps: {}, selectedSweeps: {}, averagedSweeps: {},
+    currentAveragedSweep: null,
+    resistanceResult: null, resistanceResults: {},
+    recordingMeta: null, recordingMetaReady: false,
+    showOverlay: false, showAverage: false,
+  }
+}
+
 /** Recording-level metadata used by the Metadata module + Cohort
  *  Analysis. Tags are arrays so a cell can carry multiple orthogonal
  *  attributes (genotype + sex + age + treatment) at once. Series
@@ -2323,25 +2350,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         await apiFetch(backendUrl, '/api/files/close', { method: 'POST' })
       } catch { /* ignore */ }
     }
-    // Same set of slices that ``openFile`` resets when swapping recordings,
-    // applied here so anything keyed to the prior file's recording state
-    // can't survive the close. ``recordingMeta`` clears too so other
-    // windows don't show stale tags on a closed file.
-    set({
-      recording: null,
-      currentGroup: 0, currentSeries: 0, currentSweep: 0, currentTrace: 0,
-      traceData: null,
-      overlayEntries: [], averageTrace: null, additionalTraces: {},
-      visibleTraces: {},
-      fieldBursts: {}, burstFormParams: {},
-      ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
-      apAnalyses: {}, eventsAnalyses: {},
-      excludedSweeps: {}, selectedSweeps: {}, averagedSweeps: {},
-      currentAveragedSweep: null,
-      resistanceResult: null, resistanceResults: {},
-      recordingMeta: null, recordingMetaReady: false,
-      showOverlay: false, showAverage: false,
-    })
+    set(fileCloseResetSlices() as Partial<AppState>)
     // Notify other windows so their local stores match. Each window's
     // ``onmessage`` listener is responsible for clearing its slice
     // when it sees ``file-close`` — see CursorPanel for the main

@@ -522,6 +522,42 @@ export function BatchWindow({ backendUrl }: Props) {
     })
   }, [effectiveSelected])
 
+  /** Bulk-select operations for the target table. ``All matched``
+   *  forces every (file, recipe) cell where the recipe matches to
+   *  ON (overrides existing-results skip). ``None`` explicitly turns
+   *  every visible cell OFF. ``Reset`` drops all manual overrides
+   *  and falls back to the default (matched-and-not-already-existing
+   *  → on, everything else → off). */
+  const onSelectAllMatched = useCallback(() => {
+    setSelections(() => {
+      const next: Record<string, boolean> = {}
+      for (const ent of targetEntries) {
+        const perRecipe = matches[ent.filePath] ?? {}
+        for (const r of recipes) {
+          const rId = recipeId(r)
+          if (perRecipe[rId]?.matched) {
+            next[`${ent.filePath}||${rId}`] = true
+          }
+        }
+      }
+      return next
+    })
+  }, [targetEntries, matches, recipes])
+
+  const onSelectNone = useCallback(() => {
+    setSelections(() => {
+      const next: Record<string, boolean> = {}
+      for (const ent of targetEntries) {
+        for (const r of recipes) {
+          next[`${ent.filePath}||${recipeId(r)}`] = false
+        }
+      }
+      return next
+    })
+  }, [targetEntries, recipes])
+
+  const onResetDefaults = useCallback(() => setSelections({}), [])
+
   // ---------------------------------------------------------------
   // Run loop
   // ---------------------------------------------------------------
@@ -591,6 +627,55 @@ export function BatchWindow({ backendUrl }: Props) {
   const totalSelected = useMemo(() => buildPlan()
     .reduce((acc, f) => acc + f.items.length, 0),
     [buildPlan])
+
+  /** Multi-tag conflicts: a single ``${group}:${series}`` in a target
+   *  file matches *multiple selected* recipes. Running both would
+   *  either run twice on the same series with different params (one
+   *  overwriting the other in the sidecar) or be ambiguous about
+   *  which params apply. We surface these as a blocking warning so
+   *  the user resolves before run — typically by un-checking one
+   *  recipe in the table or fixing the duplicate tag.
+   *
+   *  A given series with multiple primary-tag matches (e.g. tagged
+   *  both ``mEPSC`` and ``mIPSC`` against two different events
+   *  recipes) is the canonical conflict. Same-recipe-multiple-series
+   *  (one tag → 2 series in the same file) is NOT a conflict — it's
+   *  the intended behaviour (run on each).
+   *
+   *  ``conflicts`` keys are file paths; values list the conflicting
+   *  series + the recipes hitting it. */
+  const conflicts = useMemo(() => {
+    const out: Array<{
+      filePath: string; fileName: string
+      seriesKey: string
+      recipes: BatchRecipe[]
+    }> = []
+    const plan = buildPlan()
+    for (const file of plan) {
+      // Group selected recipes by which g:s key they hit on this
+      // file. We use the analysis type + subtype + sourceKey as a
+      // grouping bucket so two distinct recipes (different tags but
+      // same underlying analysis) sharing a series are flagged.
+      const perSeries = new Map<string, BatchRecipe[]>()
+      for (const item of file.items) {
+        for (const k of item.match.primary) {
+          const list = perSeries.get(k) ?? []
+          list.push(item.recipe)
+          perSeries.set(k, list)
+        }
+      }
+      for (const [seriesKey, recipes] of perSeries) {
+        if (recipes.length >= 2) {
+          out.push({
+            filePath: file.entry.filePath,
+            fileName: file.entry.fileName,
+            seriesKey, recipes,
+          })
+        }
+      }
+    }
+    return out
+  }, [buildPlan])
 
   /** Run a single events-detection recipe against the *currently open*
    *  recording. We rely on the store's existing event-detection
@@ -1113,8 +1198,9 @@ export function BatchWindow({ backendUrl }: Props) {
       <RunBar
         running={running}
         runDone={runDone}
-        canRun={recipes.length > 0 && totalSelected > 0}
+        canRun={recipes.length > 0 && totalSelected > 0 && conflicts.length === 0}
         totalSelected={totalSelected}
+        conflictCount={conflicts.length}
         currentFileIdx={currentFileIdx}
         filesPlanned={filesPlanned}
         currentFileName={currentFileName}
@@ -1177,7 +1263,15 @@ export function BatchWindow({ backendUrl }: Props) {
                   setOverwriteAll={setOverwriteAll}
                   pickTargetFolder={pickTargetFolder}
                   rescan={() => targetFolder && void scanTargetFolder(targetFolder)}
+                  onSelectAllMatched={onSelectAllMatched}
+                  onSelectNone={onSelectNone}
+                  onResetDefaults={onResetDefaults}
                 />
+              </div>
+            )}
+            {conflicts.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <ConflictPanel conflicts={conflicts} />
               </div>
             )}
             {runLog.length > 0 && (
@@ -1537,6 +1631,7 @@ function TargetSection({
   matches, effectiveSelected, toggleSelection,
   overwriteAll, setOverwriteAll,
   pickTargetFolder, rescan,
+  onSelectAllMatched, onSelectNone, onResetDefaults,
 }: {
   recipes: BatchRecipe[]
   targetFolder: string | null
@@ -1550,6 +1645,9 @@ function TargetSection({
   setOverwriteAll: React.Dispatch<React.SetStateAction<boolean>>
   pickTargetFolder: () => Promise<void>
   rescan: () => void
+  onSelectAllMatched: () => void
+  onSelectNone: () => void
+  onResetDefaults: () => void
 }) {
   // Recipe-column ordering: keep template order so the user reads the
   // table left-to-right consistent with how recipes were derived.
@@ -1622,11 +1720,40 @@ function TargetSection({
         <>
           <div style={{
             display: 'flex', alignItems: 'center', gap: 12,
+            flexWrap: 'wrap',
             marginBottom: 8, fontSize: 'var(--font-size-label)',
           }}>
             <span style={{ color: 'var(--text-muted)' }}>
               {targetEntries.length} file{targetEntries.length === 1 ? '' : 's'} ·{' '}
               {fullyMatchedCount} matchable
+            </span>
+            {/* Bulk select — overrides the default-checked-when-matched
+                logic with explicit user choice. ``Reset`` drops all
+                manual overrides so cells fall back to the default
+                (matched + no existing results → on). */}
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              borderLeft: '1px solid var(--border)', paddingLeft: 12,
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Select:</span>
+              <button className="btn"
+                onClick={onSelectAllMatched}
+                style={{ padding: '2px 8px' }}
+                title="Check every cell where the recipe matches at least one series in the file">
+                All matched
+              </button>
+              <button className="btn"
+                onClick={onSelectNone}
+                style={{ padding: '2px 8px' }}
+                title="Uncheck every cell">
+                None
+              </button>
+              <button className="btn"
+                onClick={onResetDefaults}
+                style={{ padding: '2px 8px' }}
+                title="Drop manual overrides and use the default (matched + no existing results → on)">
+                Reset
+              </button>
             </span>
             <label style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -1884,6 +2011,7 @@ const tdStyle: React.CSSProperties = {
 
 function RunBar({
   running, runDone, canRun, totalSelected,
+  conflictCount,
   currentFileIdx, filesPlanned, currentFileName, currentFileFraction,
   onRun, onCancel, onOpenCohort,
 }: {
@@ -1891,6 +2019,10 @@ function RunBar({
   runDone: boolean
   canRun: boolean
   totalSelected: number
+  /** When > 0, RUN is force-disabled — the conflict panel below
+   *  shows the user what to fix. Surfaced in the button title so
+   *  the disabled state isn't mysterious. */
+  conflictCount: number
   currentFileIdx: number
   filesPlanned: number
   currentFileName: string | null
@@ -1922,7 +2054,12 @@ function RunBar({
           position: 'relative', overflow: 'hidden',
           fontWeight: 600,
         }}
-        title={canRun ? 'Run all selected recipes across the target files' : 'Pick a template + folder + at least one recipe to run'}>
+        title={
+          canRun ? 'Run all selected recipes across the target files'
+            : conflictCount > 0
+              ? `${conflictCount} multi-tag conflict${conflictCount === 1 ? '' : 's'} — resolve below before running`
+              : 'Pick a template + folder + at least one recipe to run'
+        }>
         {/* Progress overlay — covers the button left-to-right by
             ``totalFrac``. Sits BEHIND the label via z-index. */}
         {running && (
@@ -2115,6 +2252,98 @@ function ConfirmRunModal({
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tag conflict panel — surfaces target-file series that match
+// multiple selected recipes. Blocks RUN until the user resolves so
+// no series gets two competing runs (which would clobber each other
+// in the sidecar). Resolution is either un-checking one recipe in
+// the table for that file, or fixing the duplicate tag in the
+// metadata window.
+// ---------------------------------------------------------------------------
+
+function ConflictPanel({
+  conflicts,
+}: {
+  conflicts: Array<{
+    filePath: string; fileName: string
+    seriesKey: string
+    recipes: BatchRecipe[]
+  }>
+}) {
+  // Group conflicts by file so a single file with multiple bad
+  // series shows once at the file level + each series listed under it.
+  const byFile = useMemo(() => {
+    const m = new Map<string, {
+      fileName: string
+      rows: Array<{ seriesKey: string; recipes: BatchRecipe[] }>
+    }>()
+    for (const c of conflicts) {
+      const cur = m.get(c.filePath)
+      if (cur) cur.rows.push({ seriesKey: c.seriesKey, recipes: c.recipes })
+      else m.set(c.filePath, {
+        fileName: c.fileName,
+        rows: [{ seriesKey: c.seriesKey, recipes: c.recipes }],
+      })
+    }
+    return Array.from(m.entries())
+  }, [conflicts])
+  return (
+    <div style={{
+      border: '2px solid #e57373',
+      borderRadius: 4,
+      padding: '10px 14px',
+      background: 'rgba(229,115,115,0.08)',
+      fontSize: 'var(--font-size-label)',
+    }}>
+      <div style={{
+        fontWeight: 600, marginBottom: 6, color: '#e57373',
+      }}>
+        ⚠ {conflicts.length} multi-tag conflict{conflicts.length === 1 ? '' : 's'} — resolve before running
+      </div>
+      <div style={{ marginBottom: 8, lineHeight: 1.5 }}>
+        The series below match more than one selected recipe in the
+        template. Running both would write competing results to the
+        same series. Either un-check one recipe for the affected file
+        in the table above, or fix the duplicate tag in Tags…
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 18 }}>
+        {byFile.map(([fp, { fileName, rows }]) => (
+          <li key={fp} style={{ marginBottom: 4 }}>
+            <span style={{ fontFamily: 'var(--font-mono)' }} title={fp}>
+              {fileName}
+            </span>
+            <ul style={{
+              margin: '2px 0 4px 0', paddingLeft: 18,
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              {rows.map((r, i) => (
+                <li key={i}>
+                  series{' '}
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-muted)',
+                  }}>{displayGroupSeries(r.seriesKey)}</span>
+                  {' '}matches{' '}
+                  {r.recipes.map((rc, j) => (
+                    <span key={j} style={{
+                      marginRight: 4,
+                      padding: '0 5px',
+                      border: '1px solid var(--accent, #64b5f6)',
+                      borderRadius: 8,
+                      fontFamily: 'var(--font-mono)',
+                      color: 'var(--accent, #64b5f6)',
+                    }}>{ANALYSIS_LABELS[rc.analysisType] ?? rc.analysisType}{rc.subtype ? ` [${rc.subtype}]` : ''} · {rc.tag}</span>
+                  ))}
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

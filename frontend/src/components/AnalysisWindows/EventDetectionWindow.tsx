@@ -2365,6 +2365,24 @@ function EventsSweepViewer({
   // handler read it inside closures bound to the plot's lifetime.
   const groupFilterRef = useRef(groupFilter)
   groupFilterRef.current = groupFilter
+  // ``ms-since-epoch`` of the last user interaction (cursor drag,
+  // scroll, wheel zoom, viewport change). The draw hook bails out
+  // of the marker batch loop when this is recent — markers reappear
+  // once motion stops. Reading raw timestamp avoids React state
+  // round-trips for what's basically a per-frame query.
+  const lastInteractionAtRef = useRef(0)
+  /** Schedule a redraw after the deferral window so markers come
+   *  back when motion stops. ``setTimeout`` fires once, no churn
+   *  during the active interaction. */
+  const idleRedrawTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const noteInteraction = useCallback(() => {
+    lastInteractionAtRef.current = Date.now()
+    if (idleRedrawTimerRef.current) clearTimeout(idleRedrawTimerRef.current)
+    idleRedrawTimerRef.current = setTimeout(() => {
+      idleRedrawTimerRef.current = null
+      plotRef.current?.redraw()
+    }, 140)
+  }, [])
   const templateFilterRef = useRef(templateFilter)
   templateFilterRef.current = templateFilter
   // Route pointer-handler callbacks through refs so changing their
@@ -2794,7 +2812,15 @@ function EventsSweepViewer({
     //
     //   3. Sorted-time early break. Events are stored in time order;
     //      once we pass xMax the loop terminates.
-    if (e && e.events.length > 0) {
+    // Bail out of the marker batch loop while the user is actively
+    // scrolling / dragging cursors. The 120 ms window covers a fast
+    // wheel-zoom or pointer-drag without making the missing markers
+    // perceptible — the idle-redraw timer brings them back once
+    // motion stops. Without this, sweeps with thousands of events
+    // ground the cursor drag to single-digit FPS regardless of how
+    // tightly the marker draw was batched.
+    const inMotion = (Date.now() - lastInteractionAtRef.current) < 120
+    if (e && e.events.length > 0 && !inMotion) {
       const xMin = u.scales.x.min ?? 0
       const xMax = u.scales.x.max ?? 0
       const sr = e.samplingRate || 1
@@ -2944,7 +2970,11 @@ function EventsSweepViewer({
     if (u) {
       u.setScale('x', { min: viewport.tStart, max: viewport.tEnd })
     }
-  }, [viewport])
+    // External viewport change (slider drag, sweep nav, "go to event"
+    // jump). Same in-motion gate as wheel/pan so markers don't re-
+    // render mid-scroll if the user holds the slider thumb.
+    noteInteraction()
+  }, [viewport, noteInteraction])
   // Reset Y only when the user explicitly switches sweep / group /
   // series / channel — the trace itself changes and old Y range may
   // be wildly off-scale. (Not when viewport shifts within the same
@@ -3292,6 +3322,7 @@ function EventsSweepViewer({
       }
       const scheduleCursor = (next: Partial<CursorPositions>) => {
         pendingCursor = next
+        noteInteraction()
         if (cursorRafId == null) {
           cursorRafId = requestAnimationFrame(flushCursor)
         }
@@ -3382,6 +3413,7 @@ function EventsSweepViewer({
           u.setScale('x', { min: nx[0], max: nx[1] })
           u.setScale('y', { min: ny[0], max: ny[1] })
           setViewportRef.current({ tStart: nx[0], tEnd: nx[1] })
+          noteInteraction()
           over.style.cursor = 'grabbing'
           return
         }
@@ -3427,6 +3459,7 @@ function EventsSweepViewer({
           u.setScale('x', { min: nMin, max: nMax })
           setViewportRef.current({ tStart: nMin, tEnd: nMax })
         }
+        noteInteraction()
       }
 
       over.addEventListener('pointerdown', onPointerDown)
@@ -3443,6 +3476,10 @@ function EventsSweepViewer({
         if (cursorRafId != null) {
           cancelAnimationFrame(cursorRafId)
           cursorRafId = null
+        }
+        if (idleRedrawTimerRef.current) {
+          clearTimeout(idleRedrawTimerRef.current)
+          idleRedrawTimerRef.current = null
         }
       }
     })

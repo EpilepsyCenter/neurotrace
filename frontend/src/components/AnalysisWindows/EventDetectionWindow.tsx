@@ -56,6 +56,90 @@ function channelsForSeries(fileInfo: FileInfo | null, group: number, series: num
 // everywhere else in NeuroTrace (FPsp, IV, Cursor, Resistance, AP).
 const CURSOR_COLOR = '#64b5f6'   // blue (matches baseline cursors elsewhere)
 
+/** Per-template peak colors — index 0 = primary, 1 = 2nd, 2 = 3rd.
+ *  Used by the events viewer to color peak markers in multi-template
+ *  detection mode AND by the Template panel to label which slot
+ *  contributes which color. Stays distinct from the manual-event
+ *  orange (#ffb74d) so manual + template-3 don't collide visually. */
+export const TEMPLATE_COLORS = ['#e57373', '#81d4fa', '#aed581'] as const
+
+/** Group color palette — one per group (1–5). Used by the small
+ *  digit drawn under grouped event peaks in the main viewer. */
+export const GROUP_COLORS = [
+  '#ef5350', '#ffb300', '#66bb6a', '#26c6da', '#ab47bc',
+] as const
+
+/** Filter selector for the bottom-tab strip. Keeps the user's
+ *  curation tags useful — limit results to a single group, or hide a
+ *  group while keeping everything else. ``ungrouped`` shows only
+ *  events that haven't been tagged at all. */
+export type GroupFilter =
+  | { kind: 'all' }
+  | { kind: 'ungrouped' }
+  | { kind: 'include'; g: number }
+  | { kind: 'exclude'; g: number }
+
+export function passesGroupFilter(g: number | null, f: GroupFilter): boolean {
+  switch (f.kind) {
+    case 'all': return true
+    case 'ungrouped': return g == null
+    case 'include': return g === f.g
+    case 'exclude': return g !== f.g
+  }
+}
+
+function groupFilterToValue(f: GroupFilter): string {
+  if (f.kind === 'all') return 'all'
+  if (f.kind === 'ungrouped') return 'ungrouped'
+  return `${f.kind === 'include' ? 'in' : 'ex'}-${f.g}`
+}
+function groupFilterFromValue(v: string): GroupFilter {
+  if (v === 'all') return { kind: 'all' }
+  if (v === 'ungrouped') return { kind: 'ungrouped' }
+  const [k, g] = v.split('-')
+  return { kind: k === 'in' ? 'include' : 'exclude', g: Number(g) }
+}
+
+/** Filter on which template detected each event. ``manual`` shows
+ *  only user-added events; numeric tNs match templateIdx. */
+export type TemplateFilter =
+  | { kind: 'all' }
+  | { kind: 'tpl'; t: number }
+  | { kind: 'manual' }
+
+export function passesTemplateFilter(
+  ev: { templateIdx: number | null; manual: boolean },
+  f: TemplateFilter,
+): boolean {
+  switch (f.kind) {
+    case 'all': return true
+    case 'manual': return ev.manual
+    case 'tpl': return !ev.manual && ev.templateIdx === f.t
+  }
+}
+
+function templateFilterToValue(f: TemplateFilter): string {
+  if (f.kind === 'all') return 'all'
+  if (f.kind === 'manual') return 'manual'
+  return `t-${f.t}`
+}
+function templateFilterFromValue(v: string): TemplateFilter {
+  if (v === 'all') return { kind: 'all' }
+  if (v === 'manual') return { kind: 'manual' }
+  const [, t] = v.split('-')
+  return { kind: 'tpl', t: Number(t) }
+}
+
+/** Combined event-row predicate — group AND template filters. Both
+ *  are AND-ed so the user gets the natural "drill into T2 events that
+ *  are also group 3" behaviour without a separate UI for combinations. */
+export function passesEventFilters(
+  ev: { group: number | null; templateIdx: number | null; manual: boolean },
+  gf: GroupFilter, tf: TemplateFilter,
+): boolean {
+  return passesGroupFilter(ev.group, gf) && passesTemplateFilter(ev, tf)
+}
+
 // ---------------------------------------------------------------------------
 // Top-level window
 // ---------------------------------------------------------------------------
@@ -198,7 +282,10 @@ export function EventDetectionWindow({
     if (!entry) return
     if (rehydratedKeyRef.current === key) return
     rehydratedKeyRef.current = key
-    setParams(entry.params)
+    // Merge with current defaults so any field added to ``EventsParams``
+    // since this entry was serialized (e.g. baseline-method,
+    // ampFloorRmsMultiplier) doesn't end up as ``undefined`` in the UI.
+    setParams({ ...defaultEventsParams(), ...entry.params })
     setChannel(entry.channel)
     setSweep(entry.sweep)
   }, [entry, key])
@@ -233,6 +320,11 @@ export function EventDetectionWindow({
     // Skip regions is a power-user feature; hidden until the user
     // adds one. Unchanged from the pre-collapsible-refactor behaviour.
     'Skip regions': true,
+    // Threshold card is now always rendered, but only relevant by
+    // default for the Threshold method. For correlation /
+    // deconvolution it's a vehicle for the RMS workflow that feeds
+    // the Min |amp| × RMS mode in Exclusion — collapsed by default.
+    'Threshold (RMS)': true,
   }
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(DEFAULT_COLLAPSED)
   /** Build collapsible-card props for a given card title. Looked up
@@ -284,6 +376,14 @@ export function EventDetectionWindow({
   const [bottomTab, setBottomTab] = useState<
     'table' | 'histogram' | 'rate' | 'ampvstime' | 'iei'
   >('table')
+  // Group filter applied to results table + histograms + viewer
+  // markers. UI-only state — not persisted, defaults to "all" each
+  // session. Curation grouping itself IS persisted on each event row.
+  const [groupFilter, setGroupFilter] = useState<GroupFilter>({ kind: 'all' })
+  // Template filter — only relevant when multi-template detection
+  // tagged events. Combined with the group filter via AND so users
+  // can drill into "T2 + group 3" without rerunning anything.
+  const [templateFilter, setTemplateFilter] = useState<TemplateFilter>({ kind: 'all' })
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -518,6 +618,36 @@ export function EventDetectionWindow({
   }), [params.filterEnabled, params.filterType, params.filterLow,
       params.filterHigh, params.filterOrder])
 
+  /** Compute RMS over the current cursor band. Shared between the
+   *  Threshold method panel (where it drives the n×RMS level line) and
+   *  the Exclusion card's RMS amplitude floor toggle. Stores the
+   *  result on ``params`` so subsequent detect runs pick it up. */
+  const handleComputeRms = useCallback(async () => {
+    if (cursors.baselineEnd <= cursors.baselineStart) {
+      setError('Cursor region is empty — use "Cursors to view" first.')
+      return
+    }
+    try {
+      const r = await computeEventsRms(
+        group, series, channel, sweep,
+        cursors.baselineStart, cursors.baselineEnd,
+        filterPayload,
+      )
+      setParams((p) => ({
+        ...p,
+        rmsRegion: {
+          startS: cursors.baselineStart,
+          endS: cursors.baselineEnd,
+        },
+        rmsValue: r.rms,
+        rmsBaselineMean: r.baselineMean,
+      }))
+    } catch (err: any) {
+      setError(err.message ?? String(err))
+    }
+  }, [cursors.baselineStart, cursors.baselineEnd, group, series, channel, sweep,
+      computeEventsRms, filterPayload, setError])
+
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', height: '100%',
@@ -684,43 +814,77 @@ export function EventDetectionWindow({
               </Card>
             )}
 
-            {/* Threshold card */}
-            {params.method === 'threshold' && (
-              <ThresholdPanel
-                params={params}
-                onParamsChange={setParams}
-                cursors={cursors}
-                onBringCursorsToView={bringCursorsToView}
-                cardProps={cardProps('Threshold')}
-                onComputeRms={async () => {
-                  if (cursors.baselineEnd <= cursors.baselineStart) {
-                    setError('Cursor region is empty — use "Cursors to view" first.')
-                    return
-                  }
-                  try {
-                    const r = await computeEventsRms(
-                      group, series, channel, sweep,
-                      cursors.baselineStart, cursors.baselineEnd,
-                      filterPayload,
-                    )
-                    setParams((p) => ({
-                      ...p,
-                      rmsRegion: {
-                        startS: cursors.baselineStart,
-                        endS: cursors.baselineEnd,
-                      },
-                      rmsValue: r.rms,
-                      rmsBaselineMean: r.baselineMean,
-                    }))
-                  } catch (err: any) {
-                    setError(err.message ?? String(err))
-                  }
-                }}
-              />
-            )}
+            {/* Threshold / RMS card — always visible. For the Threshold
+                method it controls the detection level line; for
+                correlation / deconvolution the same RMS value feeds the
+                Exclusion → Min |amp| (× RMS mode) below. Collapsed by
+                default when the method isn't Threshold so the panel
+                stays compact for the common template-method case. */}
+            <ThresholdPanel
+              params={params}
+              onParamsChange={setParams}
+              cursors={cursors}
+              onBringCursorsToView={bringCursorsToView}
+              cardProps={cardProps(
+                params.method === 'threshold' ? 'Threshold' : 'Threshold (RMS)',
+              )}
+              onComputeRms={handleComputeRms}
+            />
 
             {/* Kinetics card */}
             <Card title="Kinetics" {...cardProps('Kinetics')}>
+              {/* Baseline detection method — Auto (Jonas) or
+                  Polynomial-curve (drift-aware). Polynomial is the
+                  better choice for recordings whose baseline drifts
+                  faster than the rolling-median detrend can flatten
+                  without ringing on event edges. */}
+              <Row label="Baseline">
+                <select value={params.baselineMethod}
+                  style={{ width: '100%' }}
+                  onChange={(e) => setParams((p) => ({
+                    ...p, baselineMethod: e.target.value as 'auto' | 'polynomial',
+                  }))}
+                  title="Auto: per-event Jonas line-intersect. Polynomial: low-order polynomial fit to the sweep, evaluated at each event's foot.">
+                  <option value="auto">Auto</option>
+                  <option value="polynomial">Polynomial curve</option>
+                </select>
+              </Row>
+              {params.baselineMethod === 'polynomial' && (
+                <Row label="Poly order">
+                  <NumInput value={params.baselinePolyOrder} step={1} min={1}
+                    onChange={(v) => setParams((p) => ({
+                      ...p, baselinePolyOrder: Math.max(1, Math.round(v)),
+                    }))} />
+                </Row>
+              )}
+              {/* Per-event biexp fit overlay — thin black curves
+                  drawn over each visible event's foot → endpoint
+                  span. Off by default to keep the viewer clean. */}
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+              }} title="Overlay the per-event biexp fit on the main viewer">
+                <input type="checkbox" checked={params.showEventFits}
+                  onChange={(e) => setParams((p) => ({
+                    ...p, showEventFits: e.target.checked,
+                  }))} />
+                <span>Show event fits</span>
+              </label>
+              {/* Decay-endpoint method — controls how the integration
+                  window's right edge is chosen post-peak. First-cross
+                  is the EE default and matches what we shipped before;
+                  Entire-region gives a deterministic window at the
+                  expense of including some baseline tail. */}
+              <Row label="Decay end">
+                <select value={params.decayEndpointMethod}
+                  style={{ width: '100%' }}
+                  onChange={(e) => setParams((p) => ({
+                    ...p, decayEndpointMethod: e.target.value as 'first_cross' | 'entire',
+                  }))}
+                  title="First baseline cross within the search window (default), or always use the entire search window.">
+                  <option value="first_cross">First baseline cross</option>
+                  <option value="entire">Entire search region</option>
+                </select>
+              </Row>
               <Row label="Baseline search (ms)">
                 <NumInput value={params.baselineSearchMs} step={1} min={1}
                   onChange={(v) => setParams((p) => ({ ...p, baselineSearchMs: v }))} />
@@ -811,10 +975,15 @@ export function EventDetectionWindow({
                 Null = filter off. Manual-added events bypass these
                 guards, so users can force-include a marginal event. */}
             <Card title="Exclusion" {...cardProps('Exclusion')}>
-              <Row label="Min |amp|">
-                <NumInput value={params.amplitudeMinAbs} step={1} min={0}
-                  onChange={(v) => setParams((p) => ({ ...p, amplitudeMinAbs: v }))} />
-              </Row>
+              {/* Min |amp| with a mode toggle: absolute pA/mV value, OR
+                  n × RMS of the quiet region (computed via the Threshold
+                  card above). Picking × RMS gives noise-relative
+                  rejection — useful when noise levels vary across cells
+                  in batch. The two values are stored independently so
+                  switching modes preserves both. */}
+              <MinAmpRow
+                params={params}
+                setParams={setParams} />
               <Row label="Max |amp|">
                 <NumInput value={params.amplitudeMaxAbs} step={50} min={1}
                   onChange={(v) => setParams((p) => ({ ...p, amplitudeMaxAbs: v }))} />
@@ -839,6 +1008,14 @@ export function EventDetectionWindow({
                 label="Max FWHM (ms)" value={params.fwhmMaxMs} step={1} min={0.1}
                 onChange={(v) => setParams((p) => ({ ...p, fwhmMaxMs: v }))}
                 title="Drop events with half-width exceeding this value" />
+              {/* Min biexp R² — when on, events whose biexp fit R² is
+                  below the value are dropped. Manual events bypass.
+                  0.7 is lax (catches obvious noise), 0.85 is strict
+                  (mostly clean events only). */}
+              <OptionalNumRow
+                label="Min R² (biexp)" value={params.biexpMinR2} step={0.05} min={0}
+                onChange={(v) => setParams((p) => ({ ...p, biexpMinR2: v }))}
+                title="Drop events whose biexp goodness-of-fit is below this value (auto-detected only)." />
             </Card>
 
             {/* Skip regions — up to 5 time ranges where detection is
@@ -1041,6 +1218,8 @@ export function EventDetectionWindow({
               entry={entry}
               params={params}
               setParams={setParams}
+              groupFilter={groupFilter}
+              templateFilter={templateFilter}
               activeTemplate={activeTemplate}
               cursors={cursors}
               updateCursors={updateCursors}
@@ -1112,9 +1291,73 @@ export function EventDetectionWindow({
                 </button>
               ))}
               <span style={{ flex: 1 }} />
+              {/* Template filter — visible only when multi-template
+                  detection actually tagged at least one event. AND-ed
+                  with the group filter below. */}
+              {entry?.events.some((e) => e.templateIdx != null || e.manual) && (
+                <label style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  fontSize: 'var(--font-size-label)', marginRight: 6,
+                }} title="Filter displayed events by which template detected them">
+                  <span style={{ color: 'var(--text-muted)' }}>Tpl</span>
+                  <select value={templateFilterToValue(templateFilter)}
+                    onChange={(e) => setTemplateFilter(templateFilterFromValue(e.target.value))}
+                    style={{ padding: '2px 4px' }}>
+                    <option value="all">All</option>
+                    <option value="t-0">T1 only</option>
+                    <option value="t-1">T2 only</option>
+                    <option value="t-2">T3 only</option>
+                    <option value="manual">Manual only</option>
+                  </select>
+                </label>
+              )}
+              {/* Group filter — limits the results table, histograms,
+                  and viewer markers to one group, or hides one. The
+                  underlying group tags persist; the filter is purely
+                  what's displayed. */}
+              <label style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                fontSize: 'var(--font-size-label)', marginRight: 6,
+              }} title="Filter displayed events by curation group">
+                <span style={{ color: 'var(--text-muted)' }}>Group</span>
+                <select value={groupFilterToValue(groupFilter)}
+                  onChange={(e) => setGroupFilter(groupFilterFromValue(e.target.value))}
+                  style={{ padding: '2px 4px' }}>
+                  <option value="all">All</option>
+                  <option value="ungrouped">Ungrouped</option>
+                  <option value="in-1">Only 1</option>
+                  <option value="in-2">Only 2</option>
+                  <option value="in-3">Only 3</option>
+                  <option value="in-4">Only 4</option>
+                  <option value="in-5">Only 5</option>
+                  <option value="ex-1">Hide 1</option>
+                  <option value="ex-2">Hide 2</option>
+                  <option value="ex-3">Hide 3</option>
+                  <option value="ex-4">Hide 4</option>
+                  <option value="ex-5">Hide 5</option>
+                </select>
+              </label>
               {/* Open the detached Browser + Overlay window. Lives
                   flush-right on the tab bar for easy one-click access
                   once the user has run detection. */}
+              {/* Edit-Kinetics shortcut — opens the browser focused
+                  on whichever event is currently selected. The browser
+                  picks up the selection via the shared ``selectedIdx``
+                  on the entry, so opening it after we've selected
+                  drops the user straight onto the right event for
+                  drag-mode editing. */}
+              <button className="btn"
+                onClick={openEventsBrowser}
+                disabled={!entry || entry.events.length === 0
+                          || entry.selectedIdx == null}
+                title="Open the Event Browser focused on the selected event for kinetics editing"
+                style={{
+                  padding: '3px 10px', marginBottom: 2,
+                  fontSize: 'var(--font-size-label)',
+                  alignSelf: 'center',
+                }}>
+                Edit selected…
+              </button>
               <button className="btn"
                 onClick={openEventsBrowser}
                 disabled={!entry || entry.events.length === 0}
@@ -1132,6 +1375,8 @@ export function EventDetectionWindow({
                 <div style={{ height: '100%', overflow: 'auto' }}>
                   <EventsResultsTable
                     entry={entry}
+                    groupFilter={groupFilter}
+                    templateFilter={templateFilter}
                     onSelect={(idx) => {
                       // Mark selected + zoom to event. In cross-sweep
                       // mode the clicked row may belong to a different
@@ -1168,6 +1413,8 @@ export function EventDetectionWindow({
               {bottomTab === 'histogram' && (
                 <AmplitudeHistogram
                   entry={entry}
+                  groupFilter={groupFilter}
+                  templateFilter={templateFilter}
                   heightSignal={plotHeight}
                   binW={ampHistBinW} setBinW={setAmpHistBinW}
                 />
@@ -1175,6 +1422,8 @@ export function EventDetectionWindow({
               {bottomTab === 'rate' && (
                 <EventRatePlot
                   entry={entry}
+                  groupFilter={groupFilter}
+                  templateFilter={templateFilter}
                   heightSignal={plotHeight}
                   binS={rateBinS} setBinS={setRateBinS}
                 />
@@ -1182,12 +1431,16 @@ export function EventDetectionWindow({
               {bottomTab === 'ampvstime' && (
                 <AmpVsTimeScatter
                   entry={entry}
+                  groupFilter={groupFilter}
+                  templateFilter={templateFilter}
                   heightSignal={plotHeight}
                 />
               )}
               {bottomTab === 'iei' && (
                 <IEIHistogram
                   entry={entry}
+                  groupFilter={groupFilter}
+                  templateFilter={templateFilter}
                   heightSignal={plotHeight}
                   binMs={ieiHistBinMs} setBinMs={setIeiHistBinMs}
                 />
@@ -1281,7 +1534,10 @@ function Card({
   )
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Row({ label, children }: {
+  label: React.ReactNode    // string for plain rows; ReactNode for colored markers etc.
+  children: React.ReactNode
+}) {
   return (
     <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
       <span style={{ color: 'var(--text-muted)', flex: 1 }}>{label}</span>
@@ -1322,6 +1578,64 @@ function OptionalNumRow({
         />
       </span>
     </label>
+  )
+}
+
+/** Min |amp| field with a unit toggle: absolute pA/mV, or n × RMS of
+ *  the quiet region (computed via the Threshold card). Mode is stored
+ *  on ``useRmsAmpFloor``; ``amplitudeMinAbs`` and ``ampFloorRmsMultiplier``
+ *  are kept separate so switching modes preserves both values. The
+ *  effective floor in absolute units is shown below when × RMS is
+ *  selected and an RMS value is available. */
+function MinAmpRow({
+  params, setParams,
+}: {
+  params: EventsParams
+  setParams: (updater: (p: EventsParams) => EventsParams) => void
+}) {
+  const useRms = params.useRmsAmpFloor
+  const rms = params.rmsValue
+  const effective = (useRms && rms != null)
+    ? params.ampFloorRmsMultiplier * Math.abs(rms)
+    : null
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 4,
+      padding: '2px 0',
+    }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+        title="Minimum event |amplitude|. Absolute uses a fixed pA/mV value; × RMS multiplies the quiet-region RMS (from the Threshold card).">
+        <span style={{ color: 'var(--text-muted)', flex: 1 }}>Min |amp|</span>
+        <select value={useRms ? 'rms' : 'abs'}
+          style={{ width: 70 }}
+          onChange={(e) => setParams((p) => ({
+            ...p, useRmsAmpFloor: e.target.value === 'rms',
+          }))}>
+          <option value="abs">abs</option>
+          <option value="rms">× RMS</option>
+        </select>
+        <span style={{ minWidth: 80 }}>
+          {useRms ? (
+            <NumInput value={params.ampFloorRmsMultiplier} step={0.5} min={0}
+              onChange={(v) => setParams((p) => ({ ...p, ampFloorRmsMultiplier: v }))} />
+          ) : (
+            <NumInput value={params.amplitudeMinAbs} step={1} min={0}
+              onChange={(v) => setParams((p) => ({ ...p, amplitudeMinAbs: v }))} />
+          )}
+        </span>
+      </label>
+      {useRms && (
+        <div style={{
+          fontSize: 'var(--font-size-label)',
+          color: 'var(--text-muted)',
+          paddingLeft: 6,
+        }}>
+          {rms != null
+            ? `RMS = ${Math.abs(rms).toFixed(3)} → floor ≈ ${effective?.toFixed(2)}`
+            : 'Compute RMS in the Threshold card above first.'}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1640,9 +1954,18 @@ function TemplatePanel({
   // so users aren't confronted with empty rows they don't need.
   const slot2 = additionalTemplateIds[0] ?? null
   const slot3 = additionalTemplateIds[1] ?? null
+  // Color the slot labels with the same palette the events viewer
+  // uses to color peak markers — gives the user a direct legend
+  // (label = peak fill color) without a separate legend strip. Only
+  // shown for the slots actually in use; "Primary" stays colored even
+  // alone so single-template runs match if the palette is referenced.
+  const labelColor = (i: number) => ({
+    color: TEMPLATE_COLORS[i] ?? 'var(--text-muted)',
+    fontWeight: 600,
+  } as const)
   return (
     <Card title="Template" {...(cardProps ?? {})}>
-      <Row label="Primary">
+      <Row label={<span style={labelColor(0)}>● Primary</span>}>
         <select value={activeTemplateId ?? ''} style={{ width: '100%' }}
           onChange={(e) => { if (e.target.value) onPickTemplate(e.target.value) }}>
           <option value="" disabled>— pick —</option>
@@ -1672,7 +1995,7 @@ function TemplatePanel({
           merged into detection. Primary template carries the overlay;
           additional ones contribute peaks via pointwise-max (corr) or
           union (deconv). */}
-      <Row label="+ 2nd">
+      <Row label={<span style={labelColor(1)}>● + 2nd</span>}>
         <select value={slot2 ?? ''} style={{ width: '100%' }}
           onChange={(e) => onPickAdditional(0, e.target.value || null)}>
           <option value="">— none —</option>
@@ -1682,7 +2005,7 @@ function TemplatePanel({
         </select>
       </Row>
       {slot2 && (
-        <Row label="+ 3rd">
+        <Row label={<span style={labelColor(2)}>● + 3rd</span>}>
           <select value={slot3 ?? ''} style={{ width: '100%' }}
             onChange={(e) => onPickAdditional(1, e.target.value || null)}>
             <option value="">— none —</option>
@@ -1810,22 +2133,34 @@ function ThresholdPanel({
   onComputeRms: () => void
   cardProps?: CollapsibleCardProps
 }) {
+  // For correlation / deconvolution methods only the RMS workflow is
+  // meaningful (it feeds Exclusion → Min |amp| (× RMS)). The Mode
+  // dropdown and Linear threshold UI are hidden in that case. The
+  // ``× RMS`` multiplier on the Threshold card drives the detection
+  // *level line* and only matters for the Threshold method, so it's
+  // hidden alongside the Linear input.
+  const isThresholdMethod = params.method === 'threshold'
+  const showLinear = isThresholdMethod && params.thresholdMode === 'linear'
+  const showRmsControls = !isThresholdMethod || params.thresholdMode === 'rms'
   return (
     <Card title="Threshold" {...(cardProps ?? {})}>
-      <Row label="Mode">
-        <select value={params.thresholdMode} style={{ width: '100%' }}
-          onChange={(e) => onParamsChange((p) => ({
-            ...p, thresholdMode: e.target.value as 'rms' | 'linear',
-          }))}>
-          <option value="rms">RMS of quiet region</option>
-          <option value="linear">Linear value</option>
-        </select>
-      </Row>
-      {params.thresholdMode === 'rms' ? (
+      {isThresholdMethod && (
+        <Row label="Mode">
+          <select value={params.thresholdMode} style={{ width: '100%' }}
+            onChange={(e) => onParamsChange((p) => ({
+              ...p, thresholdMode: e.target.value as 'rms' | 'linear',
+            }))}>
+            <option value="rms">RMS of quiet region</option>
+            <option value="linear">Linear value</option>
+          </select>
+        </Row>
+      )}
+      {showRmsControls && (
         <>
           <HelpText>
-            Drag the blue cursor band on the viewer to cover a quiet
-            section, then Compute RMS.
+            {isThresholdMethod
+              ? 'Drag the blue cursor band on the viewer to cover a quiet section, then Compute RMS.'
+              : 'Compute RMS over a quiet region; feeds the Exclusion → Min |amp| (× RMS) option below.'}
           </HelpText>
           <div style={{
             fontFamily: 'var(--font-mono)', color: CURSOR_COLOR,
@@ -1850,12 +2185,15 @@ function ThresholdPanel({
               RMS = {params.rmsValue.toFixed(3)}
             </HelpText>
           )}
-          <Row label="× RMS">
-            <NumInput value={params.rmsMultiplier} step={0.5} min={0.5}
-              onChange={(v) => onParamsChange((p) => ({ ...p, rmsMultiplier: v }))} />
-          </Row>
+          {isThresholdMethod && (
+            <Row label="× RMS">
+              <NumInput value={params.rmsMultiplier} step={0.5} min={0.5}
+                onChange={(v) => onParamsChange((p) => ({ ...p, rmsMultiplier: v }))} />
+            </Row>
+          )}
         </>
-      ) : (
+      )}
+      {showLinear && (
         <Row label="Threshold">
           <NumInput value={params.linearThreshold} step={1}
             onChange={(v) => onParamsChange((p) => ({ ...p, linearThreshold: v }))} />
@@ -1871,6 +2209,7 @@ function ThresholdPanel({
 
 function EventsSweepViewer({
   backendUrl, group, series, channel, sweep, entry, params, setParams,
+  groupFilter, templateFilter,
   activeTemplate,
   cursors, updateCursors,
   viewport, setViewport, sweepDurationS, setSweepDurationS,
@@ -1885,6 +2224,11 @@ function EventsSweepViewer({
   /** Updater for params — needed so skip-region edge / band drags
    *  can write back the new start / end times. */
   setParams: React.Dispatch<React.SetStateAction<EventsParams>>
+  /** Visibility filter from the parent — same value drives the
+   *  results table / histograms below. Markers for filtered-out
+   *  events are simply not drawn (and not hit-tested). */
+  groupFilter: GroupFilter
+  templateFilter: TemplateFilter
   /** Active biexp template — needed so the viewer can refetch the
    *  detection-measure overlay on viewport / template changes. */
   activeTemplate: EventsTemplate | null
@@ -1906,10 +2250,96 @@ function EventsSweepViewer({
   const rootRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  const { onContextMenu, menu } = usePlotMenu({
+  // Right-click position in TIME (sweep seconds) — set on the wrapping
+  // contextmenu handler before usePlotMenu opens its menu. Used by the
+  // dynamic "Open in Event Browser at event #N" item to pick the event
+  // nearest the click.
+  const lastRightClickTimeRef = useRef<number | null>(null)
+  const selectEvent = useAppStore((s) => s.selectEvent)
+  const { onContextMenu: onContextMenuMenu, menu } = usePlotMenu({
     getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
     defaultName: 'events-sweep',
+    getExtraItems: () => {
+      const e = entryRef.current
+      if (!e || e.events.length === 0) return []
+      const t = lastRightClickTimeRef.current
+      // Pick the event whose peak is closest to the right-click time.
+      // Hit radius is generous (200 ms) — a wider miss falls through to
+      // the unanchored "Open Event Browser" entry.
+      let nearest = -1
+      let bestDt = Infinity
+      if (t != null) {
+        for (let i = 0; i < e.events.length; i++) {
+          const dt = Math.abs(e.events[i].peakTimeS - t)
+          if (dt < bestDt) { bestDt = dt; nearest = i }
+        }
+      }
+      const items = []
+      if (nearest >= 0 && bestDt < 0.2) {
+        items.push({
+          label: `Open event #${nearest + 1} in Event Browser`,
+          hint: `${(bestDt * 1000).toFixed(0)} ms from click`,
+          onClick: () => {
+            selectEvent(e.group, e.series, nearest)
+            void window.electronAPI?.openAnalysisWindow?.('events_browser')
+          },
+        })
+      }
+      items.push({
+        label: 'Open Event Browser',
+        onClick: () => {
+          void window.electronAPI?.openAnalysisWindow?.('events_browser')
+        },
+      })
+      return items
+    },
   })
+  // Wrapper that captures the right-click time position before
+  // delegating to usePlotMenu — getExtraItems reads from the ref.
+  const onContextMenu = useCallback((ev: React.MouseEvent) => {
+    const u = plotRef.current
+    if (u) {
+      const rect = ((u as any).over as HTMLDivElement | null)?.getBoundingClientRect()
+        ?? (u as any).root?.getBoundingClientRect?.()
+      if (rect) {
+        const px = ev.clientX - rect.left
+        const t = u.posToVal(px, 'x')
+        lastRightClickTimeRef.current = isFinite(t) ? t : null
+      }
+    }
+    onContextMenuMenu(ev)
+  }, [onContextMenuMenu])
+  // Held digit (1–5) tracked window-wide for the EE-style "hold-key
+  // + click peak to assign group" gesture. ``0`` means clear group.
+  // Stored in a ref so the pointer handler reads current state without
+  // re-rendering the plot. Window-level listener so the user doesn't
+  // have to focus the plot first to use the shortcut.
+  const heldGroupKeyRef = useRef<number | null>(null)
+  const setEventGroupAction = useAppStore((s) => s.setEventGroup)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore when typing into form fields — wouldn't want '1' in a
+      // NumInput to set a group.
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT'
+                || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key >= '0' && e.key <= '5' && !e.repeat) {
+        heldGroupKeyRef.current = Number(e.key)
+      }
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key >= '0' && e.key <= '5'
+          && heldGroupKeyRef.current === Number(e.key)) {
+        heldGroupKeyRef.current = null
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [])
   const primedDiscardIdxRef = useRef<number | null>(null)
   const cursorsRef = useRef(cursors)
   cursorsRef.current = cursors
@@ -1917,6 +2347,12 @@ function EventsSweepViewer({
   entryRef.current = entry
   const paramsRef = useRef(params)
   paramsRef.current = params
+  // Group filter mirrored into a ref — the draw hook + pointer
+  // handler read it inside closures bound to the plot's lifetime.
+  const groupFilterRef = useRef(groupFilter)
+  groupFilterRef.current = groupFilter
+  const templateFilterRef = useRef(templateFilter)
+  templateFilterRef.current = templateFilter
   // Route pointer-handler callbacks through refs so changing their
   // identity (e.g. the parent re-creating onAddEvent when `entry`
   // updates) doesn't tear down and rebuild the uPlot instance. Event
@@ -1946,6 +2382,18 @@ function EventsSweepViewer({
   const dmRef = useRef(dm)
   dmRef.current = dm
   const fetchDm = useAppStore((s) => s.fetchEventsDetectionMeasure)
+
+  /** Polynomial baseline curve for the current viewport — fetched
+   *  when ``params.baselineMethod === 'polynomial'``. Uniform sampling
+   *  (dt = 1/sr unless very long sweeps trigger backend decimation)
+   *  starting at ``tStartS``. Drawn as a thin line in the same Y axis
+   *  as the trace so the user can verify the fit isn't bending into
+   *  the events. */
+  const [baselineCurve, setBaselineCurve] = useState<{
+    values: number[]; dtS: number; tStartS: number
+  } | null>(null)
+  const baselineCurveRef = useRef(baselineCurve)
+  baselineCurveRef.current = baselineCurve
 
   // Fetch data for the current viewport. Full original sampling rate
   // (max_points=0) — for long viewports uPlot will manage its own
@@ -2039,6 +2487,53 @@ function EventsSweepViewer({
     activeTemplate,
   ])
 
+  // Fetch the polynomial baseline curve for the current viewport.
+  // Backend computes the fit on the WHOLE sweep (so the curve is
+  // anchored at edges) and returns the requested slice. Refetches on
+  // viewport / order / direction / filter / detrend changes.
+  useEffect(() => {
+    if (params.baselineMethod !== 'polynomial' || !viewport) {
+      setBaselineCurve(null)
+      return
+    }
+    let cancelled = false
+    const body = {
+      group, series, sweep, trace: channel,
+      direction: params.peakDirection,
+      poly_order: params.baselinePolyOrder,
+      filter_enabled: params.filterEnabled,
+      filter_type: params.filterType,
+      filter_low: params.filterLow,
+      filter_high: params.filterHigh,
+      filter_order: params.filterOrder,
+      detrend_enabled: params.detrendEnabled,
+      detrend_window_ms: params.detrendWindowMs,
+      t_start_s: viewport.tStart,
+      t_end_s: viewport.tEnd,
+    }
+    fetch(`${backendUrl}/api/events/baseline_curve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((d) => {
+        if (cancelled) return
+        setBaselineCurve({
+          values: Array.isArray(d.values) ? d.values : [],
+          dtS: Number(d.dt_s ?? 1),
+          tStartS: Number(d.t_start_s ?? 0),
+        })
+      })
+      .catch(() => { if (!cancelled) setBaselineCurve(null) })
+    return () => { cancelled = true }
+  }, [backendUrl, group, series, sweep, channel, viewport,
+      params.baselineMethod, params.baselinePolyOrder,
+      params.peakDirection,
+      params.filterEnabled, params.filterType, params.filterLow,
+      params.filterHigh, params.filterOrder,
+      params.detrendEnabled, params.detrendWindowMs])
+
   // ---- Overlays drawn inside uPlot's draw hook ----
   const drawOverlays = useCallback((u: uPlot) => {
     const e = entryRef.current
@@ -2117,6 +2612,43 @@ function EventsSweepViewer({
       }
     }
 
+    // Polynomial baseline curve (cyan, thin) — when polynomial mode is
+    // active. Drawn as a connected line through the curve samples that
+    // fall inside the visible X range. Uses the trace's Y axis since
+    // the curve is in the same units as the signal.
+    const bc = baselineCurveRef.current
+    if (p.baselineMethod === 'polynomial' && bc && bc.values.length > 1) {
+      const xMin = u.scales.x.min ?? 0
+      const xMax = u.scales.x.max ?? 0
+      ctx.save()
+      ctx.strokeStyle = '#26c6da'
+      ctx.lineWidth = 1.25 * dpr
+      ctx.setLineDash([])
+      ctx.beginPath()
+      let started = false
+      const dt = bc.dtS || 1e-6
+      // Sample stride keeps the path cheap on long viewports — at most
+      // ~1500 line segments across the visible range, indistinguishable
+      // from sample-perfect at typical screen widths.
+      const nVisible = Math.max(1,
+        Math.ceil((xMax - xMin) / dt))
+      const stride = Math.max(1, Math.ceil(nVisible / 1500))
+      for (let i = 0; i < bc.values.length; i += stride) {
+        const t = bc.tStartS + i * dt
+        if (t < xMin) continue
+        if (t > xMax) break
+        const px = u.valToPos(t, 'x', true)
+        const py = u.valToPos(bc.values[i], 'y', true)
+        if (!started) {
+          ctx.moveTo(px, py); started = true
+        } else {
+          ctx.lineTo(px, py)
+        }
+      }
+      ctx.stroke()
+      ctx.restore()
+    }
+
     // Threshold line (red dashed) for threshold method.
     if (p.method === 'threshold') {
       let threshold: number | null = null
@@ -2141,63 +2673,234 @@ function EventsSweepViewer({
       }
     }
 
-    // Event markers — peak (red/orange), foot (gray), decay endpoint
-    // (purple). Drawn for every detected event in the visible X
-    // range, not just the selected one — users asked to see all
-    // three pieces at a glance. Selected event gets a white ring on
-    // its peak; primed-for-discard gets a blue ring.
+    // × RMS amplitude floor line (orange dashed) — drawn whenever the
+    // user picked × RMS mode for Min |amp|, regardless of detection
+    // method. Position is rmsBaselineMean ± n × rmsValue (sign matches
+    // the peak direction); shows where events smaller than the floor
+    // get rejected post-detection. Skipped silently if RMS hasn't been
+    // computed yet (the toggle is a no-op in that state anyway).
+    if (p.useRmsAmpFloor && p.rmsValue != null) {
+      const base = p.rmsBaselineMean ?? 0
+      const sign = p.peakDirection === 'negative' ? -1 : 1
+      const floor = base + sign * p.ampFloorRmsMultiplier * Math.abs(p.rmsValue)
+      if (isFinite(floor)) {
+        const py = u.valToPos(floor, 'y', true)
+        ctx.save()
+        ctx.strokeStyle = '#ffa726'
+        ctx.lineWidth = 1 * dpr
+        ctx.setLineDash([3 * dpr, 3 * dpr])
+        ctx.beginPath()
+        ctx.moveTo(u.bbox.left, py)
+        ctx.lineTo(u.bbox.left + u.bbox.width, py)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+
+    // Per-event biexp-fit overlay — thin black curves traced from
+    // foot → decay endpoint using the stored coefficients. Drawn
+    // BEFORE the markers so dots sit cleanly on top. Skipped when
+    // toggle is off, when no fit succeeded for the event, or when
+    // the density backoff for markers (set further down) would have
+    // dropped the dots — at that zoom-out level the fits become a
+    // wash anyway.
+    if (e && p.showEventFits && e.events.length > 0) {
+      const xMin = u.scales.x.min ?? 0
+      const xMax = u.scales.x.max ?? 0
+      const sr = e.samplingRate || 1
+      const gf = groupFilterRef.current
+      const tf = templateFilterRef.current
+      ctx.save()
+      ctx.strokeStyle = '#000000'
+      ctx.lineWidth = 1 * dpr
+      for (let i = 0; i < e.events.length; i++) {
+        const ev = e.events[i]
+        if (ev.peakTimeS < xMin) continue
+        if (ev.peakTimeS > xMax) break
+        if (!passesEventFilters(ev, gf, tf)) continue
+        if (ev.biexpB0 == null || ev.biexpB1 == null
+            || ev.biexpTauRiseMs == null || ev.biexpTauDecayMs == null
+            || ev.decayEndpointIdx == null) continue
+        const tau_r = (ev.biexpTauRiseMs as number) / 1000.0
+        const tau_d = (ev.biexpTauDecayMs as number) / 1000.0
+        if (!(tau_r > 0) || !(tau_d > 0)) continue
+        const tStart = ev.footTimeS
+        const tEnd = ev.decayEndpointIdx / sr
+        const span = tEnd - tStart
+        if (span <= 0) continue
+        // Sample at the trace's native rate to get a smooth curve
+        // without too many segments — capped at ~120 segments per
+        // event for cheap drawing.
+        const nSamp = Math.min(120, Math.max(8,
+          Math.ceil(span * sr)))
+        ctx.beginPath()
+        for (let s = 0; s <= nSamp; s++) {
+          const tt = (s / nSamp) * span
+          const rise = 1 - Math.exp(-tt / tau_r)
+          const decay = Math.exp(-tt / tau_d)
+          const yVal = (ev.biexpB0 as number)
+            + (ev.biexpB1 as number) * rise * decay
+          const tx = tStart + tt
+          if (tx < xMin || tx > xMax) continue
+          const px = u.valToPos(tx, 'x', true)
+          const py = u.valToPos(yVal, 'y', true)
+          if (s === 0) ctx.moveTo(px, py)
+          else ctx.lineTo(px, py)
+        }
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
+
+    // Event markers — peak (palette), foot (gray), decay endpoint
+    // (purple). Two performance optimisations vs the original loop:
+    //
+    //   1. Batch by color. Each colour's dots go into ONE Path2D-style
+    //      sub-path (beginPath → all arcs → single fill). Reduces a
+    //      per-event beginPath/fill (≈ thousands at high event rates)
+    //      down to ≤ 6 fills (3 template + manual + default + foot +
+    //      endpoint). save/restore is also pulled out of the hot loop.
+    //
+    //   2. Density backoff. When > 1000 events fall inside the
+    //      viewport, draw only the peaks — foot / endpoint / group
+    //      digits become indistinguishable at that zoom anyway and
+    //      were the main visual cost. Zoom in to recover them.
+    //
+    //   3. Sorted-time early break. Events are stored in time order;
+    //      once we pass xMax the loop terminates.
     if (e && e.events.length > 0) {
       const xMin = u.scales.x.min ?? 0
       const xMax = u.scales.x.max ?? 0
       const sr = e.samplingRate || 1
+      const gf = groupFilterRef.current
+      const tf = templateFilterRef.current
+
+      // Per-color peak buckets keyed by hex string. We collect screen
+      // coordinates once, then issue one fill per bucket below.
+      const peakByColor = new Map<string, number[]>() // hex → flat [x, y, x, y, …]
+      const footPts: number[] = []
+      const decayPts: number[] = []
+      const digits: { px: number; py: number; g: number }[] = []
+      let selectedXY: [number, number] | null = null
+      let primedXY: [number, number] | null = null
+
+      // Quick first pass: count visible-and-passing events to decide
+      // density backoff. Sample-stride a count; we don't need exact
+      // numbers, just "many vs few".
+      let visibleN = 0
       for (let i = 0; i < e.events.length; i++) {
         const ev = e.events[i]
-        if (ev.peakTimeS < xMin || ev.peakTimeS > xMax) continue
-        ctx.save()
-        // Foot / baseline dot — gray, at (footTimeS, baselineVal)
-        const fpx = u.valToPos(ev.footTimeS, 'x', true)
-        const fpy = u.valToPos(ev.baselineVal, 'y', true)
-        ctx.fillStyle = '#9e9e9e'
-        ctx.beginPath()
-        ctx.arc(fpx, fpy, 2.5 * dpr, 0, 2 * Math.PI)
-        ctx.fill()
-        // Decay endpoint dot — purple, at (decay time, trace value there)
-        if (ev.decayEndpointIdx != null) {
-          const dt = ev.decayEndpointIdx / sr
-          // Y for the endpoint dot = the actual trace sample value.
-          // We don't have the full trace here (performance) so use
-          // the event's baseline as a stand-in — decay-endpoint
-          // detection ensures the trace sat near baseline there.
-          const dpx = u.valToPos(dt, 'x', true)
-          const dpy = u.valToPos(ev.baselineVal, 'y', true)
-          ctx.fillStyle = '#ab47bc'
-          ctx.beginPath()
-          ctx.arc(dpx, dpy, 2.5 * dpr, 0, 2 * Math.PI)
-          ctx.fill()
-        }
-        // Peak dot — red (auto) or orange (manual)
+        if (ev.peakTimeS < xMin) continue
+        if (ev.peakTimeS > xMax) break
+        if (!passesEventFilters(ev, gf, tf)) continue
+        visibleN++
+        if (visibleN > 1200) break  // we don't need a precise count
+      }
+      const dense = visibleN > 1000
+
+      const peakR = 4 * dpr
+      const dotR = 2.5 * dpr
+
+      for (let i = 0; i < e.events.length; i++) {
+        const ev = e.events[i]
+        if (ev.peakTimeS < xMin) continue
+        if (ev.peakTimeS > xMax) break  // events are time-sorted
+        if (!passesEventFilters(ev, gf, tf)) continue
+
         const px = u.valToPos(ev.peakTimeS, 'x', true)
         const py = u.valToPos(ev.peakVal, 'y', true)
-        const color = ev.manual ? '#ffb74d' : '#e57373'
-        ctx.fillStyle = color
-        ctx.beginPath()
-        ctx.arc(px, py, 4 * dpr, 0, 2 * Math.PI)
-        ctx.fill()
-        if (i === e.selectedIdx) {
-          ctx.strokeStyle = '#ffffff'
-          ctx.lineWidth = 1.5 * dpr
-          ctx.beginPath()
-          ctx.arc(px, py, 5 * dpr, 0, 2 * Math.PI)
-          ctx.stroke()
+        const color = ev.manual
+          ? '#ffb74d'
+          : (ev.templateIdx != null && TEMPLATE_COLORS[ev.templateIdx])
+            ? TEMPLATE_COLORS[ev.templateIdx]
+            : '#e57373'
+        let bucket = peakByColor.get(color)
+        if (!bucket) { bucket = []; peakByColor.set(color, bucket) }
+        bucket.push(px, py)
+
+        if (i === e.selectedIdx) selectedXY = [px, py]
+        if (primedDiscardIdxRef.current === i) primedXY = [px, py]
+
+        if (!dense) {
+          // Foot
+          const fpx = u.valToPos(ev.footTimeS, 'x', true)
+          const fpy = u.valToPos(ev.baselineVal, 'y', true)
+          footPts.push(fpx, fpy)
+          // Decay endpoint
+          if (ev.decayEndpointIdx != null) {
+            const dt = ev.decayEndpointIdx / sr
+            const dpx = u.valToPos(dt, 'x', true)
+            const dpy = u.valToPos(ev.baselineVal, 'y', true)
+            decayPts.push(dpx, dpy)
+          }
+          // Group digit
+          if (ev.group != null && ev.group >= 1 && ev.group <= 5) {
+            digits.push({ px, py, g: ev.group })
+          }
         }
-        if (primedDiscardIdxRef.current === i) {
-          ctx.strokeStyle = '#64b5f6'
-          ctx.lineWidth = 2 * dpr
-          ctx.beginPath()
-          ctx.arc(px, py, 7 * dpr, 0, 2 * Math.PI)
-          ctx.stroke()
+      }
+
+      // ---- Now render each batched layer with minimal state churn ----
+      // Foot dots (gray) — single path, single fill.
+      if (footPts.length) {
+        ctx.fillStyle = '#9e9e9e'
+        ctx.beginPath()
+        for (let k = 0; k < footPts.length; k += 2) {
+          ctx.moveTo(footPts[k] + dotR, footPts[k + 1])
+          ctx.arc(footPts[k], footPts[k + 1], dotR, 0, 2 * Math.PI)
+        }
+        ctx.fill()
+      }
+      // Decay endpoints (purple) — single path, single fill.
+      if (decayPts.length) {
+        ctx.fillStyle = '#ab47bc'
+        ctx.beginPath()
+        for (let k = 0; k < decayPts.length; k += 2) {
+          ctx.moveTo(decayPts[k] + dotR, decayPts[k + 1])
+          ctx.arc(decayPts[k], decayPts[k + 1], dotR, 0, 2 * Math.PI)
+        }
+        ctx.fill()
+      }
+      // Peaks — one beginPath/fill per color bucket.
+      for (const [hex, pts] of peakByColor) {
+        ctx.fillStyle = hex
+        ctx.beginPath()
+        for (let k = 0; k < pts.length; k += 2) {
+          ctx.moveTo(pts[k] + peakR, pts[k + 1])
+          ctx.arc(pts[k], pts[k + 1], peakR, 0, 2 * Math.PI)
+        }
+        ctx.fill()
+      }
+      // Group digits — set font/baseline once, fillText each. Color
+      // changes per group so we accept that one state change per
+      // digit; in practice users usually use 1–2 groups.
+      if (digits.length) {
+        ctx.save()
+        ctx.font = `bold ${11 * dpr}px ${cssVar('--font-mono')}`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'top'
+        const sign = paramsRef.current.peakDirection === 'negative' ? 1 : -1
+        for (const d of digits) {
+          ctx.fillStyle = GROUP_COLORS[d.g - 1] ?? '#cccccc'
+          ctx.fillText(String(d.g), d.px, d.py + sign * 8 * dpr)
         }
         ctx.restore()
+      }
+      // Selected ring (white) and primed-discard ring (blue) — one
+      // event each at most; cheap.
+      if (selectedXY) {
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1.5 * dpr
+        ctx.beginPath()
+        ctx.arc(selectedXY[0], selectedXY[1], 5 * dpr, 0, 2 * Math.PI)
+        ctx.stroke()
+      }
+      if (primedXY) {
+        ctx.strokeStyle = '#64b5f6'
+        ctx.lineWidth = 2 * dpr
+        ctx.beginPath()
+        ctx.arc(primedXY[0], primedXY[1], 7 * dpr, 0, 2 * Math.PI)
+        ctx.stroke()
       }
     }
   }, [])
@@ -2496,14 +3199,30 @@ function EventsSweepViewer({
         if (e) {
           let hit = -1
           let hitDist = Infinity
+          const gf = groupFilterRef.current
+          const tf = templateFilterRef.current
           for (let i = 0; i < e.events.length; i++) {
             const ev0 = e.events[i]
+            // Skip hit-tests on filtered-out events — they're not
+            // drawn, and clicking through to them would be confusing.
+            if (!passesEventFilters(ev0, gf, tf)) continue
             const mx = u.valToPos(ev0.peakTimeS, 'x', false)
             const my = u.valToPos(ev0.peakVal, 'y', false)
             const d = Math.hypot(mx - pxX, my - pxY)
             if (d < hitDist && d < 10) { hit = i; hitDist = d }
           }
           if (hit >= 0) {
+            // Digit-held → assign group instead of priming discard.
+            // 1–5 sets the group; 0 clears it. Matches EE's hotkey
+            // tagging flow — fast bulk curation without a context menu.
+            const k = heldGroupKeyRef.current
+            if (k != null) {
+              const g = k === 0 ? null : k
+              setEventGroupAction(e.group, e.series, hit, g)
+              plotRef.current?.redraw()
+              ev.preventDefault()
+              return
+            }
             if (primedDiscardIdxRef.current === hit) {
               primedDiscardIdxRef.current = null
               onDiscardEventRef.current(hit)
@@ -2705,8 +3424,9 @@ function EventsSweepViewer({
     }
   }, [heightSignal])
 
-  // Redraw overlays when cursors / entry / params change.
-  useEffect(() => { plotRef.current?.redraw() }, [cursors, entry, params])
+  // Redraw overlays when cursors / entry / params / baseline curve change.
+  useEffect(() => { plotRef.current?.redraw() },
+    [cursors, entry, params, baselineCurve])
 
   return (
     <div ref={rootRef} style={{
@@ -2852,6 +3572,8 @@ function EventsSummaryBar({ entry }: { entry: EventsData | undefined }) {
 function AmplitudeHistogram({
   entry, heightSignal,
   binW, setBinW,
+  groupFilter = { kind: 'all' },
+  templateFilter = { kind: 'all' },
 }: {
   entry: EventsData | undefined
   heightSignal: number
@@ -2860,6 +3582,8 @@ function AmplitudeHistogram({
    *  ``null`` → auto (√n bins clamped to [8, 40]). */
   binW: number | null
   setBinW: React.Dispatch<React.SetStateAction<number | null>>
+  groupFilter?: GroupFilter
+  templateFilter?: TemplateFilter
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -2870,7 +3594,10 @@ function AmplitudeHistogram({
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 5) return null
-    const amps = entry.events.map((e) => e.amplitude)
+    const amps = entry.events
+      .filter((e) => passesEventFilters(e, groupFilter, templateFilter))
+      .map((e) => e.amplitude)
+    if (amps.length < 5) return null
     const n = amps.length
     const m = mean(amps)
     const s = sd(amps) || 1
@@ -2893,7 +3620,7 @@ function AmplitudeHistogram({
     const gauss = centers.map((x) =>
       peakCount * Math.exp(-0.5 * ((x - m) / s) ** 2))
     return { centers, counts, gauss, mean: m, sd: s, n, bw, autoBw }
-  }, [entry, binW])
+  }, [entry, binW, groupFilter, templateFilter])
 
   useEffect(() => {
     const container = containerRef.current
@@ -3047,12 +3774,16 @@ function AmplitudeHistogram({
 function EventRatePlot({
   entry, heightSignal,
   binS, setBinS,
+  groupFilter = { kind: 'all' },
+  templateFilter = { kind: 'all' },
 }: {
   entry: EventsData | undefined
   heightSignal: number
   /** Bin width in seconds, lifted to parent for prefs persistence. */
   binS: number
   setBinS: React.Dispatch<React.SetStateAction<number>>
+  groupFilter?: GroupFilter
+  templateFilter?: TemplateFilter
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -3067,6 +3798,7 @@ function EventRatePlot({
     const n = Math.max(1, Math.ceil(T / binS))
     const counts = new Array<number>(n).fill(0)
     for (const e of entry.events) {
+      if (!passesEventFilters(e, groupFilter, templateFilter)) continue
       const k = Math.max(0, Math.min(n - 1, Math.floor(e.peakTimeS / binS)))
       counts[k]++
     }
@@ -3077,7 +3809,7 @@ function EventRatePlot({
       rates[i] = counts[i] / binS  // Hz
     }
     return { centers, rates }
-  }, [entry, binS])
+  }, [entry, binS, groupFilter, templateFilter])
 
   useEffect(() => {
     const container = containerRef.current
@@ -3204,9 +3936,13 @@ function EventRatePlot({
 
 function AmpVsTimeScatter({
   entry, heightSignal,
+  groupFilter = { kind: 'all' },
+  templateFilter = { kind: 'all' },
 }: {
   entry: EventsData | undefined
   heightSignal: number
+  groupFilter?: GroupFilter
+  templateFilter?: TemplateFilter
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -3220,11 +3956,13 @@ function AmpVsTimeScatter({
     const xs: number[] = []
     const ys: number[] = []
     for (const e of entry.events) {
+      if (!passesEventFilters(e, groupFilter, templateFilter)) continue
       xs.push(e.peakTimeS)
       ys.push(e.amplitude)
     }
+    if (xs.length === 0) return null
     return { xs, ys }
-  }, [entry])
+  }, [entry, groupFilter, templateFilter])
 
   useEffect(() => {
     const container = containerRef.current
@@ -3335,6 +4073,8 @@ function AmpVsTimeScatter({
 function IEIHistogram({
   entry, heightSignal,
   binMs, setBinMs,
+  groupFilter = { kind: 'all' },
+  templateFilter = { kind: 'all' },
 }: {
   entry: EventsData | undefined
   heightSignal: number
@@ -3342,6 +4082,8 @@ function IEIHistogram({
    *  ``null`` → auto (sqrt-N binning). */
   binMs: number | null
   setBinMs: React.Dispatch<React.SetStateAction<number | null>>
+  groupFilter?: GroupFilter
+  templateFilter?: TemplateFilter
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -3352,9 +4094,15 @@ function IEIHistogram({
 
   const stats = useMemo(() => {
     if (!entry || entry.events.length < 2) return null
+    // Filter first, THEN compute IEIs across the filtered subset —
+    // intervals across hidden events would mix groups and undermine
+    // the whole point of the filter.
+    const filtered = entry.events.filter(
+      (e) => passesEventFilters(e, groupFilter, templateFilter))
+    if (filtered.length < 2) return null
     const iei: number[] = []
-    for (let i = 1; i < entry.events.length; i++) {
-      iei.push((entry.events[i].peakTimeS - entry.events[i - 1].peakTimeS) * 1000)
+    for (let i = 1; i < filtered.length; i++) {
+      iei.push((filtered[i].peakTimeS - filtered[i - 1].peakTimeS) * 1000)
     }
     if (iei.length === 0) return null
     const lo = 0
@@ -3375,7 +4123,7 @@ function IEIHistogram({
     for (let i = 0; i < nBinsFinal; i++) centers[i] = lo + (i + 0.5) * bw
     const meanIei = iei.reduce((s, v) => s + v, 0) / iei.length
     return { centers, counts, bw, n, meanIei }
-  }, [entry, binMs])
+  }, [entry, binMs, groupFilter, templateFilter])
 
   useEffect(() => {
     const container = containerRef.current
@@ -3513,9 +4261,13 @@ function IEIHistogram({
 
 function EventsResultsTable({
   entry,
+  groupFilter = { kind: 'all' },
+  templateFilter = { kind: 'all' },
   onSelect, onDiscard,
 }: {
   entry: EventsData | undefined
+  groupFilter?: GroupFilter
+  templateFilter?: TemplateFilter
   onSelect: (idx: number) => void
   onDiscard: (idx: number) => void
 }) {
@@ -3537,13 +4289,19 @@ function EventsResultsTable({
   // unambiguously placed. Single-sweep skips the column to keep the
   // table compact.
   const multiSweep = (entry.sweepsAnalysed?.length ?? 1) > 1
-  const headers = multiSweep
-    ? ['#', 'Sweep', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
-        'τ rise (ms)', 'τ decay (ms)',
-        'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '']
-    : ['#', 'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
-        'τ rise (ms)', 'τ decay (ms)',
-        'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '']
+  // Show a Template column only when multi-template detection (or
+  // mixed manual + auto) actually produced a non-null tag — otherwise
+  // it's a wasted column for single-template / threshold runs.
+  const showTplCol = entry.events.some(
+    (e) => e.templateIdx != null || e.manual)
+  const headers = [
+    '#',
+    ...(multiSweep ? ['Sweep'] : []),
+    ...(showTplCol ? ['Tpl'] : []),
+    'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
+    'τ rise (ms)', 'τ decay (ms)',
+    'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '',
+  ]
   return (
     <table style={{
       width: '100%', borderCollapse: 'collapse',
@@ -3564,6 +4322,10 @@ function EventsResultsTable({
       </thead>
       <tbody>
         {entry.events.map((e: EventRow, i: number) => {
+          // Group + template filters — keeps original index `i` so
+          // click handlers (select / discard) reach the right event
+          // row even though we visually skip filtered-out rows.
+          if (!passesEventFilters(e, groupFilter, templateFilter)) return null
           // IEI only meaningful within the same sweep — don't span
           // the sweep boundary in multi-sweep mode.
           const prev = i === 0 ? null : entry.events[i - 1]
@@ -3582,6 +4344,20 @@ function EventsResultsTable({
               }}>
               <td style={td}>{i + 1}{e.manual ? ' *' : ''}</td>
               {multiSweep && <td style={td}>{e.sweep + 1}</td>}
+              {showTplCol && (
+                <td style={td}>
+                  {e.manual ? (
+                    <span style={{ color: '#ffb74d', fontWeight: 600 }}>M</span>
+                  ) : e.templateIdx != null && TEMPLATE_COLORS[e.templateIdx] ? (
+                    <span style={{
+                      color: TEMPLATE_COLORS[e.templateIdx],
+                      fontWeight: 600,
+                    }}>T{e.templateIdx + 1}</span>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>—</span>
+                  )}
+                </td>
+              )}
               <td style={td}>{e.peakTimeS.toFixed(4)}</td>
               <td style={td}>{e.amplitude.toFixed(2)}</td>
               <td style={td}>{e.riseTimeMs != null ? e.riseTimeMs.toFixed(2) : '—'}</td>

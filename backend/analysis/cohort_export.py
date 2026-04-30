@@ -359,9 +359,15 @@ def _write_summary_sheet(ws, stats: dict, selected_metrics: list[str]) -> None:
 def _write_cells_wide_sheet(ws, paired: list[tuple[dict, str]],
                              scalar_metrics: list[str],
                              meta_fields: list[str]) -> None:
+    # ``series_key`` is exported in the storage form (0-indexed
+    # ``g:s`` or ``g:s:subtype``) — that's the join key the rest of
+    # NeuroTrace uses internally and matches the .neurotrace sidecar.
+    # The HEKA / Patchmaster UIs show it 1-indexed (Group 1, Series 4
+    # = ``0:3`` here); apply +1 to both numeric components if you need
+    # to cross-reference against the recording in HEKA.
     headers = (
         ['group', 'file_name', 'file_path', 'cell_id', 'animal_id',
-         'series_key', 'series_specific_tags', 'group_tags']
+         'series_key (0-indexed)', 'series_specific_tags', 'group_tags']
         + list(scalar_metrics)
         + [f'meta.{k}' for k in meta_fields]
     )

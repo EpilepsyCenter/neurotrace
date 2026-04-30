@@ -540,6 +540,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   metadata: 'Metadata',
   cohort_analysis: 'Cohort Analysis',
   trace_export: 'Trace Export',
+  batch_analysis: 'Batch Analysis',
   bursts: 'Burst Detection',
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',

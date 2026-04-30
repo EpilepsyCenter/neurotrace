@@ -359,6 +359,23 @@ export function Toolbar() {
         )}
       </div>
 
+      {/* Batch Analysis — Phase 4b. Drives every-file detection
+          using a tagged template's params. Sits right after Analyses
+          to read tag → analyse → batch → aggregate in left-to-right
+          order. Always enabled. */}
+      <button
+        className="btn"
+        onClick={async () => {
+          if (window.electronAPI?.openAnalysisWindow) {
+            await window.electronAPI.openAnalysisWindow('batch_analysis')
+          }
+        }}
+        title="Replay a template's analyses across a folder of tagged recordings"
+        style={{ marginLeft: 6 }}
+      >
+        Batch…
+      </button>
+
       {/* Cohort Analysis — separate from the per-file Analyses dropdown
           because it operates on a folder of sidecars, not the active
           recording. Always enabled (no recording dependency). */}
@@ -370,7 +387,7 @@ export function Toolbar() {
           }
         }}
         title="Aggregate per-cell metrics across a folder of recordings"
-        style={{ marginLeft: 6 }}
+        style={{ marginLeft: 4 }}
       >
         Cohort…
       </button>

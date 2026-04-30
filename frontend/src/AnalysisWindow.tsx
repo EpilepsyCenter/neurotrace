@@ -12,6 +12,7 @@ import { EventsTemplateGeneratorWindow } from './components/AnalysisWindows/Even
 import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/EventsTemplateRefinementWindow'
 import { EventsBrowserWindow } from './components/AnalysisWindows/EventsBrowserWindow'
 import { MetadataWindow } from './components/AnalysisWindows/MetadataWindow'
+import { BatchWindow } from './components/AnalysisWindows/BatchWindow'
 import { CohortWindow } from './components/AnalysisWindows/CohortWindow'
 import { TraceExportWindow } from './components/AnalysisWindows/TraceExportWindow'
 
@@ -385,6 +386,10 @@ export function AnalysisWindow({ view }: { view: string }) {
           <TraceExportWindow
             backendUrl={backendUrl}
             fileInfo={fileInfo}
+          />
+        ) : view === 'batch_analysis' ? (
+          <BatchWindow
+            backendUrl={backendUrl}
           />
         ) : (
           <div style={{

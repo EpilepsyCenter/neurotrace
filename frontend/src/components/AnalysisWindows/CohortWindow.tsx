@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useThemeStore } from '../../stores/themeStore'
 import { usePlotMenu } from '../common/PlotMenu'
+import { displayGroupSeries } from '../../utils/groupSeriesKey'
 
 /**
  * Cohort Analysis window — Phases B.2 + B.3.
@@ -4506,7 +4507,7 @@ function CellTable({ cells, columns }: { cells: Cell[]; columns: string[] }) {
               <Td title={cell.file_path}>{cell.file_name}</Td>
               <Td>{cell.cell_id ?? '—'}</Td>
               <Td>{cell.animal_id ?? '—'}</Td>
-              <Td>{cell.series_key}</Td>
+              <Td>{displayGroupSeries(cell.series_key)}</Td>
               <Td>{cell.group_tags.join(', ')}</Td>
               <Td>{cell.series_specific_tags.join(', ') || '—'}</Td>
               {columns.map((col) => {
@@ -4622,7 +4623,7 @@ function SkippedSection({ result }: { result: AggregateResponse }) {
               title="Errors"
               hint="Backend extractor failed for these slices."
               items={errors.map((e) =>
-                `${e.file_path.split(/[/\\]/).pop()}${e.series_key ? ' (' + e.series_key + ')' : ''}: ${e.reason}`)}
+                `${e.file_path.split(/[/\\]/).pop()}${e.series_key ? ' (' + displayGroupSeries(e.series_key) + ')' : ''}: ${e.reason}`)}
               error
             />
           )}

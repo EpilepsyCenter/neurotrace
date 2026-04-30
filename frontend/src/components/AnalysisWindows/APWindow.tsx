@@ -13,6 +13,9 @@ import { ImSourceCard } from '../common/ImSourceCard'
 import { ChannelsOverlaySelect, STIMULUS_OVERLAY_KEY } from '../common/ChannelsOverlaySelect'
 import { OverlayTraceViewer, OverlayChannel } from '../common/OverlayTraceViewer'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 /**
  * Action Potentials analysis window.
@@ -1422,6 +1425,22 @@ function APPerSweepTable({
   previewSweep: number
   onSelectSweep: (sweep: number) => void
 }) {
+  const headers = ['Sweep', 'Spikes', 'Rate (Hz)', 'Im (pA)', 'Latency (s)', 'Mean ISI (s)', 'SFA', 'LV']
+  const sel = useRowSelection(entry.perSweep.length)
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const p = entry.perSweep[i]
+    return [
+      p.sweep + 1, p.spikeCount,
+      p.spikeRateHz ?? null, p.imMean ?? null,
+      p.firstSpikeLatency ?? null, p.meanISI ?? null,
+      p.sfaDivisor ?? null, p.localVariance ?? null,
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   return (
     <div style={{
       border: '1px solid var(--border)', borderRadius: 4,
@@ -1433,25 +1452,30 @@ function APPerSweepTable({
       }}>
         <thead>
           <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left', position: 'sticky', top: 0 }}>
-            <Th>Sweep</Th>
-            <Th>Spikes</Th>
-            <Th>Rate (Hz)</Th>
-            <Th>Im (pA)</Th>
-            <Th>Latency (s)</Th>
-            <Th>Mean ISI (s)</Th>
-            <Th>SFA</Th>
-            <Th>LV</Th>
+            {headers.map((h, i) => <Th key={i}>{h}</Th>)}
           </tr>
         </thead>
         <tbody>
-          {entry.perSweep.map((p) => {
+          {entry.perSweep.map((p, i) => {
             const selected = p.sweep === previewSweep
             return (
               <tr
                 key={p.sweep}
-                onClick={() => onSelectSweep(p.sweep)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
+                    onSelectSweep(p.sweep)
+                  }
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: selected ? 'var(--bg-selected, rgba(100,181,246,0.2))' : 'transparent',
+                  background: sel.isSelected(i)
+                    ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                    : selected
+                      ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+                      : 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                 }}
@@ -1469,6 +1493,7 @@ function APPerSweepTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -1630,6 +1655,32 @@ function APKineticsTable({
   selectedSpikeSet: Set<number>
   onToggleSpike: (idx: number) => void
 }) {
+  const sel = useRowSelection(entry?.perSpike.length ?? 0)
+  const headers = ['#', 'Sweep', 'Threshold (mV)', 'Peak (mV)', 'Amp (mV)',
+    'Rise (ms)', 'Decay (ms)', 'FWHM (ms)', 'fAHP (mV)', 'mAHP (mV)',
+    '+slope', '−slope']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const sp = entry!.perSpike[i]
+    return [
+      (sp.manual ? '★ ' : '') + (i + 1),
+      sp.sweep + 1,
+      sp.thresholdVm.toFixed(2),
+      sp.peakVm.toFixed(2),
+      sp.amplitudeMv.toFixed(2),
+      sp.riseTimeS != null ? (sp.riseTimeS * 1000).toFixed(3) : null,
+      sp.decayTimeS != null ? (sp.decayTimeS * 1000).toFixed(3) : null,
+      sp.halfWidthS != null ? (sp.halfWidthS * 1000).toFixed(3) : null,
+      sp.fahpVm ?? null,
+      sp.mahpVm ?? null,
+      sp.maxRiseSlopeMvMs ?? null,
+      sp.maxDecaySlopeMvMs ?? null,
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (!entry || entry.perSpike.length === 0) {
     return (
       <div style={{
@@ -1653,18 +1704,7 @@ function APKineticsTable({
         <thead>
           <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left', position: 'sticky', top: 0 }}>
             <Th>✓</Th>
-            <Th>#</Th>
-            <Th>Sweep</Th>
-            <Th>Threshold (mV)</Th>
-            <Th>Peak (mV)</Th>
-            <Th>Amp (mV)</Th>
-            <Th>Rise (ms)</Th>
-            <Th>Decay (ms)</Th>
-            <Th>FWHM (ms)</Th>
-            <Th>fAHP (mV)</Th>
-            <Th>mAHP (mV)</Th>
-            <Th>+slope</Th>
-            <Th>−slope</Th>
+            {headers.map((h, i) => <Th key={i}>{h}</Th>)}
           </tr>
         </thead>
         <tbody>
@@ -1674,9 +1714,21 @@ function APKineticsTable({
             return (
               <tr
                 key={i}
-                onClick={() => onSelectSpike(i)}
+                onClick={(ev) => {
+                  sel.onRowClick(i, ev)
+                  if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
+                    onSelectSpike(i)
+                  }
+                }}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
                 style={{
-                  background: selected ? 'var(--bg-selected, rgba(100,181,246,0.2))' : 'transparent',
+                  background: sel.isSelected(i)
+                    ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                    : selected
+                      ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+                      : 'transparent',
                   cursor: 'pointer',
                   borderTop: '1px solid var(--border)',
                   fontStyle: sp.manual ? 'italic' : 'normal',
@@ -1705,6 +1757,7 @@ function APKineticsTable({
           })}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -2394,7 +2447,9 @@ function APSweepViewer({
         ],
         hooks: { draw: [(u) => drawOverlays(u)] },
       }
+      const attachTip = attachHoverCoords(opts, { unitsRef: { current: traceUnits } })
       plotRef.current = new uPlot(opts, [traceTime, adjusted], container)
+      attachTip(container)
       // ---- Wheel zoom + drag-to-pan + drag bounds-band edges ----
       const u = plotRef.current
       const over = container.querySelector<HTMLDivElement>('.u-over')

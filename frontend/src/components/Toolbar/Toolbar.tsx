@@ -25,6 +25,7 @@ export function Toolbar() {
     zoomMode, toggleZoomMode,
     selectedSweeps, includedSweepsFor, filterExcludedSweeps,
     createAveragedSweep,
+    recentFiles, clearRecentFiles,
   } = useAppStore()
   void toggleOverlay  // currently unused; reference retained to keep the prop picked
 
@@ -39,9 +40,11 @@ export function Toolbar() {
   const [showSettings, setShowSettings] = useState(false)
   const [showAnalyses, setShowAnalyses] = useState(false)
   const [showAverageMenu, setShowAverageMenu] = useState(false)
+  const [showRecent, setShowRecent] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
   const analysesRef = useRef<HTMLDivElement>(null)
   const averageRef = useRef<HTMLDivElement>(null)
+  const recentRef = useRef<HTMLDivElement>(null)
 
   // State for the Average popover.
   const selectedList = selectedSweeps[`${currentGroup}:${currentSeries}`] ?? []
@@ -54,7 +57,7 @@ export function Toolbar() {
 
   // Close popovers on outside click
   useEffect(() => {
-    if (!showSettings && !showAnalyses && !showAverageMenu) return
+    if (!showSettings && !showAnalyses && !showAverageMenu && !showRecent) return
     const onClick = (e: MouseEvent) => {
       if (showSettings && settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
         setShowSettings(false)
@@ -65,10 +68,13 @@ export function Toolbar() {
       if (showAverageMenu && averageRef.current && !averageRef.current.contains(e.target as Node)) {
         setShowAverageMenu(false)
       }
+      if (showRecent && recentRef.current && !recentRef.current.contains(e.target as Node)) {
+        setShowRecent(false)
+      }
     }
     document.addEventListener('mousedown', onClick)
     return () => document.removeEventListener('mousedown', onClick)
-  }, [showSettings, showAnalyses, showAverageMenu])
+  }, [showSettings, showAnalyses, showAverageMenu, showRecent])
 
   // Reset popover defaults every time it opens.
   useEffect(() => {
@@ -177,8 +183,83 @@ export function Toolbar() {
 
   return (
     <div className="toolbar">
-      <div className="toolbar-group">
+      <div className="toolbar-group" style={{ position: 'relative' }} ref={recentRef}>
         <button className="btn" onClick={handleOpenFile} disabled={loading}>Open File</button>
+        <button
+          className="btn"
+          onClick={() => setShowRecent((v) => !v)}
+          disabled={loading || recentFiles.length === 0}
+          title={recentFiles.length === 0 ? 'No recent files' : 'Recent files'}
+          style={{ padding: '4px 6px' }}
+        >▾</button>
+        {showRecent && recentFiles.length > 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              marginTop: 2,
+              minWidth: 320,
+              maxWidth: 600,
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+              zIndex: 100,
+              padding: 4,
+            }}
+          >
+            <div style={{
+              fontSize: 'var(--font-size-xs)',
+              padding: '4px 8px',
+              color: 'var(--fg-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+            }}>Recent files</div>
+            {recentFiles.map((p) => {
+              const fname = p.split('/').pop() || p
+              const dir = p.slice(0, p.length - fname.length).replace(/\/$/, '')
+              return (
+                <div
+                  key={p}
+                  onClick={async () => {
+                    setShowRecent(false)
+                    try { await openFile(p) } catch { /* ignore */ }
+                  }}
+                  title={p}
+                  style={{
+                    padding: '4px 8px',
+                    cursor: 'pointer',
+                    borderRadius: 3,
+                    fontSize: 'var(--font-size-sm)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)' }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                >
+                  <span style={{ fontWeight: 500 }}>{fname}</span>
+                  <span style={{ color: 'var(--fg-muted)', marginLeft: 8, fontSize: 'var(--font-size-xs)' }}>{dir}</span>
+                </div>
+              )
+            })}
+            <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
+              <div
+                onClick={() => { clearRecentFiles(); setShowRecent(false) }}
+                style={{
+                  padding: '4px 8px',
+                  cursor: 'pointer',
+                  borderRadius: 3,
+                  fontSize: 'var(--font-size-sm)',
+                  color: 'var(--fg-muted)',
+                }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+              >Clear recent</div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="toolbar-separator" />

@@ -5,6 +5,9 @@ import { useAppStore, BurstRecord, FieldBurstsData, FieldBurstsParams } from '..
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 const MARKER_COLORS = {
   baseline: '#9e9e9e',
@@ -1144,7 +1147,9 @@ function BurstSweepViewer({
       },
     }
     const payload: uPlot.AlignedData = [Array.from(data.time), Array.from(data.values)]
+    const attachTip = attachHoverCoords(opts)
     plotRef.current = new uPlot(opts, payload, container)
+    attachTip(container)
     drawBurstOverlay(
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data.zeroOffsetApplied,
@@ -1641,6 +1646,31 @@ function BurstTable({
   selectedIdx: number | null
   onSelect: (idx: number) => void
 }) {
+  const sel = useRowSelection(bursts.length)
+  const headers = ['#', 'Sweep', 't_start (s)', 'Dur (ms)', 'Pre-baseline',
+    'Peak (Δ)', 'Rise 10-90 (ms)', 'Decay t₅₀ (ms)', 'Integral (·s)',
+    'Freq (Hz)', 'Peak t (s)']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const b = bursts[i]
+    return [
+      `${i + 1}${b.manual ? '*' : ''}`,
+      b.sweepIndex + 1,
+      b.startS.toFixed(3),
+      b.durationMs.toFixed(1),
+      b.preBurstBaseline.toFixed(3),
+      b.peakAmplitude.toFixed(3),
+      b.riseTime10_90Ms ?? null,
+      b.decayHalfTimeMs ?? null,
+      b.integral.toFixed(4),
+      b.meanFrequencyHz ?? null,
+      b.peakTimeS.toFixed(3),
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
   if (bursts.length === 0) {
     return (
       <div style={{
@@ -1689,9 +1719,19 @@ function BurstTable({
           {bursts.map((b, i) => (
             <tr
               key={i}
-              onClick={() => onSelect(i)}
+              onClick={(ev) => {
+                sel.onRowClick(i, ev)
+                if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) onSelect(i)
+              }}
+              onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                if (!sel.isSelected(i)) sel.setSelected([i])
+              })}
               style={{
-                background: i === selectedIdx ? 'var(--bg-selected, rgba(100,181,246,0.2))' : 'transparent',
+                background: sel.isSelected(i)
+                  ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                  : i === selectedIdx
+                    ? 'var(--bg-selected, rgba(100,181,246,0.2))'
+                    : 'transparent',
                 cursor: 'pointer',
                 borderTop: '1px solid var(--border)',
                 // Italicize manually-added bursts so the user can tell
@@ -1717,6 +1757,7 @@ function BurstTable({
           ))}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }

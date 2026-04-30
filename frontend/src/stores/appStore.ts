@@ -1340,6 +1340,8 @@ interface AppState {
   currentSeries: number
   currentSweep: number
   currentTrace: number
+  recentFiles: string[]
+  clearRecentFiles: () => void
 
   // Trace data
   traceData: TraceData | null
@@ -1936,6 +1938,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentSeries: 0,
   currentSweep: 0,
   currentTrace: 0,
+  recentFiles: ((): string[] => {
+    try {
+      const saved = (window as any).electronAPI?.syncPreferences?.recentFiles
+      if (Array.isArray(saved)) return saved.filter((s) => typeof s === 'string').slice(0, 10)
+    } catch { /* ignore */ }
+    return []
+  })(),
 
   traceData: null,
   overlayEntries: [],
@@ -2048,7 +2057,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   showCursors: false,
   showBurstMarkers: true,
   showEventMarkers: true,
-  showCoordinates: false,
+  showCoordinates: true,
   loading: false,
   error: null,
 
@@ -2340,6 +2349,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  clearRecentFiles: () => {
+    set({ recentFiles: [] })
+    try {
+      const api = (window as any).electronAPI
+      if (api?.getPreferences && api?.setPreferences) {
+        api.getPreferences().then((prefs: any) => {
+          api.setPreferences({ ...(prefs ?? {}), recentFiles: [] }).catch(() => { /* ignore */ })
+        }).catch(() => { /* ignore */ })
+      }
+    } catch { /* ignore */ }
+  },
+
   closeFile: async () => {
     const { backendUrl, recording } = get()
     // Best-effort backend close — silently swallow failures so a
@@ -2421,6 +2442,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentTrace: 0,
         loading: false,
       })
+      // Track recent files (most-recent first, deduped, capped at 10).
+      // Persisted to Electron prefs via the small ``recentFiles`` key.
+      if (recording?.filePath) {
+        const prev = get().recentFiles
+        const next = [recording.filePath, ...prev.filter((p) => p !== recording.filePath)].slice(0, 10)
+        set({ recentFiles: next })
+        try {
+          const api = (window as any).electronAPI
+          if (api?.getPreferences && api?.setPreferences) {
+            const prefs = (await api.getPreferences()) ?? {}
+            await api.setPreferences({ ...prefs, recentFiles: next })
+          }
+        } catch { /* ignore */ }
+      }
       // Try the per-recording sidecar first. If a ``<file>.neurotrace``
       // sits next to the recording it carries every analysis slice
       // in one shot — load-and-broadcast everything, then skip the

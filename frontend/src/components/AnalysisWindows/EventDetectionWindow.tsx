@@ -13,6 +13,9 @@ import {
   Viewport, SetViewport, ViewportBar, ViewportSlider, shiftViewportBy,
 } from '../common/ContinuousViewport'
 import { usePlotMenu } from '../common/PlotMenu'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { attachHoverCoords } from '../../utils/hoverCoords'
 
 /**
  * Event detection & analysis — Phase 1 (expanded).
@@ -3097,7 +3100,9 @@ function EventsSweepViewer({
       const payload: uPlot.AlignedData = dmAligned
         ? [Array.from(data.time), Array.from(data.values), dmAligned as any]
         : [Array.from(data.time), Array.from(data.values)]
+      const attachTip = attachHoverCoords(opts)
       plotRef.current = new uPlot(opts, payload, container)
+      attachTip(container)
 
       // Attach pointer handlers on uPlot's over layer.
       //
@@ -4324,6 +4329,13 @@ function EventsResultsTable({
   onSelect: (idx: number) => void
   onDiscard: (idx: number) => void
 }) {
+  // Multi-row selection — click / shift-click for range / cmd-or-ctrl
+  // -click for toggle. Right-click brings up the Copy-as-TSV menu;
+  // selection survives across re-renders, drops on row-count shrink.
+  const events = entry?.events ?? []
+  const sel = useRowSelection(events.length)
+  // Cmd/Ctrl-C on a selected row also copies — covered later in the
+  // copy menu (which builds the TSV at click time).
   if (!entry || entry.events.length === 0) {
     return (
       <div style={{
@@ -4355,7 +4367,46 @@ function EventsResultsTable({
     'τ rise (ms)', 'τ decay (ms)',
     'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '',
   ]
+  // TSV header drops the trailing empty (the discard-button column)
+  // and the Tpl column is collapsed to the integer template index
+  // so spreadsheets can sort cleanly.
+  const tsvHeaders = headers.slice(0, -1)
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const e = entry.events[i]
+    const prev = i === 0 ? null : entry.events[i - 1]
+    const iei = prev && (!multiSweep || prev.sweep === e.sweep)
+      ? (e.peakTimeS - prev.peakTimeS) * 1000
+      : null
+    const cells: Array<string | number | null> = [
+      i + 1 + (e.manual ? ' *' : ''),
+    ]
+    if (multiSweep) cells.push(e.sweep + 1)
+    if (showTplCol) {
+      cells.push(e.manual ? 'M'
+        : e.templateIdx != null ? `T${e.templateIdx + 1}` : '')
+    }
+    cells.push(
+      e.peakTimeS.toFixed(4),
+      e.amplitude.toFixed(4),
+      e.riseTimeMs ?? null,
+      e.decayTimeMs ?? null,
+      e.biexpTauRiseMs ?? null,
+      e.decayTauMs ?? null,
+      e.halfWidthMs ?? null,
+      e.auc ?? null,
+      iei == null ? null : iei.toFixed(2),
+    )
+    return cells
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => {
+      if (sel.selectedIndexes.length === 0) return null
+      return buildTSV(tsvHeaders, sel.selectedIndexes.map(rowToCells))
+    },
+  })
   return (
+    <>
     <table style={{
       width: '100%', borderCollapse: 'collapse',
       fontSize: 'var(--font-size-xs)', fontFamily: 'var(--font-mono)',
@@ -4387,12 +4438,26 @@ function EventsResultsTable({
             : null
           return (
             <tr key={i}
-              onClick={() => onSelect(i)}
+              onClick={(ev) => {
+                sel.onRowClick(i, ev)
+                // Plain click also "selects" the event for the
+                // viewer (zooms to + highlights peak). Skip the
+                // viewer side-effect on multi-select gestures —
+                // user is curating a range, not navigating.
+                if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
+                  onSelect(i)
+                }
+              }}
+              onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                if (!sel.isSelected(i)) sel.setSelected([i])
+              })}
               style={{
                 cursor: 'pointer',
-                background: i === entry.selectedIdx
-                  ? 'var(--accent-muted, rgba(100,181,246,0.15))'
-                  : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
+                background: sel.isSelected(i)
+                  ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                  : i === entry.selectedIdx
+                    ? 'var(--accent-muted, rgba(100,181,246,0.15))'
+                    : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
                 fontStyle: e.manual ? 'italic' : 'normal',
               }}>
               <td style={td}>{i + 1}{e.manual ? ' *' : ''}</td>
@@ -4431,7 +4496,9 @@ function EventsResultsTable({
           )
         })}
       </tbody>
-    </table>
+      </table>
+      {copyMenu.menu}
+    </>
   )
 }
 

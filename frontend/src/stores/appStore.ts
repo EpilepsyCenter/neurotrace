@@ -134,157 +134,12 @@ let _viewportFetchSeq = 0
  *  spurious re-renders / plot rebuilds. */
 const EMPTY_VISIBLE_TRACES: number[] = []
 
-/** Persist/restore field-burst detections per-recording via Electron
- *  preferences. Keyed by filePath. Non-blocking — failures are silent. */
-async function _loadPersistedBursts(filePath: string): Promise<Record<string, FieldBurstsData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedFieldBursts as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedBursts(filePath: string, fieldBursts: Record<string, FieldBurstsData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedFieldBursts as Record<string, any>) ?? {}
-    if (Object.keys(fieldBursts).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = fieldBursts
-    }
-    await api.setPreferences({ ...prefs, savedFieldBursts: store })
-  } catch { /* ignore */ }
-}
-
-/** Persist/restore the burst-detection *form* state (method, baseline
- *  mode, and parameter dict) per-series within a recording. Separate
- *  from the run results in `savedFieldBursts` so the user's param
- *  tweaks survive even if they close the window without running
- *  detection. Keyed filePath → "g:s" → FieldBurstsParams. */
-async function _loadPersistedBurstFormParams(
-  filePath: string,
-): Promise<Record<string, FieldBurstsParams> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedBurstFormParams as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedBurstFormParams(
-  filePath: string,
-  formParams: Record<string, FieldBurstsParams>,
-) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedBurstFormParams as Record<string, any>) ?? {}
-    if (Object.keys(formParams).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = formParams
-    }
-    await api.setPreferences({ ...prefs, savedBurstFormParams: store })
-  } catch { /* ignore */ }
-}
-
-/** Load/save I-V curves — same shape as the burst helpers above. */
-async function _loadPersistedIVCurves(filePath: string): Promise<Record<string, IVCurveData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedIVCurves as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedIVCurves(filePath: string, ivCurves: Record<string, IVCurveData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedIVCurves as Record<string, any>) ?? {}
-    if (Object.keys(ivCurves).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = ivCurves
-    }
-    await api.setPreferences({ ...prefs, savedIVCurves: store })
-  } catch { /* ignore */ }
-}
-
 /** Broadcast I-V state to other windows — analogous to _broadcastBursts. */
 function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
     ch.postMessage({ type: 'iv-update', ivCurves })
     ch.close()
-  } catch { /* ignore */ }
-}
-
-/** Load/save fPSP data per-recording via Electron preferences. */
-/** Migrate FPsp entries saved before the I-O/PPR/LTP tab bar landed.
- *  Old keys were `"${group}:${series}"` (two parts); new keys are
- *  `"${group}:${series}:${mode}"` (three parts). Old entries also
- *  lacked a `mode` field. Treat anything missing both as LTP.
- *  Idempotent: a pass over an already-migrated map returns it as-is. */
-function _migrateFPspCurves(raw: Record<string, any>): Record<string, FPspData> {
-  const out: Record<string, FPspData> = {}
-  for (const [k, v] of Object.entries(raw)) {
-    if (!v || typeof v !== 'object') continue
-    const parts = k.split(':')
-    if (parts.length === 3) {
-      out[k] = { ...v, mode: v.mode ?? (parts[2] as FPspMode) }
-    } else if (parts.length === 2) {
-      // Legacy pre-tab-bar entry.
-      out[`${k}:ltp`] = { ...v, mode: 'ltp' }
-    } else {
-      // Unrecognised — drop it rather than corrupt the state.
-    }
-  }
-  return out
-}
-
-async function _loadPersistedFPsp(filePath: string): Promise<Record<string, FPspData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedFPspCurves as Record<string, any> | undefined
-    const raw = store?.[filePath]
-    return raw ? _migrateFPspCurves(raw) : null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedFPsp(filePath: string, fpspCurves: Record<string, FPspData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedFPspCurves as Record<string, any>) ?? {}
-    if (Object.keys(fpspCurves).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = fpspCurves
-    }
-    await api.setPreferences({ ...prefs, savedFPspCurves: store })
   } catch { /* ignore */ }
 }
 
@@ -296,67 +151,11 @@ function _broadcastFPsp(fpspCurves: Record<string, FPspData>) {
   } catch { /* ignore */ }
 }
 
-/** Cursor-analysis persistence — one state blob per recording. */
-async function _loadPersistedCursors(filePath: string): Promise<Record<string, CursorAnalysisData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedCursorAnalyses as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedCursors(filePath: string, analyses: Record<string, CursorAnalysisData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedCursorAnalyses as Record<string, any>) ?? {}
-    if (Object.keys(analyses).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = analyses
-    }
-    await api.setPreferences({ ...prefs, savedCursorAnalyses: store })
-  } catch { /* ignore */ }
-}
-
 function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisData>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
     ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses })
     ch.close()
-  } catch { /* ignore */ }
-}
-
-/** AP analyses — same per-recording pattern as FPsp / IV / Cursor.
- *  Keyed by ${group}:${series} (one detection result per series; the
- *  three tabs Counting/Kinetics/Phase all read from the same blob). */
-async function _loadPersistedAP(filePath: string): Promise<Record<string, APData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedAPAnalyses as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch { return null }
-}
-
-async function _savePersistedAP(filePath: string, ap: Record<string, APData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedAPAnalyses as Record<string, any>) ?? {}
-    if (Object.keys(ap).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = ap
-    }
-    await api.setPreferences({ ...prefs, savedAPAnalyses: store })
   } catch { /* ignore */ }
 }
 
@@ -368,15 +167,45 @@ function _broadcastAP(apAnalyses: Record<string, APData>) {
   } catch { /* ignore */ }
 }
 
-/** Per-recording persistence of event-detection results. Same pattern
- *  as bursts / APs: keyed filePath → `${group}:${series}` → EventsData.
- *  The main trace viewer reads this back on file open so users see
- *  their previous detections as dots without having to re-run. */
+/** Strip every legacy per-file analysis blob from Electron prefs.
+ *  Run once at app start; idempotent. The keys listed below were the
+ *  pre-sidecar persistence layer — every analysis got its own
+ *  ``saved<Type>: { [filePath]: data }`` entry, which could grow to
+ *  hundreds of MB (averaged sweeps embed full time + value arrays).
+ *  Even after the writers were removed, the bloat persisted on disk
+ *  and made every ``getPreferences`` / ``setPreferences`` call slow.
+ *  Drop them so future prefs touches are fast. */
+async function _cleanupLegacyPrefs() {
+  const api = window.electronAPI
+  if (!api?.getPreferences || !api?.setPreferences) return
+  try {
+    const prefs = (await api.getPreferences()) ?? {}
+    const legacyKeys = [
+      'savedFieldBursts',
+      'savedBurstFormParams',
+      'savedIVCurves',
+      'savedFPspCurves',
+      'savedCursorAnalyses',
+      'savedAPAnalyses',
+      'savedEventsAnalyses',
+      'savedExcludedSweeps',
+      'savedAveragedSweeps',
+    ]
+    let touched = false
+    const next: Record<string, unknown> = { ...prefs }
+    for (const k of legacyKeys) {
+      if (k in next) { delete next[k]; touched = true }
+    }
+    if (touched) await api.setPreferences(next)
+  } catch { /* ignore — best-effort */ }
+}
+
 /** Forward-compatible deserialization of saved ``EventsData``. Old
- *  sidecars / prefs blobs predate fields added to ``EventsParams`` —
- *  spreading the current defaults underneath ensures every blob has a
- *  full shape regardless of when it was serialized. Idempotent.
- *  Without this NumInputs bound to new fields show ``undefined``. */
+ *  sidecars predate fields added to ``EventsParams`` over successive
+ *  releases — spreading the current defaults underneath ensures every
+ *  blob has a full shape regardless of when it was serialized.
+ *  Idempotent. Without this NumInputs bound to new fields show
+ *  ``undefined``. */
 function _migrateEventsAnalyses(
   raw: Record<string, any> | null | undefined,
 ): Record<string, EventsData> | null {
@@ -392,31 +221,6 @@ function _migrateEventsAnalyses(
     out[key] = merged
   }
   return out
-}
-
-async function _loadPersistedEvents(filePath: string): Promise<Record<string, EventsData> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedEventsAnalyses as Record<string, any> | undefined
-    return _migrateEventsAnalyses(store?.[filePath] ?? null)
-  } catch { return null }
-}
-
-async function _savePersistedEvents(filePath: string, events: Record<string, EventsData>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedEventsAnalyses as Record<string, any>) ?? {}
-    if (Object.keys(events).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = events
-    }
-    await api.setPreferences({ ...prefs, savedEventsAnalyses: store })
-  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -685,71 +489,11 @@ export function defaultEventsParams(): EventsParams {
   }
 }
 
-/** Excluded-sweeps persistence — same per-recording pattern as the
- *  other analysis slices. Stored as nested dict keyed by file path,
- *  with each file's value being `Record<"g:s", number[]>`. */
-async function _loadPersistedExcluded(filePath: string): Promise<Record<string, number[]> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedExcludedSweeps as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedExcluded(filePath: string, excluded: Record<string, number[]>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedExcludedSweeps as Record<string, any>) ?? {}
-    if (Object.keys(excluded).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = excluded
-    }
-    await api.setPreferences({ ...prefs, savedExcludedSweeps: store })
-  } catch { /* ignore */ }
-}
-
 function _broadcastExcludedSweeps(excludedSweeps: Record<string, number[]>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
     ch.postMessage({ type: 'excluded-update', excludedSweeps })
     ch.close()
-  } catch { /* ignore */ }
-}
-
-/** Averaged-sweep persistence — same per-recording pattern as the
- *  other analysis slices. Stored under `savedAveragedSweeps[filePath]`
- *  in Electron prefs. Value shape: `Record<"g:s", AveragedSweep[]>`. */
-async function _loadPersistedAveraged(filePath: string): Promise<Record<string, AveragedSweep[]> | null> {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !filePath) return null
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = prefs.savedAveragedSweeps as Record<string, any> | undefined
-    return store?.[filePath] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function _savePersistedAveraged(filePath: string, averaged: Record<string, AveragedSweep[]>) {
-  const api = window.electronAPI
-  if (!api?.getPreferences || !api?.setPreferences || !filePath) return
-  try {
-    const prefs = (await api.getPreferences()) ?? {}
-    const store = (prefs.savedAveragedSweeps as Record<string, any>) ?? {}
-    if (Object.keys(averaged).length === 0) {
-      delete store[filePath]
-    } else {
-      store[filePath] = averaged
-    }
-    await api.setPreferences({ ...prefs, savedAveragedSweeps: store })
   } catch { /* ignore */ }
 }
 
@@ -1672,7 +1416,7 @@ interface AppState {
   /** Per-series burst-detection *form* state (method, baseline mode,
    *  all numeric params, filter fields). Survives window close even if
    *  the user never clicked Run. Keyed by `${group}:${series}`;
-   *  persisted per-recording in Electron prefs as `savedBurstFormParams`. */
+   *  persisted per-recording in the .neurotrace sidecar. */
   burstFormParams: Record<string, FieldBurstsParams>
 
   // I-V curves, keyed by `${group}:${series}` — persists across navigation
@@ -1790,6 +1534,15 @@ interface AppState {
    *  sweep/viewport/filter change. */
   syncAdditionalTraces: () => Promise<void>
   openFile: (filePath: string) => Promise<void>
+  /** Close the currently-active recording across the whole app:
+   *  hits the backend's ``/api/files/close`` so its
+   *  ``_current_recording`` is reset, clears every per-recording
+   *  store slice in the calling window, and broadcasts ``file-close``
+   *  so other windows (main tree, analysis windows) clear theirs too.
+   *  Used by the batch window before kicking off a multi-file run, so
+   *  no window holds a stale file reference that batch could write
+   *  analyses into. */
+  closeFile: () => Promise<void>
   selectSweep: (group: number, series: number, sweep: number, trace?: number) => Promise<void>
   setCursors: (cursors: Partial<CursorPositions>) => void
   setLoading: (loading: boolean) => void
@@ -2527,6 +2280,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   initBackend: async () => {
+    // One-shot cleanup of legacy per-file analysis blobs from
+    // Electron prefs. Pre-sidecar versions wrote events / bursts / AP
+    // / IV / FPsp / cursor / excluded / averaged-sweep state into a
+    // single big prefs JSON keyed by file path. The averaged-sweeps
+    // entry alone embeds time + value arrays and could easily inflate
+    // prefs to hundreds of MB. Every getPreferences / setPreferences
+    // call parses + rewrites the whole file, so even after we stopped
+    // writing those keys the legacy bloat still slowed every prefs
+    // touch (which the toolbar / window code does dozens of times
+    // per session). Strip them once at app start. Idempotent.
+    void _cleanupLegacyPrefs()
     try {
       const url = window.electronAPI
         ? await window.electronAPI.getBackendUrl()
@@ -2546,6 +2310,48 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ error: 'Backend failed to start' })
     } catch (err) {
       set({ error: `Backend init error: ${err}` })
+    }
+  },
+
+  closeFile: async () => {
+    const { backendUrl, recording } = get()
+    // Best-effort backend close — silently swallow failures so a
+    // backend that never had a file open (rare race) doesn't block
+    // the rest of the cleanup.
+    if (backendUrl) {
+      try {
+        await apiFetch(backendUrl, '/api/files/close', { method: 'POST' })
+      } catch { /* ignore */ }
+    }
+    // Same set of slices that ``openFile`` resets when swapping recordings,
+    // applied here so anything keyed to the prior file's recording state
+    // can't survive the close. ``recordingMeta`` clears too so other
+    // windows don't show stale tags on a closed file.
+    set({
+      recording: null,
+      currentGroup: 0, currentSeries: 0, currentSweep: 0, currentTrace: 0,
+      traceData: null,
+      overlayEntries: [], averageTrace: null, additionalTraces: {},
+      visibleTraces: {},
+      fieldBursts: {}, burstFormParams: {},
+      ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
+      apAnalyses: {}, eventsAnalyses: {},
+      excludedSweeps: {}, selectedSweeps: {}, averagedSweeps: {},
+      currentAveragedSweep: null,
+      resistanceResult: null, resistanceResults: {},
+      recordingMeta: null, recordingMetaReady: false,
+      showOverlay: false, showAverage: false,
+    })
+    // Notify other windows so their local stores match. Each window's
+    // ``onmessage`` listener is responsible for clearing its slice
+    // when it sees ``file-close`` — see CursorPanel for the main
+    // window's adopt-handler.
+    if (recording?.filePath) {
+      try {
+        const ch = new BroadcastChannel('neurotrace-sync')
+        ch.postMessage({ type: 'file-close' })
+        ch.close()
+      } catch { /* ignore */ }
     }
   },
 
@@ -2721,137 +2527,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ recordingMetaReady: true })
       }
 
-      // Legacy hydration path — fills in any slice the sidecar
-      // didn't carry. Used both for files that have no sidecar at
-      // all (pre-v0.3.x recordings) and for files where the sidecar
-      // exists but only carries some slices (e.g. the metadata
-      // module wrote ``meta`` but the user had previously run events
-      // before the sidecar existed). Each slice's load is gated on
-      // ``sidecarPopulated`` so we never overwrite the sidecar's
-      // value with stale prefs data.
-      let migratedFromPrefs = false
-      if (recording?.filePath) {
-        if (!sidecarPopulated.bursts) {
-          const savedBursts = await _loadPersistedBursts(recording.filePath)
-          if (savedBursts) {
-            set({ fieldBursts: savedBursts })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'bursts-update', fieldBursts: savedBursts })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.burst_form) {
-          const savedBurstForm = await _loadPersistedBurstFormParams(recording.filePath)
-          if (savedBurstForm) {
-            set({ burstFormParams: savedBurstForm })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'burst-form-params-update', burstFormParams: savedBurstForm })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.iv) {
-          const savedIV = await _loadPersistedIVCurves(recording.filePath)
-          if (savedIV) {
-            set({ ivCurves: savedIV })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'iv-update', ivCurves: savedIV })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.fpsp) {
-          const savedFPsp = await _loadPersistedFPsp(recording.filePath)
-          if (savedFPsp) {
-            set({ fpspCurves: savedFPsp })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'fpsp-update', fpspCurves: savedFPsp })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.cursor_analyses) {
-          const savedCursor = await _loadPersistedCursors(recording.filePath)
-          if (savedCursor) {
-            set({ cursorAnalyses: savedCursor })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: savedCursor })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.ap) {
-          const savedAP = await _loadPersistedAP(recording.filePath)
-          if (savedAP) {
-            set({ apAnalyses: savedAP })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'ap-update', apAnalyses: savedAP })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.events) {
-          const savedEvents = await _loadPersistedEvents(recording.filePath)
-          if (savedEvents) {
-            set({ eventsAnalyses: savedEvents })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'events-update', eventsAnalyses: savedEvents })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.excluded) {
-          const savedExcluded = await _loadPersistedExcluded(recording.filePath)
-          if (savedExcluded) {
-            set({ excludedSweeps: savedExcluded })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'excluded-update', excludedSweeps: savedExcluded })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-        if (!sidecarPopulated.averaged) {
-          const savedAveraged = await _loadPersistedAveraged(recording.filePath)
-          if (savedAveraged) {
-            set({ averagedSweeps: savedAveraged })
-            migratedFromPrefs = true
-            try {
-              const ch = new BroadcastChannel('neurotrace-sync')
-              ch.postMessage({ type: 'averaged-update', averagedSweeps: savedAveraged })
-              ch.close()
-            } catch { /* ignore */ }
-          }
-        }
-
-        // Eager prefs → sidecar migration. When legacy hydration
-        // pulled anything from the prefs file, force an immediate
-        // synchronous writeSidecar so the data lands in the
-        // ``.neurotrace`` sidecar BEFORE the user can navigate
-        // away. The debounced auto-save was supposed to do this
-        // but a subscriber-timing race left some prefs data
-        // stranded — the cohort backend reads only sidecars, so it
-        // never saw those analyses.
-        if (migratedFromPrefs) {
-          await _saveSidecar(recording.filePath, get())
-        }
-      }
+      // No prefs fallback: the .neurotrace sidecar is the only
+      // persistence layer. Files without a sidecar simply load
+      // empty per-analysis state. The legacy ``saved*`` prefs
+      // helpers were removed — see the deleted block in this file
+      // for the prior shape. ``sidecarPopulated`` is no longer
+      // gating anything; left in place above so the sidecar-load
+      // diagnostics still tell the user which slices were filled.
+      void sidecarPopulated
       await get().selectSweep(0, 0, 0, 0)
     } catch (err: any) {
       set({ error: err.message, loading: false })
@@ -3149,12 +2832,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- Excluded sweeps ----
   //
-  // Persistence lives alongside other per-file slices (bursts, IV, fPSP,
-  // cursor analyses): a module-level subscribe below writes
-  // `savedExcludedSweeps[filePath]` on every change, and `openFile`
-  // restores it on file open. Cross-window sync flows through
-  // BroadcastChannel "excluded-update" — the main window's CursorPanel
-  // adopts it on receipt, exactly like the other analysis slices.
+  // Persistence lives in the .neurotrace sidecar alongside the other
+  // analysis slices. Cross-window sync flows through BroadcastChannel
+  // "excluded-update" — the main window's CursorPanel adopts it on
+  // receipt, exactly like the other analysis slices.
 
   toggleSweepExcluded: (group, series, sweep) => {
     const key = `${group}:${series}`
@@ -5002,121 +4683,12 @@ function diagFromResponse(m: any): FieldBurstsDiag | undefined {
   }
 }
 
-// Persist fieldBursts to electron preferences whenever they change, keyed
-// by the current recording's filePath. Runs in any window, but the analysis
-// window has `recording: null` so it's effectively a no-op there — only the
-// main window actually writes. Runs once on module load per window.
-let _lastPersistedBurstsRef: Record<string, FieldBurstsData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.fieldBursts === _lastPersistedBurstsRef) return
-  _lastPersistedBurstsRef = state.fieldBursts
-  if (state.recording?.filePath) {
-    _savePersistedBursts(state.recording.filePath, state.fieldBursts)
-  }
-})
-
-// All per-file persistence subscribers below skip while ``loading``
-// is true. ``openFile`` sets ``loading: true`` while it's in the
-// flush → clear-state → fetch → set-recording transition. Without
-// this gate, the ``set({ fpspCurves: {}, ... })`` clear call fired
-// the subscribers WITH state.recording.filePath still pointing at
-// the OLD file — they'd write empty data to the old file's prefs
-// entry (or schedule a phantom sidecar save with stale captured
-// path), wiping data the flush had just written. Same root cause
-// for the cohort backend seeing empty sidecars 10 minutes after
-// the user ran the analyses: the prefs subscriber wrote the
-// analyses, the sidecar one couldn't keep up across rapid file
-// switches because of the same race.
-
-// Burst-detection form state — writes whenever the user tweaks any
-// field in the FieldBurstWindow, so closing and reopening the window
-// (or restarting the app) restores the same method / params per series.
-let _lastPersistedBurstFormRef: Record<string, FieldBurstsParams> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.burstFormParams === _lastPersistedBurstFormRef) return
-  _lastPersistedBurstFormRef = state.burstFormParams
-  if (state.recording?.filePath) {
-    _savePersistedBurstFormParams(state.recording.filePath, state.burstFormParams)
-  }
-})
-
-// Same pattern for I-V curves.
-let _lastPersistedIVRef: Record<string, IVCurveData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.ivCurves === _lastPersistedIVRef) return
-  _lastPersistedIVRef = state.ivCurves
-  if (state.recording?.filePath) {
-    _savePersistedIVCurves(state.recording.filePath, state.ivCurves)
-  }
-})
-
-// fPSP persistence subscribe.
-let _lastPersistedFPspRef: Record<string, FPspData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.fpspCurves === _lastPersistedFPspRef) return
-  _lastPersistedFPspRef = state.fpspCurves
-  if (state.recording?.filePath) {
-    _savePersistedFPsp(state.recording.filePath, state.fpspCurves)
-  }
-})
-
-// Cursor-analysis persistence subscribe.
-let _lastPersistedCursorRef: Record<string, CursorAnalysisData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.cursorAnalyses === _lastPersistedCursorRef) return
-  _lastPersistedCursorRef = state.cursorAnalyses
-  if (state.recording?.filePath) {
-    _savePersistedCursors(state.recording.filePath, state.cursorAnalyses)
-  }
-})
-
-// AP-analyses persistence subscribe.
-let _lastPersistedAPRef: Record<string, APData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.apAnalyses === _lastPersistedAPRef) return
-  _lastPersistedAPRef = state.apAnalyses
-  if (state.recording?.filePath) {
-    _savePersistedAP(state.recording.filePath, state.apAnalyses)
-  }
-})
-
-// Events-analyses persistence subscribe — same shape as APs.
-let _lastPersistedEventsRef: Record<string, EventsData> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.eventsAnalyses === _lastPersistedEventsRef) return
-  _lastPersistedEventsRef = state.eventsAnalyses
-  if (state.recording?.filePath) {
-    _savePersistedEvents(state.recording.filePath, state.eventsAnalyses)
-  }
-})
-
-// Excluded-sweeps persistence subscribe.
-let _lastPersistedExcludedRef: Record<string, number[]> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.excludedSweeps === _lastPersistedExcludedRef) return
-  _lastPersistedExcludedRef = state.excludedSweeps
-  if (state.recording?.filePath) {
-    _savePersistedExcluded(state.recording.filePath, state.excludedSweeps)
-  }
-})
-
-// Averaged-sweeps persistence subscribe.
-let _lastPersistedAveragedRef: Record<string, AveragedSweep[]> | null = null
-useAppStore.subscribe((state) => {
-  if (state.loading) return
-  if (state.averagedSweeps === _lastPersistedAveragedRef) return
-  _lastPersistedAveragedRef = state.averagedSweeps
-  if (state.recording?.filePath) {
-    _savePersistedAveraged(state.recording.filePath, state.averagedSweeps)
-  }
-})
+// All per-recording analysis state (events / bursts / AP / IV / FPsp /
+// cursor / resistance + auxiliaries like excluded + averaged sweeps)
+// persists exclusively through the .neurotrace sidecar — the
+// debounced subscriber lives below this block. The legacy per-slice
+// Electron-prefs writers were removed; sidecar is the only source of
+// truth for files we open.
 
 // Cursor window UI prefs — global (not per-file). Persist via electronAPI
 // under 'cursorWindowUI' so the splitter position + selected columns survive

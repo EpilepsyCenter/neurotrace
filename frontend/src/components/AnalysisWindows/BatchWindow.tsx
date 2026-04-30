@@ -50,6 +50,11 @@ interface SidecarShape {
     resistance?: Record<string, AnyBlob[]>
   }
   forms?: Record<string, AnyBlob>
+  cursors?: {
+    baselineStart: number; baselineEnd: number
+    peakStart: number; peakEnd: number
+    fitStart: number; fitEnd: number
+  }
 }
 
 interface TargetEntry {
@@ -142,6 +147,15 @@ export interface BatchRecipe {
    *  other analyses). Empty when the recipe needs only the primary
    *  series. */
   secondaryTags: Record<string, string[]>
+  /** Snapshot of the recording's global cursor positions at template
+   *  extraction time. Currently only populated for ``resistance`` —
+   *  it's the only analysis type that doesn't store its cursor
+   *  windows on its own data blob, leaning on the top-level
+   *  ``cursors`` slot instead. ``null`` for analyses that ignore the
+   *  global cursors. */
+  cursors: { baselineStart: number; baselineEnd: number;
+             peakStart: number; peakEnd: number;
+             fitStart: number; fitEnd: number } | null
 }
 
 /** Parse an analysis-storage key into its (group, series, subtype)
@@ -241,12 +255,19 @@ export function extractRecipes(sidecar: SidecarShape): {
         }
       }
 
+      // Resistance is the only analysis that doesn't store its
+      // cursor windows on its own data blob — it leans on the
+      // recording's global cursors slot. Capture that snapshot so
+      // the batch runner can apply the same windows to target files.
+      const cursors = (type === 'resistance' && sidecar.cursors)
+        ? { ...sidecar.cursors }
+        : null
       // Emit one recipe per tag on the series — multiple tags = the
       // recipe matches any of those tags on a target file.
       for (const tag of tags) {
         recipes.push({
           tag, analysisType: type, sourceKey: key,
-          subtype, params, channel, secondaryTags,
+          subtype, params, channel, secondaryTags, cursors,
         })
       }
     }
@@ -272,7 +293,6 @@ interface Props {
 }
 
 export function BatchWindow({ backendUrl }: Props) {
-  void backendUrl  // used in later phases (folder scan, run loop)
   // Active recording in the parent window (if any). Used to pre-load
   // the currently-open file as the template — most users land here
   // right after analysing a file and want to apply it across the rest
@@ -433,6 +453,7 @@ export function BatchWindow({ backendUrl }: Props) {
     await scanTargetFolder(folder)
   }, [targetFolder, scanTargetFolder])
 
+
   /** Compute, for each (file, recipe) pair: which series in the file
    *  match the recipe's primary tag, plus secondary-series matches
    *  for cross-series analyses (FPsp LTP). Returned per-file so the
@@ -505,6 +526,24 @@ export function BatchWindow({ backendUrl }: Props) {
   // Run loop
   // ---------------------------------------------------------------
   const [running, setRunning] = useState(false)
+  // Auto-rescan when the window regains focus. Catches the common
+  // workflow where the user pops over to delete sidecars / edit tags
+  // in another window (or the OS file manager) and comes back here
+  // expecting fresh state.
+  useEffect(() => {
+    if (!targetFolder) return
+    const onFocus = () => {
+      if (document.visibilityState !== 'visible') return
+      if (running) return
+      void scanTargetFolder(targetFolder)
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
+    }
+  }, [targetFolder, running, scanTargetFolder])
   /** Soft-cancel flag — reads as a ref so the in-flight loop can
    *  observe a cancel request without re-rendering. The loop checks
    *  it between files and returns early; the current file finishes. */
@@ -517,7 +556,14 @@ export function BatchWindow({ backendUrl }: Props) {
   const [runDone, setRunDone] = useState(false)
 
   const appOpenFile = useAppStore((s) => s.openFile)
+  const appCloseFile = useAppStore((s) => s.closeFile)
   const appRunEvents = useAppStore((s) => s.runEvents)
+  const appRunAP = useAppStore((s) => s.runAP)
+  const appRunIV = useAppStore((s) => s.runIVCurve)
+  const appRunBursts = useAppStore((s) => s.runFieldBurstsOnSeries)
+  const appRunFPsp = useAppStore((s) => s.runFPsp)
+  const appRunResistanceOnSweep = useAppStore((s) => s.runResistanceOnSweep)
+  const appRunResistanceOnAverage = useAppStore((s) => s.runResistanceOnAverage)
   const eventsTemplates = useAppStore((s) => s.eventsTemplates)
 
   /** Plan the run — flatten the selection map into a list of work
@@ -550,6 +596,299 @@ export function BatchWindow({ backendUrl }: Props) {
    *  recording. We rely on the store's existing event-detection
    *  pipeline (subscriber writes results to sidecar automatically),
    *  so no manual sidecar I/O here. */
+  /** Helper — iterate the matched primary series for a recipe and
+   *  call ``inner`` for each, scaling the progress fraction so the
+   *  caller's slice is divided evenly across hits. */
+  const forEachMatch = useCallback(async (
+    item: RunPlanItem,
+    fileFraction: (frac: number) => void,
+    inner: (group: number, series: number, idx: number) => Promise<void>,
+  ) => {
+    const hits = item.match.primary
+    for (let i = 0; i < hits.length; i++) {
+      const [g, s] = hits[i].split(':').map(Number)
+      const partFrac = (frac: number) =>
+        fileFraction((i + frac) / hits.length)
+      partFrac(0)
+      // eslint-disable-next-line no-await-in-loop
+      await inner(g, s, i)
+      partFrac(1)
+    }
+  }, [])
+
+  /** AP: extract the kitchen-sink runAP args from the template's
+   *  APData blob. The store action takes them as separate fields
+   *  rather than a single params object. */
+  const runAPRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    // Sweep-range translation. Template's runMode is 'all' / 'range'
+    // / 'one'; runAP takes either an explicit list of sweep indices
+    // (range/one) or null (all). For batch we trust the template's
+    // selection — slice indices remain valid because the .pgf
+    // protocol typically matches across files of the same kind.
+    let sweepIndices: number[] | null = null
+    if (p.runMode === 'one' && typeof p.sweepOne === 'number') {
+      sweepIndices = [p.sweepOne]
+    } else if (p.runMode === 'range'
+        && typeof p.sweepFrom === 'number'
+        && typeof p.sweepTo === 'number') {
+      sweepIndices = []
+      for (let i = p.sweepFrom; i <= p.sweepTo; i++) sweepIndices.push(i)
+    }
+    const imSource = {
+      manualEnabled: !!p.manualImEnabled,
+      manualStartS: Number(p.manualImStartS ?? 0),
+      manualEndS: Number(p.manualImEndS ?? 0),
+      manualStartPA: Number(p.manualImStartPA ?? 0),
+      manualStepPA: Number(p.manualImStepPA ?? 0),
+    }
+    // Manual edits / kinetics flag — start from a clean slate per
+    // target file (manual events are file-specific) but inherit the
+    // measurement choices.
+    const manualEdits = p.manualEdits ?? { added: [], removed: [] }
+    const measureKinetics = !!(p.kinetics && Object.keys(p.kinetics).length > 0)
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      const channel = item.recipe.channel ?? 0
+      await appRunAP(
+        g, s, channel,
+        imSource, sweepIndices,
+        p.detection,
+        p.kinetics,
+        p.rheobaseMode,
+        p.rampParams ?? null,
+        manualEdits,
+        measureKinetics,
+      )
+    })
+  }, [forEachMatch, appRunAP])
+
+  /** IV: simpler — single params object the action accepts almost
+   *  verbatim, just need to drop fields the action doesn't expect. */
+  const runIVRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    const params = {
+      baselineStartS: Number(p.baselineStartS ?? 0),
+      baselineEndS: Number(p.baselineEndS ?? 0),
+      peakStartS: Number(p.peakStartS ?? 0),
+      peakEndS: Number(p.peakEndS ?? 0),
+      sweepIndices: null,                 // batch always runs all sweeps
+      manualImEnabled: !!p.manualImEnabled,
+      manualImStartS: p.manualImStartS,
+      manualImEndS: p.manualImEndS,
+      manualImStartPA: p.manualImStartPA,
+      manualImStepPA: p.manualImStepPA,
+    }
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      const channel = item.recipe.channel ?? 0
+      await appRunIV(g, s, channel, params)
+    })
+  }, [forEachMatch, appRunIV])
+
+  /** Bursts: per-series detection (no per-sweep mode for batch — too
+   *  ambiguous when sweep indices differ across files). */
+  const runBurstsRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const params = item.recipe.params as any
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      const channel = item.recipe.channel ?? 0
+      await appRunBursts(g, s, channel, params)
+    })
+  }, [forEachMatch, appRunBursts])
+
+  /** FPsp / LTP / IO / PPR. Mode is on the recipe subtype; LTP also
+   *  needs a target-file series mapped to ``seriesB`` via the
+   *  secondary tags captured at extraction. */
+  const runFPspRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    const mode = (item.recipe.subtype ?? p.mode ?? 'ltp') as any
+    // For LTP, locate the matching post-tetanus series in the target
+    // file. ``match.secondary['B']`` contains every g:s key whose
+    // tags overlap with the template's seriesB tags. Take the first
+    // hit (multiple-match disambiguation can come later).
+    let seriesB: number | null = null
+    if (mode === 'ltp') {
+      const hits = item.match.secondary['B'] ?? []
+      if (hits.length > 0) {
+        seriesB = Number(hits[0].split(':')[1])
+      }
+    }
+    const fpspParams = {
+      mode,
+      seriesB,
+      baselineStartS: Number(p.baselineStartS ?? 0),
+      baselineEndS: Number(p.baselineEndS ?? 0),
+      volleyStartS: Number(p.volleyStartS ?? 0),
+      volleyEndS: Number(p.volleyEndS ?? 0),
+      fepspStartS: Number(p.fepspStartS ?? 0),
+      fepspEndS: Number(p.fepspEndS ?? 0),
+      method: p.measurementMethod ?? p.method,
+      slopeLowPct: Number(p.slopeLowPct ?? 20),
+      slopeHighPct: Number(p.slopeHighPct ?? 80),
+      peakDirection: p.peakDirection,
+      avgN: Number(p.avgN ?? 1),
+      sweepIndices: null,
+      // Filter passthrough.
+      filterEnabled: !!p.filterEnabled,
+      filterType: p.filterType,
+      filterLow: p.filterLow,
+      filterHigh: p.filterHigh,
+      filterOrder: p.filterOrder,
+      // I-O extras.
+      ioInitialIntensity: p.ioInitialIntensity,
+      ioIntensityStep: p.ioIntensityStep,
+      ioUnit: p.ioUnit,
+      ioMetric: p.ioMetric,
+      // PPR extras.
+      volley2StartS: p.volley2StartS,
+      volley2EndS: p.volley2EndS,
+      fepsp2StartS: p.fepsp2StartS,
+      fepsp2EndS: p.fepsp2EndS,
+      pprIsiMs: p.pprIsiMs,
+      pprMetric: p.pprMetric,
+    }
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      const channel = item.recipe.channel ?? 0
+      await appRunFPsp(g, s, channel, fpspParams)
+    })
+  }, [forEachMatch, appRunFPsp])
+
+  /** Resistance: the only analysis that uses the recording's global
+   *  cursors slot rather than per-blob cursor windows. We snapshot
+   *  those at extraction time onto ``recipe.cursors``; here we push
+   *  them into the store before invoking the run action so its
+   *  in-flight read of ``state.cursors`` sees the right windows.
+   *  ``runResistanceOnSweep`` / ``OnAverage`` also read currentGroup
+   *  / currentSeries / currentTrace / currentSweep, so we set those
+   *  too. The next ``openFile`` clears all of this for the next file. */
+  const runResistanceRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    const channel = item.recipe.channel ?? 0
+    const vStep = Number(p.vStep ?? 0)
+    if (item.recipe.cursors) {
+      // Patch cursors first; the resistance action reads them at
+      // call time. Other cursor consumers (events viewer etc.) are
+      // not open during batch so the side-effect is harmless.
+      useAppStore.setState({ cursors: { ...item.recipe.cursors } })
+    }
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      // Resistance reads currentGroup/Series/Trace/Sweep from the
+      // store — set them via setState so the action picks up the
+      // right context without us having to navigate via selectSweep
+      // (which would also fetch + render trace data).
+      useAppStore.setState({
+        currentGroup: g, currentSeries: s, currentTrace: channel,
+        currentSweep: 0,
+      })
+      // Run mode → which action. 'all'/'range' average; 'one' single.
+      if (p.runMode === 'one' && typeof p.sweepOne === 'number') {
+        useAppStore.setState({ currentSweep: p.sweepOne })
+        await appRunResistanceOnSweep(vStep)
+      } else if (p.runMode === 'range'
+          && typeof p.avgFrom === 'number'
+          && typeof p.avgTo === 'number') {
+        const sweeps: number[] = []
+        for (let i = p.avgFrom; i <= p.avgTo; i++) sweeps.push(i)
+        await appRunResistanceOnAverage(vStep, sweeps)
+      } else {
+        // 'all' or anything unknown → average across every sweep.
+        await appRunResistanceOnAverage(vStep, null)
+      }
+    })
+  }, [forEachMatch, appRunResistanceOnSweep, appRunResistanceOnAverage])
+
+  /** Cursor measurements: no public store action; the cursor window
+   *  POSTs ``/api/cursors/run`` directly and writes the result back
+   *  via ``useAppStore.setState({ cursorAnalyses })``. We do the same
+   *  here. The recipe's ``params`` is the prior CursorAnalysisData
+   *  blob; its slot configs + baseline + run-mode all replay. */
+  const runCursorRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      const channel = item.recipe.channel ?? 0
+      const slotsAll = Array.isArray(p.slots) ? p.slots : []
+      const slotCount = Number(p.slotCount ?? slotsAll.length)
+      const visible = slotsAll.slice(0, slotCount)
+      // Sweep set: 'all' → null, 'one' → [sweepOne], 'range' → [from..to].
+      let sweeps: number[] | null = null
+      if (p.runMode === 'one' && typeof p.sweepOne === 'number') {
+        sweeps = [p.sweepOne]
+      } else if (p.runMode === 'range'
+          && typeof p.sweepFrom === 'number'
+          && typeof p.sweepTo === 'number') {
+        sweeps = []
+        for (let i = p.sweepFrom; i <= p.sweepTo; i++) sweeps.push(i)
+      }
+      const body = {
+        group: g, series: s, trace: channel,
+        sweeps,
+        average: !!p.average,
+        baseline: p.baseline ?? { start: 0, end: 0 },
+        baseline_method: p.baselineMethod ?? 'mean',
+        slots: visible.map((slot: any) => ({
+          enabled: !!slot.enabled,
+          peak: slot.peak ?? null,
+          fit: slot.fit ?? null,
+          fit_function: slot.fit && slot.fitFunction ? slot.fitFunction : null,
+          fit_options: slot.fitOptions ? {
+            maxfev: slot.fitOptions.maxfev,
+            ftol: slot.fitOptions.ftol,
+            xtol: slot.fitOptions.xtol,
+            initial_guess: slot.fitOptions.initialGuess ?? null,
+          } : null,
+        })),
+        compute_ap: !!p.computeAP,
+      }
+      const resp = await fetch(`${backendUrl}/api/cursors/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: 'Run failed' }))
+        throw new Error(err.detail || 'Cursor run failed')
+      }
+      const data = await resp.json()
+      // Write the new analysis blob into the store. The sidecar
+      // subscriber will persist it on the next state change.
+      const key = `${g}:${s}`
+      useAppStore.setState((state) => {
+        const prev = state.cursorAnalyses[key] ?? p
+        const next = {
+          ...prev,
+          group: g, series: s, trace: channel,
+          slotCount, slots: slotsAll,
+          baseline: body.baseline,
+          baselineMethod: body.baseline_method,
+          measurements: data.measurements ?? [],
+          traceUnit: data.trace_unit ?? '',
+          // Preserve average / runMode flags so re-opens look right.
+          average: !!p.average,
+          runMode: p.runMode ?? 'all',
+          sweepFrom: p.sweepFrom,
+          sweepTo: p.sweepTo,
+          sweepOne: p.sweepOne,
+          // AP stuff defaults off in batch.
+          computeAP: !!p.computeAP,
+          apSlope: p.apSlope ?? 20,
+        }
+        return {
+          cursorAnalyses: { ...state.cursorAnalyses, [key]: next },
+        }
+      })
+    })
+  }, [forEachMatch, backendUrl])
+
   const runEventsRecipe = useCallback(async (
     item: RunPlanItem, fileFraction: (frac: number) => void,
   ) => {
@@ -626,24 +965,44 @@ export function BatchWindow({ backendUrl }: Props) {
           ` · ${item.recipe.tag}`
         const slice = (frac: number) => setCurrentFileFraction((j + frac) / file.items.length)
         try {
-          if (item.recipe.analysisType === 'events') {
-            // eslint-disable-next-line no-await-in-loop
-            await runEventsRecipe(item, slice)
+          let didRun = true
+          switch (item.recipe.analysisType) {
+            case 'events':
+              // eslint-disable-next-line no-await-in-loop
+              await runEventsRecipe(item, slice); break
+            case 'ap':
+              // eslint-disable-next-line no-await-in-loop
+              await runAPRecipe(item, slice); break
+            case 'iv_curves':
+              // eslint-disable-next-line no-await-in-loop
+              await runIVRecipe(item, slice); break
+            case 'bursts':
+              // eslint-disable-next-line no-await-in-loop
+              await runBurstsRecipe(item, slice); break
+            case 'fpsp_curves':
+              // eslint-disable-next-line no-await-in-loop
+              await runFPspRecipe(item, slice); break
+            case 'resistance':
+              // eslint-disable-next-line no-await-in-loop
+              await runResistanceRecipe(item, slice); break
+            case 'cursor_analyses':
+              // eslint-disable-next-line no-await-in-loop
+              await runCursorRecipe(item, slice); break
+            default:
+              didRun = false
+              log.push({
+                filePath: file.entry.filePath,
+                fileName: file.entry.fileName,
+                level: 'skip',
+                message: `${rec} — unknown analysis type ${item.recipe.analysisType}`,
+              })
+          }
+          if (didRun) {
             log.push({
               filePath: file.entry.filePath,
               fileName: file.entry.fileName,
               level: 'ok',
               message: `${rec} ✓`,
-            })
-          } else {
-            // Stub for other analyses — recipe extraction works for
-            // them, runner doesn't yet. Logged so the user can see
-            // what was skipped and fill in support per type.
-            log.push({
-              filePath: file.entry.filePath,
-              fileName: file.entry.fileName,
-              level: 'skip',
-              message: `${rec} — runner not yet wired for ${item.recipe.analysisType}`,
             })
           }
         } catch (err: any) {
@@ -659,20 +1018,59 @@ export function BatchWindow({ backendUrl }: Props) {
       setCurrentFileFraction(1)
     }
 
-    // Restore the user's original active recording (best effort —
-    // failures here aren't fatal, the user can re-open manually).
-    if (originalPath) {
-      try { await appOpenFile(originalPath) } catch { /* ignore */ }
-    }
+    // No auto-restore: the confirmation modal closed the active
+    // recording explicitly before the run, and re-opening here would
+    // load a sidecar that may now contain the just-batched analyses
+    // without the user expecting it. ``originalPath`` is logged in
+    // ``log`` so the user can manually reopen if they want. The
+    // re-open path used to be here — kept the variable hoisted just
+    // so future tweaks can resurrect it without rewiring closures.
+    void originalPath
     setRunning(false)
     setRunDone(true)
     setCurrentFileName(null)
     cancelRef.current = false
-  }, [buildPlan, appOpenFile, runEventsRecipe])
+  }, [buildPlan, appOpenFile,
+      runEventsRecipe, runAPRecipe, runIVRecipe,
+      runBurstsRecipe, runFPspRecipe,
+      runResistanceRecipe, runCursorRecipe])
 
   const cancelRun = useCallback(() => {
     cancelRef.current = true
   }, [])
+
+  // Confirmation gate before kicking off a run. Shows a modal with
+  // the planned task count + a heads-up that any open file will be
+  // closed first. The "close first" step prevents two classes of
+  // problems we hit during testing:
+  //   (a) Other analysis windows (events viewer, AP, etc.) seeing
+  //       transient state per file as the loop opens/closes.
+  //   (b) Surprise inclusion of the open file when it happens to
+  //       live in the target folder + match a recipe (default-on
+  //       checkbox in the table can be missed).
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const recordingPath = useAppStore((s) => s.recording?.filePath ?? null)
+  const recordingName = useAppStore((s) => s.recording?.fileName ?? null)
+  const requestRun = useCallback(() => {
+    const plan = buildPlan()
+    if (plan.length === 0) return
+    setConfirmOpen(true)
+  }, [buildPlan])
+  const confirmAndRun = useCallback(async () => {
+    setConfirmOpen(false)
+    // Close the active recording across the whole app before
+    // starting. ``closeFile`` hits the backend's /api/files/close
+    // (so its ``_current_recording`` is null) AND broadcasts a
+    // ``file-close`` message that other windows (main TraceViewer,
+    // analysis sub-windows) listen for to clear their own copies.
+    // Without this, the BatchWindow's local setState only cleared
+    // its own renderer's store — the main window kept the file open
+    // and its sidecar got overwritten when batch happened to target it.
+    if (recordingPath) {
+      await appCloseFile()
+    }
+    await runBatch()
+  }, [recordingPath, appCloseFile, runBatch])
 
   const openCohort = useCallback(async () => {
     const api = window.electronAPI
@@ -721,10 +1119,22 @@ export function BatchWindow({ backendUrl }: Props) {
         filesPlanned={filesPlanned}
         currentFileName={currentFileName}
         currentFileFraction={currentFileFraction}
-        onRun={() => void runBatch()}
+        onRun={requestRun}
         onCancel={cancelRun}
         onOpenCohort={openCohort}
       />
+
+      {/* Pre-run confirmation modal. Surfaces the planned task count
+          and warns about closing the active recording. */}
+      {confirmOpen && (
+        <ConfirmRunModal
+          totalTasks={totalSelected}
+          totalFiles={buildPlan().length}
+          activeRecordingName={recordingName}
+          onConfirm={() => void confirmAndRun()}
+          onCancel={() => setConfirmOpen(false)}
+        />
+      )}
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12 }}>
         {!templatePath ? (
@@ -1624,6 +2034,86 @@ function RunLogPanel({ entries }: { entries: RunLogEntry[] }) {
             </ul>
           </div>
         ))}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Pre-run confirmation modal — gates the batch loop behind an explicit
+// user OK so default-checked rows can't run by surprise. Also closes
+// the active recording first so other open analysis windows don't race
+// with the loop.
+// ---------------------------------------------------------------------------
+
+function ConfirmRunModal({
+  totalTasks, totalFiles, activeRecordingName,
+  onConfirm, onCancel,
+}: {
+  totalTasks: number
+  totalFiles: number
+  activeRecordingName: string | null
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onCancel}>
+      <div style={{
+        background: 'var(--bg-primary)',
+        border: '1px solid var(--border)',
+        borderRadius: 6,
+        padding: '18px 22px',
+        maxWidth: 480, width: '90%',
+        boxShadow: '0 8px 28px rgba(0,0,0,0.35)',
+        fontSize: 'var(--font-size-base)',
+      }} onClick={(e) => e.stopPropagation()}>
+        <div style={{
+          fontSize: 'var(--font-size-lg)', fontWeight: 600,
+          marginBottom: 10,
+        }}>
+          Run batch analysis?
+        </div>
+        <div style={{ marginBottom: 12, lineHeight: 1.5 }}>
+          About to run <strong>{totalTasks}</strong> task{totalTasks === 1 ? '' : 's'}
+          {' '}across <strong>{totalFiles}</strong> file{totalFiles === 1 ? '' : 's'}.
+        </div>
+        {activeRecordingName && (
+          <div style={{
+            marginBottom: 12,
+            padding: '8px 10px',
+            border: '1px solid #ffb74d',
+            borderRadius: 4,
+            background: 'rgba(255,183,77,0.08)',
+            fontSize: 'var(--font-size-label)',
+            lineHeight: 1.5,
+          }}>
+            <strong style={{ color: '#ffb74d' }}>
+              {activeRecordingName} is currently open.
+            </strong>{' '}
+            It will be closed before the batch starts so other open
+            analysis windows don't display transient state, and to
+            avoid surprise inclusion if it lives in the target folder.
+            Any unsaved curation in other windows will be lost — close
+            this dialog and save first if needed.
+          </div>
+        )}
+        <div style={{
+          display: 'flex', justifyContent: 'flex-end', gap: 8,
+          marginTop: 6,
+        }}>
+          <button className="btn" onClick={onCancel}
+            style={{ padding: '6px 14px' }}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" onClick={onConfirm}
+            style={{ padding: '6px 14px' }} autoFocus>
+            Continue
+          </button>
+        </div>
       </div>
     </div>
   )

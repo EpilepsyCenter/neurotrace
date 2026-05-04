@@ -14,6 +14,10 @@ class BaseReader(ABC):
         ...
 
     @abstractmethod
-    def read(self, file_path: str) -> Recording:
-        """Read the file and return a Recording object."""
+    def read(self, file_path: str, **options) -> Recording:
+        """Read the file and return a Recording object.
+
+        ``options`` is reader-specific (e.g. the text reader uses it
+        to pass parse settings). Binary readers ignore it.
+        """
         ...

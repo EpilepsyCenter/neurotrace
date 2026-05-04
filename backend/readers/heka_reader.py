@@ -32,7 +32,7 @@ class HekaReader(BaseReader):
         except (IOError, OSError):
             return False
 
-    def read(self, file_path: str) -> Recording:
+    def read(self, file_path: str, **_options) -> Recording:
         from myokit.formats.heka import PatchMasterFile
 
         recording = Recording(

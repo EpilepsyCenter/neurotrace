@@ -161,6 +161,9 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.recordingMeta !== undefined) {
             useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
           }
+          if (ev.data.scaleOverrides) {
+            useAppStore.setState({ scaleOverrides: ev.data.scaleOverrides })
+          }
           // The metadata window needs full recording info (filePath +
           // groups → series labels) to drive its left-pane file list and
           // the per-series chip rows. Other analysis windows ignore this
@@ -218,6 +221,15 @@ export function AnalysisWindow({ view }: { view: string }) {
         // the main window pushing freshly-loaded prefs on file open).
         if (ev.data?.type === 'burst-form-params-update' && ev.data.burstFormParams) {
           useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
+        }
+        // Scale overrides changed elsewhere → adopt into this window's
+        // store. Analysis windows fetch their own trace data on every
+        // run / sweep change, so they don't need an explicit refetch
+        // here; the new RecordingInfo carrying corrected channels[]
+        // .units arrives via the next state-update / state-request
+        // cycle if axis labels need refreshing.
+        if (ev.data?.type === 'scale-overrides-update' && ev.data.scaleOverrides) {
+          useAppStore.setState({ scaleOverrides: ev.data.scaleOverrides })
         }
       }
 

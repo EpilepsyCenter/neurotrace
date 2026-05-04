@@ -127,6 +127,24 @@ export function TracesDropdown() {
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLElement).style.background = 'transparent'
               }}
+              onContextMenu={(e) => {
+                // Right-click → open the Scaling modal pre-focused on
+                // this row's channel. Stimulus rows don't have an
+                // override target — skip them silently.
+                if (r.index === STIMULUS_TRACE_INDEX) return
+                e.preventDefault()
+                // The dropdown only knows the *currently displayed*
+                // units, which may already reflect an active override
+                // and won't match the backend's file-units key. Pass
+                // the channel index alone; the modal scrolls to the
+                // first row that matches.
+                window.dispatchEvent(new CustomEvent('open-scaling-modal', {
+                  detail: { key: String(r.index), matchByIndex: true },
+                }))
+              }}
+              title={r.index === STIMULUS_TRACE_INDEX
+                ? undefined
+                : 'Right-click to edit channel scaling'}
             >
               <input
                 type="checkbox"

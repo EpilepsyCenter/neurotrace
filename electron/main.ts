@@ -175,9 +175,10 @@ ipcMain.handle('open-file-dialog', async (event) => {
   const result = await dialog.showOpenDialog(sender, {
     properties: ['openFile'],
     filters: [
-      { name: 'Electrophysiology Files', extensions: ['dat', 'abf', 'h5', 'nwb', 'wcp', 'axgd', 'smr'] },
+      { name: 'Electrophysiology Files', extensions: ['dat', 'abf', 'h5', 'nwb', 'wcp', 'axgd', 'smr', 'csv', 'tsv', 'txt', 'atf'] },
       { name: 'HEKA Patchmaster', extensions: ['dat'] },
       { name: 'Axon Binary', extensions: ['abf'] },
+      { name: 'Text / CSV / ATF', extensions: ['csv', 'tsv', 'txt', 'atf'] },
       { name: 'All Files', extensions: ['*'] },
     ],
   })

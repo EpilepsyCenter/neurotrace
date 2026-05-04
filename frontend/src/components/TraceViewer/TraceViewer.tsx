@@ -26,7 +26,7 @@ type DragEdge =
 type DragTarget =
   | { kind: 'edge'; key: DragEdge }
   | { kind: 'region'; startKey: DragEdge; endKey: DragEdge; anchorVal: number; origStart: number; origEnd: number }
-  | { kind: 'pan'; lastClientX: number; lastClientY: number }
+  | { kind: 'pan'; lastClientX: number; lastClientY: number; yScaleKey?: 'y' | 'y_alt' | 'stim' }
   | null
 
 /** Reads a CSS custom property from :root computed style */
@@ -85,7 +85,6 @@ export function TraceViewer() {
   // range" when the plot actually rendered in Full mode — prevents a viewport
   // change (which flips store.viewport → null synchronously) from racing ahead
   // of the data-refetch and saving the stale windowed x-range as Full.
-  const builtInFullModeRef = useRef<boolean>(false)
 
   const {
     traceData, cursors, setCursors,
@@ -134,6 +133,10 @@ export function TraceViewer() {
   const fontUI = useThemeStore((s) => s.fontFamily)
   const fontSize = useThemeStore((s) => s.fontSize)
   const monoFont = useThemeStore((s) => s.monoFont)
+  // ``colorForChannel`` reads CSS vars at build time; the plot
+  // doesn't auto-rebuild on theme updates so we subscribe to the
+  // overrides slice and join it as a string for the dep array.
+  const traceColorsKey = useThemeStore((s) => s.traceColors.join('|'))
 
   // Sync the refs every render
   cursorsRef.current = cursors
@@ -542,6 +545,9 @@ export function TraceViewer() {
   // Index of the stimulus series in the data array (when present), so we
   // can run auto-zoom only on that series' values.
   const stimSeriesIdxRef = useRef<number | null>(null)
+  // Units string + presence of the right-side alt Y axis. Drives the
+  // optional auto-zoom button next to the primary Y controls.
+  const [altScaleUnits, setAltScaleUnits] = useState<string | null>(null)
 
   // ================================================================
   // Build uPlot data arrays from current state
@@ -724,31 +730,14 @@ export function TraceViewer() {
   useEffect(() => {
     if (!containerRef.current || !traceData) return
 
-    // Save the current axis ranges before tearing down. X is persisted only
-    // when the plot we're tearing down rendered in Full mode — otherwise
-    // the "saved" x would be a viewport-window slice, which would wrongly
-    // shrink the next Full-mode view when we rebuild. Y persists in both
-    // modes (it's orthogonal to viewport).
-    const prevKey = lastSeriesRef.current
-    if (plotRef.current && prevKey) {
-      const u = plotRef.current
-      const xs = u.scales.x
-      const ys = u.scales.y
-      const stimS = u.scales.stim
-      const [pg, ps] = prevKey.split(':').map(Number)
-      const ranges: any = {}
-      if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
-        ranges.x = { min: xs.min, max: xs.max }
-      }
-      if (ys && ys.min != null && ys.max != null) {
-        ranges.y = { min: ys.min, max: ys.max }
-      }
-      if (stimS && stimS.min != null && stimS.max != null) {
-        ranges.stim = { min: stimS.min, max: stimS.max }
-      }
-      saveSeriesAxisRange(pg, ps, ranges)
-    }
-
+    // No "save the previous plot's ranges before tearing down" step
+    // here — the setScale observer (registered below) already
+    // persists every user-driven zoom / pan / auto-zoom synchronously
+    // while the plot is bound to the right (group, series, file).
+    // Saving again at teardown time is dangerous because by the
+    // moment this effect re-runs the store may already reflect the
+    // NEW file, so a save would key the OLD plot's range against
+    // the WRONG file and leak across recordings.
     lastSeriesRef.current = `${currentGroup}:${currentSeries}`
 
     // Tear down previous instance
@@ -864,7 +853,21 @@ export function TraceViewer() {
         }
       }
       scales.y_alt = {
-        range: (_u, dataMin, dataMax) => [dataMin, dataMax],
+        range: (_u, dataMin, dataMax) => {
+          const savedAlt = useAppStore.getState()
+            .getSeriesAxisRange(currentGroup, currentSeries)?.y_alt
+          if (savedAlt) {
+            const dataSpan = dataMax - dataMin
+            const savedSpan = savedAlt.max - savedAlt.min
+            const entirelyOutside = dataMax < savedAlt.min || dataMin > savedAlt.max
+            const savedTooNarrow =
+              dataSpan > 0 && savedSpan > 0 && savedSpan < 0.05 * dataSpan
+            if (!entirelyOutside && !savedTooNarrow) {
+              return [savedAlt.min, savedAlt.max]
+            }
+          }
+          return [dataMin, dataMax]
+        },
       }
       axes.push({
         stroke: cssVar('--chart-axis'),
@@ -877,6 +880,13 @@ export function TraceViewer() {
         scale: 'y_alt',
         side: 1,
       })
+      // Surface the alt-axis units to the toolbar so an extra
+      // auto-zoom button can render. Setting state during the build
+      // is safe because uPlot rebuild itself is debounced via the
+      // outer useEffect — this is essentially the rebuild commit.
+      if (altScaleUnits !== altUnits) setAltScaleUnits(altUnits || 'Alt')
+    } else if (altScaleUnits !== null) {
+      setAltScaleUnits(null)
     }
 
     if (stimIdx !== null && stimulus) {
@@ -930,6 +940,9 @@ export function TraceViewer() {
     const opts: uPlot.Options = {
       width: container.clientWidth,
       height: container.clientHeight,
+      // We render our own toolbar / coordinate tooltip — uPlot's
+      // default legend strip below the plot is not part of the UI.
+      legend: { show: false },
       cursor: {
         drag: {
           x: zoomMode,
@@ -1080,22 +1093,24 @@ export function TraceViewer() {
               return
             }
 
-            if (key === 'y') {
-              const ys = u.scales.y
+            if (key === 'y' || key === 'y_alt' || key === 'stim') {
+              const ys = u.scales[key]
               if (ys?.min == null || ys?.max == null) return
-              // Persist the Y range to the store so the range hook returns it
-              // on subsequent rebuilds (viewport scroll, etc). Without this,
-              // drag-zooms on Y would be wiped when the data next changes.
+              // Persist the range so the hook returns it on subsequent
+              // rebuilds (viewport scroll, etc). Without this, drag /
+              // zoom on either Y scale would be wiped when the data
+              // next changes.
               const EPS = 1e-6
               const cur = st.getSeriesAxisRange(currentGroup, currentSeries)
-              const sameY =
-                cur?.y &&
-                Math.abs(cur.y.min - ys.min) < EPS &&
-                Math.abs(cur.y.max - ys.max) < EPS
-              if (sameY) return
+              const prev = key === 'y' ? cur?.y : key === 'y_alt' ? cur?.y_alt : cur?.stim
+              const same =
+                prev &&
+                Math.abs(prev.min - ys.min) < EPS &&
+                Math.abs(prev.max - ys.max) < EPS
+              if (same) return
               st.saveSeriesAxisRange(currentGroup, currentSeries, {
                 ...cur,
-                y: { min: ys.min, max: ys.max },
+                [key]: { min: ys.min, max: ys.max },
               })
             }
           },
@@ -1105,48 +1120,27 @@ export function TraceViewer() {
 
     plotRef.current = new uPlot(opts, data, container)
 
-    // Remember what viewport mode this plot was built with — used by cleanup.
-    builtInFullModeRef.current = !useAppStore.getState().viewport
-
     // Scale ranges are handled by the `range` hooks in the scales config
     // above — no post-creation setScale needed. The hooks read viewport and
     // saved-range state, so the initial draw uses the correct bounds.
 
     drawCursors()
 
-    // Cleanup on unmount or before next recreation
+    // Cleanup on unmount or before next recreation.
+    //
+    // Notably we do NOT save scale ranges here. The setScale hook
+    // (above) already persists any user-driven zoom / pan to the
+    // store synchronously, while the OLD plot is still bound to
+    // the OLD file. Persisting here in cleanup is dangerous: the
+    // cleanup runs AFTER ``recording`` has been swapped to the
+    // new file, so every saveSeriesAxisRange call would key
+    // against the wrong file. That was the source of cross-file
+    // zoom leaks.
     return () => {
-      // Save ranges before cleanup — carefully.
-      //
-      // X is only saved as the Full-mode range when the plot we're tearing
-      // down was ACTUALLY rendered in Full mode. If the user just clicked
-      // "Full" (viewport flipped to null synchronously) but the plot still
-      // has a windowed x-scale on screen, saving x here would record the
-      // windowed range and the next Full-mode rebuild would wrongly apply
-      // it, shrinking the view to the old window.
-      //
-      // Y always persists regardless of viewport mode.
-      const u = plotRef.current
-      if (u) {
-        const xs = u.scales.x
-        const ys = u.scales.y
-        const stimS = u.scales.stim
-        const ranges: any = {}
-        if (builtInFullModeRef.current && xs && xs.min != null && xs.max != null) {
-          ranges.x = { min: xs.min, max: xs.max }
-        }
-        if (ys && ys.min != null && ys.max != null) {
-          ranges.y = { min: ys.min, max: ys.max }
-        }
-        if (stimS && stimS.min != null && stimS.max != null) {
-          ranges.stim = { min: stimS.min, max: stimS.max }
-        }
-        saveSeriesAxisRange(currentGroup, currentSeries, ranges)
-      }
       plotRef.current?.destroy()
       plotRef.current = null
     }
-  }, [traceData, buildSeriesData, theme, fontUI, fontSize, monoFont, zoomMode, showStimulusOverlay, stimulus]) // deliberately NOT including cursors
+  }, [traceData, buildSeriesData, theme, fontUI, fontSize, monoFont, zoomMode, showStimulusOverlay, stimulus, traceColorsKey]) // deliberately NOT including cursors
 
   // ================================================================
   // Repaint cursor canvas when cursor positions or visibility change
@@ -1393,7 +1387,12 @@ export function TraceViewer() {
       // No cursor hit and zoom mode is off — start panning the view.
       // When zoom mode is on, let uPlot handle the drag-to-zoom instead.
       e.preventDefault()
-      dragRef.current = { kind: 'pan', lastClientX: e.clientX, lastClientY: e.clientY }
+      dragRef.current = {
+        kind: 'pan',
+        lastClientX: e.clientX,
+        lastClientY: e.clientY,
+        yScaleKey: pickYScale(e.clientX, e.clientY),
+      }
     }
   }
 
@@ -1462,14 +1461,17 @@ export function TraceViewer() {
             }
           }
 
-          // Y pan — setScale observer rewrites savedY from u.scales.y, so
-          // the range hook returns the shifted range on next draw.
-          const yScale = u.scales.y
+          // Y pan — pan whichever Y-like scale (y / y_alt / stim)
+          // the cursor was closest to at mousedown. Sticky for the
+          // duration of one drag so the picked trace doesn't change
+          // if the user pans across another one.
+          const yKey = drag.yScaleKey ?? 'y'
+          const yScale = u.scales[yKey]
           if (yScale && yScale.min != null && yScale.max != null) {
             const plotH = u.bbox.height
             const yRange = yScale.max - yScale.min
             const dyVal = (dyPx / plotH) * yRange  // positive dy = move up = decrease values shown
-            u.setScale('y', { min: yScale.min + dyVal, max: yScale.max + dyVal })
+            u.setScale(yKey, { min: yScale.min + dyVal, max: yScale.max + dyVal })
           }
 
           drag.lastClientX = e.clientX
@@ -1513,7 +1515,7 @@ export function TraceViewer() {
    *                        reasoning as Full-mode X.
    *  stim                → u.setScale directly (no persistence layer).
    */
-  const applyScale = (key: 'x' | 'y' | 'stim', min: number, max: number) => {
+  const applyScale = (key: 'x' | 'y' | 'y_alt' | 'stim', min: number, max: number) => {
     const u = plotRef.current
     if (!u) return
     if (!isFinite(min) || !isFinite(max) || max <= min) return
@@ -1528,10 +1530,10 @@ export function TraceViewer() {
       u.setScale('x', { min, max })
       return
     }
-    if (key === 'y') {
+    if (key === 'y' || key === 'y_alt') {
       const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
-      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, y: { min, max } })
-      u.setScale('y', { min, max })
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, [key]: { min, max } })
+      u.setScale(key, { min, max })
       return
     }
     if (key === 'stim') {
@@ -1545,7 +1547,7 @@ export function TraceViewer() {
     u.setScale(key, { min, max })
   }
 
-  const zoomScale = (key: 'x' | 'y' | 'stim', factor: number) => {
+  const zoomScale = (key: 'x' | 'y' | 'y_alt' | 'stim', factor: number) => {
     const u = plotRef.current
     if (!u) return
     const s = u.scales[key]
@@ -1556,7 +1558,7 @@ export function TraceViewer() {
   }
 
   /** Zoom an axis centered on a specific value (for wheel zoom). */
-  const zoomScaleAt = (key: 'x' | 'y' | 'stim', factor: number, anchor: number) => {
+  const zoomScaleAt = (key: 'x' | 'y' | 'y_alt' | 'stim', factor: number, anchor: number) => {
     const u = plotRef.current
     if (!u) return
     const s = u.scales[key]
@@ -1566,8 +1568,60 @@ export function TraceViewer() {
     applyScale(key, lo, hi)
   }
 
+  /** Pick which Y-like scale a cursor position should target.
+   *
+   *  At the cursor's X, find the data point of every recorded
+   *  channel, project each to canvas Y using its own scale, and
+   *  return the scale whose canvas Y is closest to the cursor's
+   *  clientY. Falls back to ``'y'`` when ``y_alt`` doesn't exist
+   *  or the projection isn't possible. */
+  const pickYScale = (clientX: number, clientY: number): 'y' | 'y_alt' | 'stim' => {
+    const u = plotRef.current
+    if (!u || !containerRef.current) return 'y'
+    const hasAlt = !!u.scales.y_alt
+    const hasStim = !!u.scales.stim
+    if (!hasAlt && !hasStim) return 'y'
+    const rect = containerRef.current.getBoundingClientRect()
+    const cssX = clientX - rect.left
+    const cssY = clientY - rect.top
+    const dpr = devicePixelRatio || 1
+    const xVal = u.posToVal(cssX * dpr, 'x')
+    if (!isFinite(xVal)) return 'y'
+
+    // Find the index in u.data[0] (time) closest to xVal.
+    const xs = u.data[0] as number[] | undefined
+    if (!xs || xs.length === 0) return 'y'
+    // Binary search — time is monotonic.
+    let lo = 0, hi = xs.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (xs[mid] < xVal) lo = mid + 1
+      else hi = mid
+    }
+    const sampleIdx = lo
+
+    let bestKey: 'y' | 'y_alt' | 'stim' = 'y'
+    let bestDist = Infinity
+    for (let i = 1; i < u.series.length; i++) {
+      const s = u.series[i]
+      const scaleKey = (s.scale ?? 'y') as string
+      if (scaleKey !== 'y' && scaleKey !== 'y_alt' && scaleKey !== 'stim') continue
+      const arr = u.data[i] as (number | null)[] | undefined
+      if (!arr) continue
+      const v = arr[sampleIdx]
+      if (v == null || !isFinite(v)) continue
+      const cssYpx = u.valToPos(v, scaleKey, false)
+      const d = Math.abs(cssYpx - cssY)
+      if (d < bestDist) {
+        bestDist = d
+        bestKey = scaleKey as 'y' | 'y_alt' | 'stim'
+      }
+    }
+    return bestKey
+  }
+
   /** Auto-range an axis to fit its data. */
-  const autoScale = (key: 'x' | 'y' | 'stim') => {
+  const autoScale = (key: 'x' | 'y' | 'y_alt' | 'stim') => {
     const u = plotRef.current
     if (!u) return
 
@@ -1597,17 +1651,14 @@ export function TraceViewer() {
       return
     }
 
-    // Determine which data series indices belong to this scale
+    // Determine which data series indices belong to this scale.
+    // Iterate u.series so the scale assignment matches what was set
+    // in buildSeriesData (channels with same units → 'y', different
+    // units → 'y_alt', stim → 'stim').
     const indices: number[] = []
-    if (key === 'y') {
-      const stimIdx = stimSeriesIdxRef.current
-      for (let i = 1; i < u.data.length; i++) {
-        if (i === stimIdx) continue
-        indices.push(i)
-      }
-    } else {
-      const stimIdx = stimSeriesIdxRef.current
-      if (stimIdx != null) indices.push(stimIdx)
+    for (let i = 1; i < u.series.length; i++) {
+      const sScale = (u.series[i].scale ?? 'y') as string
+      if (sScale === key) indices.push(i)
     }
 
     let min = Infinity
@@ -1630,6 +1681,8 @@ export function TraceViewer() {
     const cur = st.getSeriesAxisRange(currentGroup, currentSeries) ?? {}
     if (key === 'y') {
       st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, y: { min: min - pad, max: max + pad } })
+    } else if (key === 'y_alt') {
+      st.saveSeriesAxisRange(currentGroup, currentSeries, { ...cur, y_alt: { min: min - pad, max: max + pad } })
     } else if (key === 'stim') {
       const { stim: _stim, ...rest } = cur
       st.saveSeriesAxisRange(currentGroup, currentSeries, rest)
@@ -1655,8 +1708,10 @@ export function TraceViewer() {
     const factor = e.deltaY < 0 ? 0.85 : 1.176
 
     if (e.altKey) {
-      // Option/Alt + scroll → zoom Y
-      zoomScale('y', factor)
+      // Option/Alt + scroll → zoom whichever Y scale the cursor is
+      // closest to (so a multi-channel file can zoom each channel
+      // independently — hover the trace you want and Alt+scroll).
+      zoomScale(pickYScale(e.clientX, e.clientY), factor)
     } else if (e.shiftKey && stimSeriesIdxRef.current != null) {
       // Shift + scroll → zoom Stimulus axis
       zoomScale('stim', factor)
@@ -1764,6 +1819,32 @@ export function TraceViewer() {
               title="Auto-range Y"
             >auto</button>
           </div>
+
+          {/* Alt Y-axis zoom — visible when an additional channel
+              with units that differ from the primary trace is on
+              (e.g. an mV channel alongside a pA primary). */}
+          {altScaleUnits && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>
+                {altScaleUnits}:
+              </span>
+              <button
+                className="zoom-btn"
+                onClick={() => zoomScale('y_alt', 0.8)}
+                title={`Zoom in ${altScaleUnits}`}
+              >+</button>
+              <button
+                className="zoom-btn"
+                onClick={() => zoomScale('y_alt', 1.25)}
+                title={`Zoom out ${altScaleUnits}`}
+              >−</button>
+              <button
+                className="zoom-btn"
+                onClick={() => autoScale('y_alt')}
+                title={`Auto-range ${altScaleUnits}`}
+              >auto</button>
+            </div>
+          )}
 
           {/* Stim Y-axis zoom — only when stimulus is a visible trace */}
           {showStimulusOverlay && stimulus && (

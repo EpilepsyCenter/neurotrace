@@ -1,5 +1,5 @@
 import React, { useMemo, useEffect, useRef, useState, useCallback } from 'react'
-import { useAppStore, CursorPositions, fileCloseResetSlices } from '../../stores/appStore'
+import { useAppStore, CursorPositions, fileCloseResetSlices, FilterState, RecordingInfo } from '../../stores/appStore'
 import { NumInput } from '../common/NumInput'
 
 // ---- Stable, module-level sub-components ----
@@ -180,6 +180,8 @@ export function CursorPanel() {
     showCursors, toggleCursors, resetCursorsToDefaults,
     cursorVisibility, setCursorVisibility,
     filter, setFilter,
+    filtersByChannel, setFilterFor, getFilterForChannel,
+    recording,
     zeroOffset, toggleZeroOffset,
     showBurstMarkers, toggleBurstMarkers,
     showEventMarkers, toggleEventMarkers,
@@ -257,6 +259,7 @@ export function CursorPanel() {
             averagedSweeps: state.averagedSweeps,
             resistanceResults: state.resistanceResults,
             recordingMeta: state.recordingMeta,
+            scaleOverrides: state.scaleOverrides,
             recording: state.recording ? {
               filePath: state.recording.filePath,
               fileName: state.recording.fileName,
@@ -351,6 +354,22 @@ export function CursorPanel() {
             // Stale broadcast — drop silently.
           } else {
             useAppStore.setState({ recordingMeta: ev.data.recordingMeta })
+          }
+        }
+        // Scale-overrides pushed from another window → adopt + refetch
+        // the displayed trace so the main viewer reflects the corrected
+        // units. The backend has already been told via the originating
+        // window's setScaleOverrides call. Only the main window owns
+        // recording.filePath, so it's also responsible for sidecar save.
+        if (ev.data?.type === 'scale-overrides-update' && ev.data.scaleOverrides) {
+          const ov = ev.data.scaleOverrides
+          useAppStore.setState({ scaleOverrides: ov })
+          // Refetch the current sweep so axes + values match the new
+          // scaling. selectSweep with the same indices is a clean
+          // re-fetch path that also restores cursor placement.
+          const s = useAppStore.getState()
+          if (s.recording) {
+            void s.selectSweep(s.currentGroup, s.currentSeries, s.currentSweep, s.currentTrace)
           }
         }
         // Detection filter pushed from an analysis window → adopt in the
@@ -598,45 +617,133 @@ export function CursorPanel() {
       <Divider />
 
       {/* ---- Filter ---- */}
-      <Section title="Filter">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-          <input type="checkbox" checked={filter.enabled}
-            onChange={() => setFilter({ enabled: !filter.enabled })}
-            style={{ margin: 0 }} />
-          <select value={filter.type} onChange={(e) => setFilter({ type: e.target.value as any })}
-            style={{ flex: 1 }}>
-            <option value="lowpass">Lowpass</option>
-            <option value="highpass">Highpass</option>
-            <option value="bandpass">Bandpass</option>
-          </select>
-        </div>
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-          {(filter.type === 'highpass' || filter.type === 'bandpass') && (
-            <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-              <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Low</span>
-              <NumInput value={filter.lowCutoff} min={0.1} step={1}
-                onChange={(v) => setFilter({ lowCutoff: v })} style={{ width: 55 }} />
-              <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Hz</span>
-            </div>
-          )}
-          {(filter.type === 'lowpass' || filter.type === 'bandpass') && (
-            <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-              <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>High</span>
-              <NumInput value={filter.highCutoff} min={1} step={100}
-                onChange={(v) => setFilter({ highCutoff: v })} style={{ width: 55 }} />
-              <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Hz</span>
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-            <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Order</span>
-            <NumInput value={filter.order} min={1} max={8} step={1}
-              onChange={(v) => setFilter({ order: v })} style={{ width: 40 }} />
-          </div>
-        </div>
-        <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 4 }}>
-          {filter.enabled ? 'Filter applied to display' : 'Filter disabled'}
-        </p>
-      </Section>
+      <FilterSection
+        currentGroup={currentGroup}
+        currentSeries={currentSeries}
+        currentTrace={currentTrace}
+        recording={recording}
+        filter={filter}
+        setFilter={setFilter}
+        filtersByChannel={filtersByChannel}
+        setFilterFor={setFilterFor}
+        getFilterForChannel={getFilterForChannel}
+      />
     </div>
+  )
+}
+
+interface FilterSectionProps {
+  currentGroup: number
+  currentSeries: number
+  currentTrace: number
+  recording: RecordingInfo | null
+  filter: FilterState
+  setFilter: (f: Partial<FilterState>) => void
+  filtersByChannel: Record<number, FilterState>
+  setFilterFor: (channel: number, patch: Partial<FilterState> | null) => void
+  getFilterForChannel: (channel: number) => FilterState
+}
+
+/** Filter panel — supports per-channel configs.
+ *
+ *  A channel picker selects which slot the inputs read/write. A
+ *  "Default" option targets the global ``filter`` state, which is
+ *  the fallback for any channel that has no explicit per-channel
+ *  override. The Reset button removes the per-channel entry so the
+ *  channel falls back to default again. */
+function FilterSection(props: FilterSectionProps) {
+  const {
+    currentGroup, currentSeries, currentTrace, recording,
+    filter, setFilter, filtersByChannel, setFilterFor, getFilterForChannel,
+  } = props
+
+  const channels = recording?.groups[currentGroup]?.series[currentSeries]?.channels ?? []
+
+  // Selected slot: number = channel index, 'default' = global filter.
+  const [slot, setSlot] = useState<number | 'default'>(currentTrace)
+
+  // Follow currentTrace when the user navigates channels.
+  useEffect(() => { setSlot(currentTrace) }, [currentTrace])
+
+  const active: FilterState = slot === 'default'
+    ? filter
+    : getFilterForChannel(slot)
+  const isOverride = slot !== 'default' && filtersByChannel[slot] != null
+
+  const apply = (patch: Partial<FilterState>) => {
+    if (slot === 'default') setFilter(patch)
+    else setFilterFor(slot, patch)
+  }
+
+  return (
+    <Section title="Filter">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>Channel</span>
+        <select
+          value={String(slot)}
+          onChange={(e) => {
+            const v = e.target.value
+            setSlot(v === 'default' ? 'default' : Number(v))
+          }}
+          style={{ flex: 1 }}
+        >
+          <option value="default">Default (all)</option>
+          {channels.map((c) => (
+            <option key={c.index} value={c.index}>
+              {c.label || `Ch ${c.index + 1}`}{c.units ? ` (${c.units})` : ''}
+            </option>
+          ))}
+        </select>
+        {isOverride && (
+          <button
+            className="btn"
+            onClick={() => setFilterFor(slot as number, null)}
+            title="Drop this channel's override and use the default filter"
+            style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+          >reset</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <input type="checkbox" checked={active.enabled}
+          onChange={() => apply({ enabled: !active.enabled })}
+          style={{ margin: 0 }} />
+        <select value={active.type} onChange={(e) => apply({ type: e.target.value as any })}
+          style={{ flex: 1 }}>
+          <option value="lowpass">Lowpass</option>
+          <option value="highpass">Highpass</option>
+          <option value="bandpass">Bandpass</option>
+        </select>
+      </div>
+      <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+        {(active.type === 'highpass' || active.type === 'bandpass') && (
+          <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+            <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Low</span>
+            <NumInput value={active.lowCutoff} min={0.1} step={1}
+              onChange={(v) => apply({ lowCutoff: v })} style={{ width: 55 }} />
+            <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Hz</span>
+          </div>
+        )}
+        {(active.type === 'lowpass' || active.type === 'bandpass') && (
+          <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+            <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>High</span>
+            <NumInput value={active.highCutoff} min={1} step={100}
+              onChange={(v) => apply({ highCutoff: v })} style={{ width: 55 }} />
+            <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Hz</span>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+          <span style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)' }}>Order</span>
+          <NumInput value={active.order} min={1} max={8} step={1}
+            onChange={(v) => apply({ order: v })} style={{ width: 40 }} />
+        </div>
+      </div>
+      <p style={{ fontSize: 'var(--font-size-label)', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 4 }}>
+        {active.enabled
+          ? (slot === 'default'
+              ? 'Default filter applied to channels with no override'
+              : `Filter applied to ${channels.find((c) => c.index === slot)?.label || `Ch ${(slot as number) + 1}`}`)
+          : 'Filter disabled'}
+      </p>
+    </Section>
   )
 }

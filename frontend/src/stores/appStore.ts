@@ -236,7 +236,7 @@ function _migrateEventsAnalyses(
 // Shape of the payload is flat, slice-keyed, and intentionally stable —
 // future schema changes bump ``version`` and add a migration block here.
 
-const SIDECAR_VERSION = 2
+const SIDECAR_VERSION = 3
 const SIDECAR_DEBOUNCE_MS = 1000
 
 /** Slice values to apply when the active recording is closed —
@@ -263,6 +263,8 @@ export function fileCloseResetSlices(): Record<string, unknown> {
     resistanceResult: null, resistanceResults: {},
     recordingMeta: null, recordingMetaReady: false,
     showOverlay: false, showAverage: false,
+    scaleOverrides: {},
+    filtersByChannel: {},
   }
 }
 
@@ -287,6 +289,37 @@ export interface SidecarMeta {
    *  this specific recording. Per-file rather than global so users
    *  don't accidentally turn the prompt off forever. */
   suppressTagToast?: boolean
+}
+
+/** A single user-applied scaling override for one channel of one
+ *  series. The backend multiplies raw samples by ``y_scale`` and adds
+ *  ``y_offset`` before any analysis or rendering reads them; ``units``
+ *  is what every analysis module reports back. ``note`` is free-text
+ *  user-facing breadcrumb (e.g. "imported as V, should be mV"). */
+export interface ScaleOverride {
+  units: string
+  y_scale: number
+  y_offset: number
+  note?: string
+}
+
+/** Map of overrides keyed by ``${channelIndex}|${fileUnits}``. The
+ *  composite key matters for mixed-protocol recordings (e.g. HEKA
+ *  files with both CC and VC series) where the same channel index
+ *  carries different physical signals depending on the series — the
+ *  ``fileUnits`` half disambiguates them so an override only touches
+ *  the matching subset of sweeps. The backend applies the override
+ *  to every sweep where ``(channel_index, original_units)`` matches.
+ *  See ``GET /api/files/channels`` for the authoritative key list. */
+export type ScaleOverrides = Record<string, ScaleOverride>
+
+/** Parse a ``${channel}|${fileUnits}`` override key. */
+export function parseOverrideKey(key: string): { channel: number; fileUnits: string } | null {
+  const i = key.indexOf('|')
+  if (i < 0) return null
+  const ch = Number(key.slice(0, i))
+  if (!Number.isFinite(ch)) return null
+  return { channel: ch, fileUnits: key.slice(i + 1) }
 }
 
 /** Status derived from ``SidecarMeta`` for the file-status pill:
@@ -341,6 +374,10 @@ type SidecarPayload = {
   excluded_sweeps?: Record<string, number[]>
   averaged_sweeps?: Record<string, AveragedSweep[]>
   cursors?: CursorPositions
+  /** Per-channel numeric scaling overrides applied at file-open and
+   *  on every edit. Empty / absent → recording uses file-reported
+   *  units and ``y_scale=1, y_offset=0`` (the dormant case). */
+  scale_overrides?: ScaleOverrides
 }
 
 async function _loadSidecar(filePath: string): Promise<SidecarPayload | null> {
@@ -378,6 +415,8 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
     excluded_sweeps: state.excludedSweeps,
     averaged_sweeps: state.averagedSweeps,
     cursors: state.cursors,
+    scale_overrides: Object.keys(state.scaleOverrides).length > 0
+      ? state.scaleOverrides : undefined,
   }
 }
 
@@ -407,6 +446,14 @@ async function _saveSidecar(filePath: string, state: AppState): Promise<void> {
       } catch { /* ignore — fall back to state's meta */ }
     }
     await api.writeSidecar(filePath, payload as unknown as Record<string, unknown>)
+  } catch { /* ignore */ }
+}
+
+function _broadcastScaleOverrides(scaleOverrides: ScaleOverrides) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'scale-overrides-update', scaleOverrides })
+    ch.close()
   } catch { /* ignore */ }
 }
 
@@ -1366,8 +1413,19 @@ interface AppState {
   cursors: CursorPositions
   cursorVisibility: CursorVisibility
 
+  /** User-applied per-channel scaling overrides for the current
+   *  recording. Keyed by ``${group}:${series}:${channel}``. Dormant
+   *  by default — most files load with this empty and never touch
+   *  it. See ``ScaleOverride`` for shape. */
+  scaleOverrides: ScaleOverrides
+
   // Filtering
   filter: FilterState
+  /** Per-channel filter overrides. ``filter`` is the fallback used
+   *  for any channel without an explicit entry here. UI surfaces
+   *  one filter at a time (the panel reads/writes this slot for the
+   *  channel the user has selected in the panel). */
+  filtersByChannel: Record<number, FilterState>
 
   // Zero offset subtraction
   zeroOffset: boolean
@@ -1389,6 +1447,10 @@ interface AppState {
   seriesAxisRanges: Record<string, {
     x?: { min: number; max: number }
     y?: { min: number; max: number }
+    /** Right-side Y axis used by additional channels with units that
+     *  differ from the primary trace (e.g. an mV channel alongside a
+     *  pA primary). Pans/zooms independently of ``y``. */
+    y_alt?: { min: number; max: number }
     stim?: { min: number; max: number }
   }>
 
@@ -1535,6 +1597,13 @@ interface AppState {
   resetCursorsToDefaults: () => void
   setCursorVisibility: (v: Partial<CursorVisibility>) => void
   setFilter: (f: Partial<FilterState>) => void
+  /** Set the filter for a specific channel. Pass ``null`` as patch
+   *  to drop the per-channel entry and fall back to the default
+   *  ``filter`` again. */
+  setFilterFor: (channel: number, patch: Partial<FilterState> | null) => void
+  /** Resolve the effective filter for a channel: per-channel entry
+   *  if present, otherwise the global ``filter`` fallback. */
+  getFilterForChannel: (channel: number) => FilterState
   applyFilter: () => Promise<void>
   toggleZeroOffset: () => void
   // Viewport controls
@@ -1547,11 +1616,13 @@ interface AppState {
   saveSeriesAxisRange: (group: number, series: number, ranges: {
     x?: { min: number; max: number }
     y?: { min: number; max: number }
+    y_alt?: { min: number; max: number }
     stim?: { min: number; max: number }
   }) => void
   getSeriesAxisRange: (group: number, series: number) => {
     x?: { min: number; max: number }
     y?: { min: number; max: number }
+    y_alt?: { min: number; max: number }
     stim?: { min: number; max: number }
   } | null
   // Trace visibility controls — per-series.
@@ -1562,7 +1633,7 @@ interface AppState {
    *  for the currently-viewed series. Idempotent; safe to call on every
    *  sweep/viewport/filter change. */
   syncAdditionalTraces: () => Promise<void>
-  openFile: (filePath: string) => Promise<void>
+  openFile: (filePath: string, options?: Record<string, unknown>) => Promise<void>
   /** Close the currently-active recording across the whole app:
    *  hits the backend's ``/api/files/close`` so its
    *  ``_current_recording`` is reset, clears every per-recording
@@ -1631,6 +1702,13 @@ interface AppState {
    *  delete a field. Auto-saved through the existing sidecar
    *  debounce; no explicit save needed. */
   setRecordingMeta: (patch: Partial<SidecarMeta>) => void
+
+  /** Replace the active recording's scale overrides. Pushes the full
+   *  map to the backend (``/api/files/apply_overrides``), updates
+   *  the in-store ``recording`` from the response (so per-channel
+   *  ``units`` reflect the override), broadcasts the new map, and
+   *  triggers the sidecar auto-save. Pass ``{}`` to clear all. */
+  setScaleOverrides: (overrides: ScaleOverrides) => Promise<void>
   /** Replace a single series' tag array (group is HEKA group, not
    *  experimental group). Pass an empty array to clear. */
   setSeriesTags: (group: number, series: number, tags: string[]) => void
@@ -1967,7 +2045,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   sweepStimulusUnit: '',
 
   cursorVisibility: { baseline: true, peak: true, fit: true },
+  scaleOverrides: {},
   filter: { enabled: false, type: 'bandpass', lowCutoff: 1, highCutoff: 50, order: 4 },
+  filtersByChannel: {},
   zeroOffset: false,
   currentZeroOffset: 0,
   viewport: null,
@@ -2095,11 +2175,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCursorVisibility: (v) =>
     set((s) => ({ cursorVisibility: { ...s.cursorVisibility, ...v } })),
 
+  setFilterFor: (channel, patch) => {
+    set((s) => {
+      const next = { ...s.filtersByChannel }
+      if (patch === null) {
+        delete next[channel]
+      } else {
+        const cur = next[channel] ?? s.filter
+        next[channel] = { ...cur, ...patch }
+      }
+      return { filtersByChannel: next }
+    })
+    // Trigger a refetch for the affected channel — the primary
+    // goes through ``refetchViewport``; additional channels are
+    // dropped from ``additionalTraces`` so ``syncAdditionalTraces``
+    // (which only fetches missing entries) reissues with the new
+    // filter.
+    const st = get()
+    if (!st.backendUrl) return
+    if (channel === st.currentTrace) {
+      if (st.traceData) st.refetchViewport().catch(() => { /* ignore */ })
+    } else {
+      const next = { ...st.additionalTraces }
+      if (channel in next) {
+        delete next[channel]
+        set({ additionalTraces: next })
+      }
+      st.syncAdditionalTraces().catch(() => { /* ignore */ })
+    }
+  },
+  getFilterForChannel: (channel) => {
+    const s = get()
+    return s.filtersByChannel[channel] ?? s.filter
+  },
   setFilter: (f) => {
     set((s) => ({ filter: { ...s.filter, ...f } }))
-    // Re-fetch the current trace with updated filter params (respecting viewport)
-    if (get().traceData && get().backendUrl) {
-      get().refetchViewport().catch(() => { /* ignore */ })
+    // Re-fetch the current trace with updated filter params (respecting viewport).
+    const st = get()
+    if (!st.backendUrl) return
+    if (st.traceData) st.refetchViewport().catch(() => { /* ignore */ })
+    // Default filter affects every additional channel that has no
+    // per-channel override — drop their cached data so the next
+    // syncAdditionalTraces reissues with the new filter.
+    const drops = Object.keys(st.additionalTraces)
+      .map(Number)
+      .filter((ch) => st.filtersByChannel[ch] == null)
+    if (drops.length > 0) {
+      const next = { ...st.additionalTraces }
+      for (const ch of drops) delete next[ch]
+      set({ additionalTraces: next })
+      st.syncAdditionalTraces().catch(() => { /* ignore */ })
     }
   },
 
@@ -2192,9 +2317,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   refetchViewport: async () => {
     const {
       backendUrl, currentGroup, currentSeries, currentSweep, currentTrace,
-      filter, viewport, viewportMaxPoints, zeroOffset,
+      viewport, viewportMaxPoints, zeroOffset,
     } = get()
     if (!backendUrl) return
+    const filter = get().getFilterForChannel(currentTrace)
     // Increment the sequence — when the response comes back we verify that
     // no newer fetch has been issued meanwhile. This prevents stale slider-
     // drag responses from clobbering the current view.
@@ -2223,14 +2349,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   saveSeriesAxisRange: (group, series, ranges) => {
-    const key = `${group}:${series}`
+    // Key includes the recording's file path so file-boundary
+    // collisions can't poison a fresh file's first series with the
+    // previous file's saved range. Without this, opening a second
+    // file whose first series shared indices with the previous
+    // file's last series would suppress auto-fit.
+    const fp = get().recording?.filePath ?? '__none__'
+    const key = `${fp}|${group}:${series}`
     set((s) => ({
       seriesAxisRanges: { ...s.seriesAxisRanges, [key]: ranges },
     }))
   },
 
   getSeriesAxisRange: (group, series) => {
-    const key = `${group}:${series}`
+    const fp = get().recording?.filePath ?? '__none__'
+    const key = `${fp}|${group}:${series}`
     return get().seriesAxisRanges[key] ?? null
   },
 
@@ -2274,7 +2407,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // longer visible. Fire the fetches in parallel.
     const {
       backendUrl, currentGroup, currentSeries, currentSweep, currentTrace,
-      filter, viewport, viewportMaxPoints, zeroOffset,
+      viewport, viewportMaxPoints, zeroOffset,
     } = get()
     if (!backendUrl) return
     const visible = get().getVisibleTraces(currentGroup, currentSeries)
@@ -2291,9 +2424,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (toFetch.length === 0) return
     await Promise.all(toFetch.map(async (chIdx) => {
       try {
+        // Each channel gets its own filter (see getFilterForChannel).
+        const chFilter = get().getFilterForChannel(chIdx)
         const url = traceDataUrl(
           currentGroup, currentSeries, currentSweep, chIdx,
-          filter, viewport, viewportMaxPoints, zeroOffset,
+          chFilter, viewport, viewportMaxPoints, zeroOffset,
         )
         const data = await apiFetch(backendUrl, url)
         // Check still wanted before committing (user may have toggled off meanwhile).
@@ -2385,7 +2520,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  openFile: async (filePath) => {
+  openFile: async (filePath, options) => {
     const { backendUrl } = get()
     // If there's a pending sidecar write for the CURRENT recording,
     // flush it synchronously before swapping recordings. Otherwise
@@ -2428,11 +2563,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       recordingMeta: null,
       recordingMetaReady: false,
+      scaleOverrides: {},
+      // ``seriesAxisRanges`` is keyed by file path now, so cross-
+      // file collisions are impossible — leaving previous files'
+      // entries in place lets a re-open within the same session
+      // restore the user's last zoom on that file.
+      filtersByChannel: {},
     })
     try {
       const recording = await apiFetch(backendUrl, '/api/files/open', {
         method: 'POST',
-        body: JSON.stringify({ file_path: filePath }),
+        body: JSON.stringify({ file_path: filePath, options: options ?? null }),
       })
       set({
         recording,
@@ -2545,6 +2686,34 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
           if (sidecar.forms?.resistance) {
             patch.resistanceForm = { ...get().resistanceForm, ...sidecar.forms.resistance }
+          }
+          // Apply scaling overrides to the backend BEFORE the first
+          // selectSweep fetches data, so the trace returned already
+          // reflects the corrected units. The response carries an
+          // updated RecordingInfo with rewritten channels[].units.
+          if (sidecar.scale_overrides && Object.keys(sidecar.scale_overrides).length > 0) {
+            try {
+              const ov = sidecar.scale_overrides
+              const payload: Array<{
+                channel: number; file_units: string;
+                units: string; y_scale: number; y_offset: number
+              }> = []
+              for (const [key, v] of Object.entries(ov)) {
+                const parsed = parseOverrideKey(key)
+                if (!parsed) continue
+                payload.push({
+                  channel: parsed.channel, file_units: parsed.fileUnits,
+                  units: v.units, y_scale: v.y_scale, y_offset: v.y_offset,
+                })
+              }
+              const updated = await apiFetch(get().backendUrl, '/api/files/apply_overrides', {
+                method: 'POST',
+                body: JSON.stringify({ overrides: payload }),
+              })
+              patch.recording = updated
+              patch.scaleOverrides = ov
+              post({ type: 'scale-overrides-update', scaleOverrides: ov })
+            } catch { /* ignore — file still loads with file-reported units */ }
           }
           if (sidecar.meta) {
             patch.recordingMeta = sidecar.meta
@@ -2663,7 +2832,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(patch)
 
     try {
-      const { filter, viewport: prevViewport, viewportMaxPoints, zeroOffset } = get()
+      const { viewport: prevViewport, viewportMaxPoints, zeroOffset } = get()
+      const filter = get().getFilterForChannel(trace)
       const sweepChanged =
         seriesChanged || state.currentSweep !== sweep || state.currentTrace !== trace
 
@@ -2781,9 +2951,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleAverage: () => set((s) => ({ showAverage: !s.showAverage })),
 
   addOverlaySweep: async (sweep: number) => {
-    const { backendUrl, currentGroup, currentSeries, currentTrace, overlayEntries, filter, viewport, viewportMaxPoints, zeroOffset } = get()
+    const { backendUrl, currentGroup, currentSeries, currentTrace, overlayEntries, viewport, viewportMaxPoints, zeroOffset } = get()
     if (overlayEntries.some((e) => e.sweep === sweep)) return
     try {
+      const filter = get().getFilterForChannel(currentTrace)
       const data = await apiFetch(
         backendUrl,
         traceDataUrl(currentGroup, currentSeries, sweep, currentTrace, filter, viewport, viewportMaxPoints, zeroOffset)
@@ -2817,10 +2988,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearOverlays: () => set({ overlayEntries: [], showOverlay: false }),
 
   overlayAllSweeps: async () => {
-    const { recording, currentGroup, currentSeries, currentTrace, backendUrl, filter, viewport, viewportMaxPoints, zeroOffset } = get()
+    const { recording, currentGroup, currentSeries, currentTrace, backendUrl, viewport, viewportMaxPoints, zeroOffset } = get()
     if (!recording) return
     const ser = recording.groups[currentGroup]?.series[currentSeries]
     if (!ser) return
+    const filter = get().getFilterForChannel(currentTrace)
 
     set({ loading: true })
     const entries: OverlayEntry[] = []
@@ -3172,6 +3344,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     return { recordingMeta: next }
   }),
+  setScaleOverrides: async (overrides) => {
+    const { backendUrl, recording } = get()
+    if (!recording) return
+    // Backend identifies overrides by (channel, file_units) so an
+    // override on the CC view of channel 0 doesn't bleed into the
+    // VC sweeps that share the same index. The composite key in
+    // ``overrides`` already encodes both; we just unpack here.
+    const payload: Array<{
+      channel: number; file_units: string;
+      units: string; y_scale: number; y_offset: number
+    }> = []
+    for (const [key, ov] of Object.entries(overrides)) {
+      const parsed = parseOverrideKey(key)
+      if (!parsed) continue
+      payload.push({
+        channel: parsed.channel, file_units: parsed.fileUnits,
+        units: ov.units, y_scale: ov.y_scale, y_offset: ov.y_offset,
+      })
+    }
+    try {
+      const updated = await apiFetch(backendUrl, '/api/files/apply_overrides', {
+        method: 'POST',
+        body: JSON.stringify({ overrides: payload }),
+      })
+      set({ scaleOverrides: overrides, recording: updated })
+      _broadcastScaleOverrides(overrides)
+    } catch (err: any) {
+      set({ error: err.message })
+    }
+  },
+
   setSeriesTags: (group, series, tags) => set((s) => {
     const cleaned = tags.map((t) => t.trim()).filter(Boolean)
     const meta = { ...(s.recordingMeta ?? {}) }
@@ -4772,6 +4975,7 @@ let _sidecarRefs = {
   cursors: null as any,
   resistanceForm: null as any,
   recordingMeta: null as any,
+  scaleOverrides: null as any,
 }
 useAppStore.subscribe((state) => {
   // Same gate as the per-slice prefs subscribers above: skip while
@@ -4794,6 +4998,7 @@ useAppStore.subscribe((state) => {
     cursors: state.cursors,
     resistanceForm: state.resistanceForm,
     recordingMeta: state.recordingMeta,
+    scaleOverrides: state.scaleOverrides,
   }
   // Reference-equality check across the tracked slices — avoids
   // re-scheduling on unrelated state churn (e.g. trace fetches).

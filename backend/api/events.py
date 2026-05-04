@@ -27,7 +27,8 @@ return float arrays that would be ugly in a query string.
 
 Units: callers send times in seconds; per-event values in the units
 of the recording (pA for VC, mV for CC). The backend doesn't do unit
-conversion — whatever's in ``tr.data`` stays in ``tr.data`` units.
+conversion — values pass through ``scaled(tr)`` (which applies any
+user override) and the resulting units are reported back unchanged.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from api.files import get_current_recording
+from utils.scaling import scaled
 from analysis.bursts import _apply_pre_detection_filter
 from analysis.events import (
     fit_biexponential, render_template,
@@ -78,7 +80,7 @@ def _trace_for(group: int, series: int, sweep: int, trace: int) -> tuple[np.ndar
     if trace < 0 or trace >= sw.trace_count:
         raise HTTPException(status_code=400, detail="Invalid trace index")
     tr = sw.traces[trace]
-    values = np.asarray(tr.data, dtype=float)
+    values = np.asarray(scaled(tr), dtype=float)
     sr = float(tr.sampling_rate)
     if sr <= 0:
         raise HTTPException(status_code=400, detail="Sweep has no valid sampling rate")

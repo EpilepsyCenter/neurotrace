@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from api.files import get_current_recording
 from readers.models import Recording, Series
 from utils.downsampling import lttb_downsample
+from utils.scaling import scaled
 
 router = APIRouter()
 
@@ -36,7 +37,7 @@ def average_sweeps(
         if trace_idx >= sw.trace_count:
             continue
         tr = sw.traces[trace_idx]
-        traces.append(tr.data)
+        traces.append(scaled(tr))
         ref_sr = tr.sampling_rate
         ref_units = tr.units
 
@@ -92,7 +93,7 @@ async def get_trace_data(
     tr = sw.traces[trace]
 
     time_full = tr.time_array
-    data_full = tr.data
+    data_full = scaled(tr)
     sr = tr.sampling_rate
     original_n = len(data_full)
 

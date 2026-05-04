@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from api.files import get_current_recording
+from utils.scaling import scaled
 from analysis.cursor_suite import (
     FIT_FUNCTIONS,
     fit_function_catalog,
@@ -97,7 +98,7 @@ async def run_cursor_analysis(req: CursorAnalysisRequest):
         if sampling_rate is None:
             sampling_rate = tr.sampling_rate
             unit = tr.units
-        data_vectors.append(tr.data)
+        data_vectors.append(scaled(tr))
 
     if not data_vectors or sampling_rate is None:
         raise HTTPException(status_code=400, detail="No sweeps contain data for this trace")

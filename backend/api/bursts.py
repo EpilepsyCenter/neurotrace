@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from api.files import get_current_recording
+from utils.scaling import scaled
 from analysis.bursts import BurstDetection, _apply_pre_detection_filter
 
 router = APIRouter()
@@ -61,7 +62,7 @@ async def measure_at(req: MeasureAtRequest):
         raise HTTPException(status_code=400, detail=f"Trace index {req.trace} out of range")
     tr = sw.traces[req.trace]
 
-    data = tr.data
+    data = scaled(tr)
     sr = tr.sampling_rate
     if len(data) == 0 or sr <= 0:
         raise HTTPException(status_code=400, detail="Empty sweep")

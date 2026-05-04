@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from api.files import get_current_recording
 from api.fpsp import _stim_for_series, _detect_stim_onset_s
+from utils.scaling import scaled
 from analysis.ap import run_ap, phase_plot_for_spike
 
 router = APIRouter()
@@ -190,7 +191,7 @@ async def ap_run(req: APRunRequest):
             sweeps_im.append(np.zeros(0))
             continue
         tr = sw.traces[req.trace]
-        sweeps_vm.append(np.asarray(tr.data, dtype=float))
+        sweeps_vm.append(np.asarray(scaled(tr), dtype=float))
         if sr <= 0 and tr.sampling_rate > 0:
             sr = float(tr.sampling_rate)
 
@@ -339,7 +340,7 @@ async def ap_phase_plot(
         raise HTTPException(status_code=400, detail="Trace out of range")
     tr = sw.traces[trace]
     return phase_plot_for_spike(
-        np.asarray(tr.data, dtype=float),
+        np.asarray(scaled(tr), dtype=float),
         float(tr.sampling_rate),
         peak_t_s=peak_t_s,
         window_ms=window_ms,

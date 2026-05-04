@@ -1,8 +1,53 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { useAppStore, getMetaStatus } from '../../stores/appStore'
-import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES, PaletteName } from '../../stores/themeStore'
+import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES, PaletteName, TRACE_COLOR_SLOT_COUNT } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { TracesDropdown } from '../TraceViewer/TracesDropdown'
+import { ScalingModal } from '../Scaling/ScalingModal'
+import { TextImportWizard } from '../Scaling/TextImportWizard'
+
+/** Convert a CSS colour string (any form: hex, rgb, oklch, named) to
+ *  ``#rrggbb`` so it can be assigned as the value of a native
+ *  ``<input type="color">``. Uses the canvas 2D API as a parser —
+ *  the browser does the colour conversion for us. Returns ``#888888``
+ *  if conversion fails (e.g. empty string). */
+function cssColorToHex(css: string): string {
+  if (!css) return '#888888'
+  try {
+    const ctx = document.createElement('canvas').getContext('2d')
+    if (!ctx) return '#888888'
+    ctx.fillStyle = '#000'
+    ctx.fillStyle = css
+    const norm = ctx.fillStyle  // browser-normalised
+    if (typeof norm === 'string' && norm.startsWith('#')) return norm
+    // rgb()/rgba() form — pull out three ints
+    const m = (norm as string).match(/(\d+)\D+(\d+)\D+(\d+)/)
+    if (m) {
+      const toHex = (n: string) => Number(n).toString(16).padStart(2, '0')
+      return `#${toHex(m[1])}${toHex(m[2])}${toHex(m[3])}`
+    }
+  } catch { /* fall through */ }
+  return '#888888'
+}
+
+const TRACE_COLOR_LABELS = [
+  'Channel 1', 'Channel 2', 'Channel 3', 'Channel 4', 'Channel 5', 'Stimulus',
+]
+const TRACE_COLOR_VAR_NAMES = [
+  '--trace-color-1', '--trace-color-2', '--trace-color-3',
+  '--trace-color-4', '--trace-color-5', '--stimulus-color',
+]
+
+// Extensions the text reader claims. ``.dat`` is intentionally
+// excluded — HEKA's binary .dat would match here too, but its
+// reader sits earlier in the dispatch list and we don't want to
+// blanket-trigger the wizard for those.
+const TEXT_EXTS = ['.csv', '.tsv', '.txt', '.atf']
+
+function isTextLikeExt(filePath: string): boolean {
+  const ext = filePath.toLowerCase().match(/\.[^.\\/]+$/)?.[0]
+  return ext != null && TEXT_EXTS.includes(ext)
+}
 
 const ANALYSIS_TYPES = [
   { type: 'cursors', label: 'Cursor Measurements' },
@@ -35,12 +80,34 @@ export function Toolbar() {
     fontFamily, setFontFamily,
     monoFont, setMonoFont,
     fontSize, setFontSize,
+    traceColors, setTraceColor, resetTraceColors,
   } = useThemeStore()
 
   const [showSettings, setShowSettings] = useState(false)
   const [showAnalyses, setShowAnalyses] = useState(false)
   const [showAverageMenu, setShowAverageMenu] = useState(false)
   const [showRecent, setShowRecent] = useState(false)
+  const [showScaling, setShowScaling] = useState(false)
+  const [scalingFocusKey, setScalingFocusKey] = useState<string | undefined>(undefined)
+  const [textImportPath, setTextImportPath] = useState<string | null>(null)
+
+  // Listen for right-click-on-channel events from the TracesDropdown so
+  // the same modal can open pre-focused on a specific channel row.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const ce = e as CustomEvent<{ key?: string; matchByIndex?: boolean }>
+      // ``matchByIndex`` means the caller passed only the channel
+      // index (e.g. from TracesDropdown which doesn't know file
+      // units) — prefix the value with ``index:`` so the modal can
+      // distinguish from a full composite key.
+      const k = ce.detail?.key
+      const tagged = ce.detail?.matchByIndex && k != null ? `index:${k}` : k
+      setScalingFocusKey(tagged)
+      setShowScaling(true)
+    }
+    window.addEventListener('open-scaling-modal', onOpen as EventListener)
+    return () => window.removeEventListener('open-scaling-modal', onOpen as EventListener)
+  }, [])
   const settingsRef = useRef<HTMLDivElement>(null)
   const analysesRef = useRef<HTMLDivElement>(null)
   const averageRef = useRef<HTMLDivElement>(null)
@@ -92,7 +159,17 @@ export function Toolbar() {
     } else {
       filePath = prompt('Enter file path:')
     }
-    if (filePath) await openFile(filePath)
+    if (!filePath) return
+    // Text-formatted files get the import wizard first so the user
+    // can confirm delimiter / sample rate / units before commit.
+    // Binary readers always win on extension dispatch (HEKA, ABF,
+    // Neo) so .dat / .abf / etc. skip this branch even though .dat
+    // is technically in the text-extension list.
+    if (isTextLikeExt(filePath)) {
+      setTextImportPath(filePath)
+      return
+    }
+    await openFile(filePath)
   }
 
   const handlePrevSweep = () => {
@@ -182,6 +259,7 @@ export function Toolbar() {
   })
 
   return (
+    <>
     <div className="toolbar">
       <div className="toolbar-group" style={{ position: 'relative' }} ref={recentRef}>
         <button className="btn" onClick={handleOpenFile} disabled={loading}>Open File</button>
@@ -201,7 +279,7 @@ export function Toolbar() {
               marginTop: 2,
               minWidth: 320,
               maxWidth: 600,
-              background: 'var(--bg-elevated)',
+              background: 'var(--bg-secondary)',
               border: '1px solid var(--border)',
               borderRadius: 4,
               boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
@@ -212,7 +290,7 @@ export function Toolbar() {
             <div style={{
               fontSize: 'var(--font-size-xs)',
               padding: '4px 8px',
-              color: 'var(--fg-muted)',
+              color: 'var(--text-muted)',
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
             }}>Recent files</div>
@@ -224,6 +302,10 @@ export function Toolbar() {
                   key={p}
                   onClick={async () => {
                     setShowRecent(false)
+                    if (isTextLikeExt(p)) {
+                      setTextImportPath(p)
+                      return
+                    }
                     try { await openFile(p) } catch { /* ignore */ }
                   }}
                   title={p}
@@ -236,11 +318,11 @@ export function Toolbar() {
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                   }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)' }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-tertiary)' }}
                   onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                 >
                   <span style={{ fontWeight: 500 }}>{fname}</span>
-                  <span style={{ color: 'var(--fg-muted)', marginLeft: 8, fontSize: 'var(--font-size-xs)' }}>{dir}</span>
+                  <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 'var(--font-size-xs)' }}>{dir}</span>
                 </div>
               )
             })}
@@ -252,9 +334,9 @@ export function Toolbar() {
                   cursor: 'pointer',
                   borderRadius: 3,
                   fontSize: 'var(--font-size-sm)',
-                  color: 'var(--fg-muted)',
+                  color: 'var(--text-muted)',
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-hover)' }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'var(--bg-tertiary)' }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
               >Clear recent</div>
             </div>
@@ -276,6 +358,18 @@ export function Toolbar() {
       <div className="toolbar-separator" />
 
       <div className="toolbar-group">
+        {/* Channel scaling — opens the unit-and-scaling override modal.
+            Sits immediately before "Traces" so unit fixes are reachable
+            from the same neighbourhood as the channel visibility list. */}
+        <button
+          className="btn"
+          onClick={() => { setScalingFocusKey(undefined); setShowScaling(true) }}
+          disabled={!recording}
+          title="Override per-channel units and numeric scaling"
+        >
+          Scaling
+        </button>
+
         {/* Traces dropdown — front-and-centre so users discover the
             stimulus-overlay and multi-channel visibility controls
             without hunting. */}
@@ -559,6 +653,51 @@ export function Toolbar() {
                 ))}
               </div>
             </div>
+            <div className="settings-section">
+              <div className="settings-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>Trace colors</span>
+                <button
+                  className="btn"
+                  style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
+                  onClick={resetTraceColors}
+                  disabled={traceColors.every((c) => !c)}
+                  title="Restore palette defaults for every slot"
+                >reset all</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', columnGap: 6, rowGap: 4, alignItems: 'center' }}>
+                {Array.from({ length: TRACE_COLOR_SLOT_COUNT }).map((_, i) => {
+                  const userVal = traceColors[i] || ''
+                  // When the user hasn't picked a colour, show the
+                  // palette default in the swatch by reading the CSS
+                  // variable's resolved value. Convert to hex so the
+                  // native <input type="color"> can ingest it.
+                  const cssDefault = cssColorToHex(
+                    getComputedStyle(document.documentElement)
+                      .getPropertyValue(TRACE_COLOR_VAR_NAMES[i]).trim()
+                  )
+                  const swatch = userVal || cssDefault
+                  return (
+                    <React.Fragment key={i}>
+                      <span style={{ fontSize: 'var(--font-size-xs)' }}>{TRACE_COLOR_LABELS[i]}</span>
+                      <input
+                        type="color"
+                        value={swatch}
+                        onChange={(e) => setTraceColor(i, e.target.value)}
+                        style={{ width: 28, height: 18, padding: 0, border: '1px solid var(--border)', borderRadius: 3, background: 'transparent' }}
+                        title={userVal ? 'Custom colour — click to change' : 'Palette default — click to override'}
+                      />
+                      <button
+                        className="btn"
+                        style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)', visibility: userVal ? 'visible' : 'hidden' }}
+                        onClick={() => setTraceColor(i, '')}
+                        title="Clear override"
+                      >×</button>
+                    </React.Fragment>
+                  )
+                })}
+              </div>
+            </div>
+
             <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 4, fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>
               <div style={{ fontFamily: 'var(--font-ui)', marginBottom: 2 }}>UI preview: The quick brown fox</div>
               <div style={{ fontFamily: 'var(--font-mono)' }}>Code: fn(x) =&gt; x * 2</div>
@@ -567,6 +706,23 @@ export function Toolbar() {
         )}
       </div>
     </div>
+    {showScaling && (
+      <ScalingModal
+        focusKey={scalingFocusKey}
+        onClose={() => setShowScaling(false)}
+      />
+    )}
+    {textImportPath && (
+      <TextImportWizard
+        filePath={textImportPath}
+        onClose={async (opts) => {
+          const fp = textImportPath
+          setTextImportPath(null)
+          if (opts && fp) await openFile(fp, opts)
+        }}
+      />
+    )}
+    </>
   )
 }
 

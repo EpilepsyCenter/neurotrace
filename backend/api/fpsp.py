@@ -18,6 +18,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from api.files import get_current_recording
+from utils.scaling import scaled
 from readers.heka_native.pgf import PgfStimulation, PgfChannel
 # Reuse the pre-detection filter helper from the burst module — same
 # feature set (bandpass / lowpass / highpass, zero-phase Butterworth).
@@ -329,7 +330,7 @@ def _run_on_series(
             # would be mathematically equivalent but loses this property
             # if the filter is nonlinear-ish at the edges). Helper reads
             # the same cfg keys bursts.py's endpoint uses.
-            data_arr = _apply_pre_detection_filter(tr.data, tr.sampling_rate, cfg)
+            data_arr = _apply_pre_detection_filter(scaled(tr), tr.sampling_rate, cfg)
             arrays.append(data_arr)
             sr = tr.sampling_rate
             response_unit = tr.units
@@ -470,7 +471,7 @@ async def bin_waveform(
         if trace >= sw.trace_count:
             continue
         tr = sw.traces[trace]
-        data_arr = _apply_pre_detection_filter(tr.data, tr.sampling_rate, filt_cfg)
+        data_arr = _apply_pre_detection_filter(scaled(tr), tr.sampling_rate, filt_cfg)
         arrays.append(data_arr)
         sr = tr.sampling_rate
         units = tr.units

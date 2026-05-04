@@ -33,12 +33,21 @@ export const MONO_FONTS = [
 
 export const FONT_SIZES = [11, 12, 13, 14, 15] as const
 
+/** Slots: indices 0..4 → ``--trace-color-1`` .. ``--trace-color-5``,
+ *  index 5 → ``--stimulus-color``. Empty string = inherit the
+ *  stylesheet default (so the user's customisation can be cleared
+ *  per-slot without losing the others). */
+export const TRACE_COLOR_SLOT_COUNT = 6
+
 interface ThemeState {
   theme: ThemeName
   palette: PaletteName
   fontFamily: string
   monoFont: string
   fontSize: number
+  /** Per-slot custom colours overlaid on the palette. Length 6 —
+   *  see ``TRACE_COLOR_SLOT_COUNT``. */
+  traceColors: string[]
 
   setTheme: (t: ThemeName) => void
   toggleTheme: () => void
@@ -46,6 +55,10 @@ interface ThemeState {
   setFontFamily: (f: string) => void
   setMonoFont: (f: string) => void
   setFontSize: (s: number) => void
+  /** Set the colour at one slot. Pass empty string to clear. */
+  setTraceColor: (slot: number, color: string) => void
+  /** Reset every slot to stylesheet defaults. */
+  resetTraceColors: () => void
   initTheme: () => Promise<void>
 }
 
@@ -57,6 +70,7 @@ interface PersistedPrefs {
   fontFamily?: string
   monoFont?: string
   fontSize?: number
+  traceColors?: string[]
 }
 
 /** Load preferences synchronously — tries Electron's preload-read file first,
@@ -94,6 +108,7 @@ function savePrefs(state: ThemeState) {
     fontFamily: state.fontFamily,
     monoFont: state.monoFont,
     fontSize: state.fontSize,
+    traceColors: state.traceColors,
   }
 
   // Always write to localStorage — lets the next sync-init pick it up
@@ -133,6 +148,17 @@ function applyToDOM(state: ThemeState) {
   root.style.setProperty('--font-size-sm', `${state.fontSize - 1}px`)
   root.style.setProperty('--font-size-xs', `${state.fontSize - 2}px`)
   root.style.setProperty('--font-size-label', `${state.fontSize - 3}px`)
+
+  // Trace-color overrides. Slot indices 0..4 map to ``--trace-color-N``,
+  // slot 5 maps to ``--stimulus-color``. An empty entry removes the
+  // inline override so the palette stylesheet's value cascades.
+  const TRACE_VARS = ['--trace-color-1', '--trace-color-2', '--trace-color-3',
+                      '--trace-color-4', '--trace-color-5', '--stimulus-color']
+  for (let i = 0; i < TRACE_VARS.length; i++) {
+    const v = state.traceColors[i] ?? ''
+    if (v) root.style.setProperty(TRACE_VARS[i], v)
+    else root.style.removeProperty(TRACE_VARS[i])
+  }
 }
 
 const defaults = {
@@ -146,6 +172,7 @@ const defaults = {
   fontFamily: '',
   monoFont: '',
   fontSize: 13,
+  traceColors: Array(TRACE_COLOR_SLOT_COUNT).fill('') as string[],
 }
 
 // Legacy font-pref values that used to be the pre-Telegraph defaults.
@@ -186,12 +213,23 @@ function validateMonoFont(f: unknown): string {
   return f
 }
 
+function validateTraceColors(arr: unknown): string[] {
+  const out = Array(TRACE_COLOR_SLOT_COUNT).fill('') as string[]
+  if (!Array.isArray(arr)) return out
+  for (let i = 0; i < TRACE_COLOR_SLOT_COUNT; i++) {
+    const v = arr[i]
+    if (typeof v === 'string') out[i] = v
+  }
+  return out
+}
+
 export const useThemeStore = create<ThemeState>((set, get) => ({
   theme: validateTheme(saved.theme),
   palette: validatePalette(saved.palette),
   fontFamily: validateFontFamily(saved.fontFamily),
   monoFont: validateMonoFont(saved.monoFont),
   fontSize: validateFontSize(saved.fontSize),
+  traceColors: validateTraceColors(saved.traceColors),
 
   setTheme: (t) => {
     set({ theme: t })
@@ -224,6 +262,19 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     const s = get(); applyToDOM(s); savePrefs(s)
   },
 
+  setTraceColor: (slot, color) => {
+    if (slot < 0 || slot >= TRACE_COLOR_SLOT_COUNT) return
+    const next = [...get().traceColors]
+    next[slot] = color
+    set({ traceColors: next })
+    const s = get(); applyToDOM(s); savePrefs(s)
+  },
+
+  resetTraceColors: () => {
+    set({ traceColors: Array(TRACE_COLOR_SLOT_COUNT).fill('') })
+    const s = get(); applyToDOM(s); savePrefs(s)
+  },
+
   /**
    * Called once on app mount. Applies current values (from sync localStorage)
    * to the DOM immediately, then asynchronously hydrates from the Electron
@@ -242,6 +293,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
         fontFamily: validateFontFamily(filePrefs.fontFamily),
         monoFont: validateMonoFont(filePrefs.monoFont),
         fontSize: validateFontSize(filePrefs.fontSize),
+        traceColors: validateTraceColors(filePrefs.traceColors),
       })
       const s = get()
       applyToDOM(s)
@@ -253,6 +305,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
           fontFamily: s.fontFamily,
           monoFont: s.monoFont,
           fontSize: s.fontSize,
+          traceColors: s.traceColors,
         }))
       } catch { /* ignore */ }
     }

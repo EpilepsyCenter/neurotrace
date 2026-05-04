@@ -469,9 +469,19 @@ export const useTraceExportStore = create<TraceExportState>((set, get) => ({
     return id
   },
   removeAxis: (id) => set({ axes: get().axes.filter((a) => a.id !== id) }),
-  updateAxis: (id, patch) => set({
-    axes: get().axes.map((a) => (a.id === id ? { ...a, ...patch } : a)),
-  }),
+  updateAxis: (id, patch) => {
+    set({
+      axes: get().axes.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    })
+    // When the user edits manual axis limits or toggles auto, drop
+    // the live drag/zoom range for this axis so the new manual
+    // numbers actually take effect on the next draw. Without this,
+    // the range hook returns the stale live range (which wins over
+    // manual) and the user's typed values appear ignored.
+    if ('min' in patch || 'max' in patch || 'auto_limits' in patch) {
+      delete currentViewRef.ranges[id]
+    }
+  },
 
   setScalebar: (patch) => set({ scalebar: { ...get().scalebar, ...patch } }),
   setLegend: (patch) => set({ legend: { ...get().legend, ...patch } }),

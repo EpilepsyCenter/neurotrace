@@ -38,7 +38,7 @@ class HekaNativeReader(BaseReader):
         except (IOError, OSError):
             return False
 
-    def read(self, file_path: str) -> Recording:
+    def read(self, file_path: str, **_options) -> Recording:
         with open(file_path, 'rb') as f:
             data = f.read()
 

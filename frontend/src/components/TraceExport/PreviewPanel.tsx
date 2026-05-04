@@ -295,11 +295,15 @@ export function PreviewPanel({ backendUrl }: Props) {
         // auto-range.
         const yScale: any = {
           range: (_self: uPlot, dataMin: number, dataMax: number) => {
+            // Live drag/zoom wins. Manual limits act as the initial
+            // seed only — once the user pans, the live range takes
+            // over. ``updateAxis`` clears the live range when the
+            // user edits manual values so a fresh number sticks.
+            const cur = savedRangesRef.ranges[scaleKey]
+            if (cur) return [cur.min, cur.max] as [number, number]
             if (manualMin != null && manualMax != null) {
               return [manualMin, manualMax] as [number, number]
             }
-            const cur = savedRangesRef.ranges[scaleKey]
-            if (cur) return [cur.min, cur.max] as [number, number]
             const span = dataMax - dataMin
             const pad = span > 0 ? span * 0.05 : 1
             return [dataMin - pad, dataMax + pad] as [number, number]
@@ -421,7 +425,20 @@ export function PreviewPanel({ backendUrl }: Props) {
 
       // ---- Drag handling (trace-grab vs pan) ----
       type DragState =
-        | { kind: 'trace'; itemId: string; startClientY: number; startOffset: number; pxPerY: number }
+        | {
+            kind: 'trace';
+            itemId: string;
+            startClientY: number;
+            startOffset: number;
+            pxPerY: number;
+            lastClientY: number;
+            /** Snapshot of the data arrays for series owned by this
+             *  item — keyed by series index. onMove rewrites these
+             *  via u.setData with the live offset delta applied so
+             *  the plot doesn't have to rebuild (which would tear
+             *  down pointer capture and abort the drag). */
+            snapshot: Map<number, number[]>;
+          }
         | { kind: 'pan'; startClientX: number; startClientY: number; xMin: number; xMax: number; perAxisY: Record<string, [number, number]> }
       let drag: DragState | null = null
 
@@ -472,12 +489,23 @@ export function PreviewPanel({ backendUrl }: Props) {
             if (ax.min == null || ax.max == null) return
             const yRange = (ax.max as number) - (ax.min as number)
             const h = u.bbox.height / (window.devicePixelRatio || 1)
+            // Snapshot every series belonging to this item before
+            // the drag begins. onMove rewrites these via setData
+            // and the store is only updated on pointerup.
+            const snapshot = new Map<number, number[]>()
+            for (let i = 1; i < u.series.length; i++) {
+              if (seriesItemIdRef.current[i] !== hit.id) continue
+              const arr = u.data[i] as (number | null)[] | undefined
+              if (arr) snapshot.set(i, Array.from(arr) as number[])
+            }
             drag = {
               kind: 'trace',
               itemId: hit.id,
               startClientY: ev.clientY,
               startOffset: hit.y_offset,
               pxPerY: h / yRange,
+              lastClientY: ev.clientY,
+              snapshot,
             }
             over.setPointerCapture(ev.pointerId)
             over.style.cursor = 'ns-resize'
@@ -509,11 +537,25 @@ export function PreviewPanel({ backendUrl }: Props) {
       const onPointerMove = (ev: PointerEvent) => {
         if (!drag) return
         if (drag.kind === 'trace') {
+          drag.lastClientY = ev.clientY
           const dyPx = ev.clientY - drag.startClientY
-          const dyData = -dyPx / drag.pxPerY
-          useTraceExportStore.getState().updateItem(drag.itemId, {
-            y_offset: drag.startOffset + dyData,
-          })
+          const delta = -dyPx / drag.pxPerY
+          // Rewrite the dragged item's series in place with the live
+          // offset delta. Skip auto-rescale (false) so the user's
+          // current Y zoom isn't reset on every mousemove.
+          const newData: any[] = [u.data[0]]
+          for (let i = 1; i < u.data.length; i++) {
+            const base = drag.snapshot.get(i)
+            if (base) {
+              newData.push(base.map((v) => Number.isFinite(v) ? v + delta : v))
+            } else {
+              newData.push(u.data[i])
+            }
+          }
+          u.setData(newData as any, false)
+          // Force the path cache to rebuild — without this uPlot
+          // can keep painting the previous snapshot during the drag.
+          u.redraw(true)
           return
         }
         // pan
@@ -539,6 +581,18 @@ export function PreviewPanel({ backendUrl }: Props) {
 
       const onPointerUp = (ev: PointerEvent) => {
         if (!drag) return
+        // Commit the final y_offset to the store. The natural
+        // rebuild that follows is fine — the drag has ended so
+        // there's no pointer capture to lose.
+        if (drag.kind === 'trace') {
+          const dyPx = drag.lastClientY - drag.startClientY
+          const dyData = -dyPx / drag.pxPerY
+          if (dyData !== 0) {
+            useTraceExportStore.getState().updateItem(drag.itemId, {
+              y_offset: drag.startOffset + dyData,
+            })
+          }
+        }
         drag = null
         try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
         over.style.cursor = ''

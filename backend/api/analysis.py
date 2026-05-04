@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from api.files import get_current_recording
 from api.traces import average_sweeps
+from utils.scaling import scaled
 
 # Import all analysis modules to trigger registration
 import analysis.cursors
@@ -57,7 +58,7 @@ async def run_analysis(req: AnalysisRequest):
 
     try:
         analysis = get_analysis(req.analysis_type)
-        result = analysis.run(tr.data, tr.sampling_rate, params)
+        result = analysis.run(scaled(tr), tr.sampling_rate, params)
         return {"measurement": result, "analysis_type": req.analysis_type}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis error: {e}")
@@ -168,7 +169,7 @@ async def run_batch_analysis(req: BatchAnalysisRequest):
 
         tr = sw.traces[req.trace]
         try:
-            result = analysis.run(tr.data, tr.sampling_rate, params)
+            result = analysis.run(scaled(tr), tr.sampling_rate, params)
             result["sweep_index"] = sweep_idx
             results.append(result)
         except Exception as e:

@@ -17,6 +17,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from api.files import get_current_recording
+from utils.scaling import scaled
 from readers.heka_native.pgf import PgfStimulation, PgfChannel
 
 router = APIRouter()
@@ -179,7 +180,7 @@ async def run_iv(
         tr = sw.traces[trace]
         response_unit = tr.units
         sr = tr.sampling_rate
-        data = tr.data
+        data = scaled(tr)
         n = len(data)
         if n == 0:
             continue

@@ -16,7 +16,7 @@ class AbfReader(BaseReader):
     def can_read(file_path: str) -> bool:
         return file_path.lower().endswith(".abf")
 
-    def read(self, file_path: str) -> Recording:
+    def read(self, file_path: str, **_options) -> Recording:
         import pyabf
 
         abf = pyabf.ABF(file_path, loadData=True)

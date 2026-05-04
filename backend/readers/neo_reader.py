@@ -37,7 +37,7 @@ class NeoReader(BaseReader):
         ext = os.path.splitext(file_path)[1].lower()
         return ext in NEO_FORMAT_MAP
 
-    def read(self, file_path: str) -> Recording:
+    def read(self, file_path: str, **_options) -> Recording:
         import neo
 
         ext = os.path.splitext(file_path)[1].lower()

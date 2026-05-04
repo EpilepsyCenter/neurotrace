@@ -12,20 +12,18 @@ import { NumInput } from '../common/NumInput'
 // in the axis-range boxes kept dropping on the second keystroke. Hoisting
 // these out fixes it.
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/** Section wraps a labelled block. ``accent`` colour-codes the title
+ *  + left edge — used to map cursor sections to their cursor token
+ *  (baseline = green, peak = orange, fit = purple). */
+function Section({
+  title, accent, children,
+}: { title: string; accent?: string; children: React.ReactNode }) {
+  const style = accent ? { ['--section-accent' as string]: accent } : undefined
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div className={`cp-section ${accent ? 'cp-section-accent' : ''}`} style={style}>
       {title && (
-        <div
-          style={{
-            fontSize: 'var(--font-size-label)',
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: 0.4,
-            color: 'var(--text-muted)',
-            marginBottom: 6,
-          }}
-        >
+        <div className="cp-section-title">
+          <span className="cp-section-tick" />
           {title}
         </div>
       )}
@@ -35,23 +33,18 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function Divider() {
-  return (
-    <div
-      style={{
-        borderTop: '1px solid var(--border)',
-        margin: '6px 0 14px 0',
-      }}
-      aria-hidden="true"
-    />
-  )
+  return <div className="cp-divider" aria-hidden="true" />
 }
 
+/** Readout — label left, mono value right (tabular figures). The
+ *  primary measurement display surface in the cursor panel. */
 function Readout({ label, value, unit }: { label: string; value: number; unit: string }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-      <span style={{ color: 'var(--text-muted)', fontSize: 'var(--font-size-xs)' }}>{label}</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)' }}>
-        {value.toFixed(2)} {unit}
+    <div className="cp-readout">
+      <span className="cp-readout-label">{label}</span>
+      <span className="cp-readout-value">
+        <span className="num">{value.toFixed(2)}</span>
+        {unit && <span className="cp-readout-unit">{unit}</span>}
       </span>
     </div>
   )

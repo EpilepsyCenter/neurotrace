@@ -32,6 +32,14 @@ try {
 contextBridge.exposeInMainWorld('electronAPI', {
   syncPreferences: syncPrefs,
 
+  // Synchronous platform tag — exposed at preload time so the renderer
+  // can set the `data-platform` body attribute before first paint and
+  // avoid a flash of wrong toolbar layout on macOS.
+  platform: platform(),
+
+  openExternal: (url: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('open-external', url),
+
   getBackendUrl: (): Promise<string> => ipcRenderer.invoke('get-backend-url'),
   openFileDialog: (): Promise<string | null> => ipcRenderer.invoke('open-file-dialog'),
   openFolderDialog: (defaultPath?: string): Promise<string | null> =>

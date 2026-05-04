@@ -15,6 +15,7 @@ import { MetadataWindow } from './components/AnalysisWindows/MetadataWindow'
 import { BatchWindow } from './components/AnalysisWindows/BatchWindow'
 import { CohortWindow } from './components/AnalysisWindows/CohortWindow'
 import { TraceExportWindow } from './components/AnalysisWindows/TraceExportWindow'
+import { Manual } from './components/Manual/Manual'
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -403,6 +404,8 @@ export function AnalysisWindow({ view }: { view: string }) {
           <BatchWindow
             backendUrl={backendUrl}
           />
+        ) : view === 'manual' ? (
+          <Manual />
         ) : (
           <div style={{
             display: 'flex',

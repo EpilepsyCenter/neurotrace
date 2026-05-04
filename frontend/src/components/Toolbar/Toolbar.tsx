@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { useAppStore, getMetaStatus } from '../../stores/appStore'
+import { useAppStore } from '../../stores/appStore'
 import { useThemeStore, FONT_FAMILIES, MONO_FONTS, FONT_SIZES, PaletteName, TRACE_COLOR_SLOT_COUNT } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { Icon } from '../common/Icon'
 import { TracesDropdown } from '../TraceViewer/TracesDropdown'
 import { ScalingModal } from '../Scaling/ScalingModal'
 import { TextImportWizard } from '../Scaling/TextImportWizard'
@@ -107,6 +108,19 @@ export function Toolbar() {
     }
     window.addEventListener('open-scaling-modal', onOpen as EventListener)
     return () => window.removeEventListener('open-scaling-modal', onOpen as EventListener)
+  }, [])
+
+  // Welcome-surface drag-drop / Open click can produce a text-format
+  // path; route it through the existing import wizard instead of
+  // openFile() so users still get delimiter/units confirmation.
+  useEffect(() => {
+    const onWelcomeText = (e: Event) => {
+      const ce = e as CustomEvent<{ filePath?: string }>
+      const fp = ce.detail?.filePath
+      if (fp) setTextImportPath(fp)
+    }
+    window.addEventListener('welcome-open-text', onWelcomeText as EventListener)
+    return () => window.removeEventListener('welcome-open-text', onWelcomeText as EventListener)
   }, [])
   const settingsRef = useRef<HTMLDivElement>(null)
   const analysesRef = useRef<HTMLDivElement>(null)
@@ -262,14 +276,16 @@ export function Toolbar() {
     <>
     <div className="toolbar">
       <div className="toolbar-group" style={{ position: 'relative' }} ref={recentRef}>
-        <button className="btn" onClick={handleOpenFile} disabled={loading}>Open File</button>
+        <button className="btn" onClick={handleOpenFile} disabled={loading}>
+          <Icon name="folder" />
+          Open File
+        </button>
         <button
-          className="btn"
+          className="btn btn-compact"
           onClick={() => setShowRecent((v) => !v)}
           disabled={loading || recentFiles.length === 0}
           title={recentFiles.length === 0 ? 'No recent files' : 'Recent files'}
-          style={{ padding: '4px 6px' }}
-        >▾</button>
+        ><Icon name="chevron-down" size={12} /></button>
         {showRecent && recentFiles.length > 0 && (
           <div
             style={{
@@ -348,11 +364,15 @@ export function Toolbar() {
 
       <div className="toolbar-group">
         <span className="toolbar-label">Sweep:</span>
-        <button className="btn" onClick={handlePrevSweep} disabled={!recording || currentSweep === 0} title="Previous (Left)">&larr;</button>
-        <span style={{ minWidth: 60, textAlign: 'center', fontSize: 'var(--font-size-sm)' }}>
+        <button className="btn btn-compact" onClick={handlePrevSweep} disabled={!recording || currentSweep === 0} title="Previous (Left)">
+          <Icon name="arrow-left" />
+        </button>
+        <span className="num" style={{ minWidth: 64, textAlign: 'center', fontSize: 'var(--fs-sm)', color: 'var(--text-secondary)' }}>
           {recording ? `${currentSweep + 1} / ${totalSweeps}` : '-- / --'}
         </span>
-        <button className="btn" onClick={handleNextSweep} disabled={!recording || currentSweep >= totalSweeps - 1} title="Next (Right)">&rarr;</button>
+        <button className="btn btn-compact" onClick={handleNextSweep} disabled={!recording || currentSweep >= totalSweeps - 1} title="Next (Right)">
+          <Icon name="arrow-right" />
+        </button>
       </div>
 
       <div className="toolbar-separator" />
@@ -367,6 +387,7 @@ export function Toolbar() {
           disabled={!recording}
           title="Override per-channel units and numeric scaling"
         >
+          <Icon name="ruler" />
           Scaling
         </button>
 
@@ -375,7 +396,10 @@ export function Toolbar() {
             without hunting. */}
         <TracesDropdown />
 
-        <button className={`btn ${showOverlay ? 'btn-primary' : ''}`} onClick={handleOverlayAll} disabled={!recording || loading} title="Overlay all sweeps (O)">Overlay</button>
+        <button className={`btn ${showOverlay ? 'btn-primary' : ''}`} onClick={handleOverlayAll} disabled={!recording || loading} title="Overlay all sweeps (O)">
+          <Icon name="layers" />
+          Overlay
+        </button>
 
         {/* Average: click shows a popover to pick the sweeps to average.
             Result is written into the tree as a virtual sweep and
@@ -387,7 +411,9 @@ export function Toolbar() {
             disabled={!recording || loading}
             title="Create an averaged trace from all / selected / range of sweeps (A)"
           >
-            Average {'\u25BE'}
+            <Icon name="sigma" />
+            Average
+            <Icon name="chevron-down" size={11} />
           </button>
 
           {showAverageMenu && (
@@ -492,6 +518,7 @@ export function Toolbar() {
         }}
         title="Open the metadata window to tag recordings (works without an open file)"
       >
+        <Icon name="tag" />
         Tags…
       </button>
 
@@ -503,7 +530,9 @@ export function Toolbar() {
           disabled={!recording}
           title="Open an analysis window"
         >
-          Analyses {'\u25BE'}
+          <Icon name="chart" />
+          Analyses
+          <Icon name="chevron-down" size={11} />
         </button>
 
         {showAnalyses && (
@@ -548,6 +577,7 @@ export function Toolbar() {
         title="Replay a template's analyses across a folder of tagged recordings"
         style={{ marginLeft: 6 }}
       >
+        <Icon name="grid" />
         Batch…
       </button>
 
@@ -564,6 +594,7 @@ export function Toolbar() {
         title="Aggregate per-cell metrics across a folder of recordings"
         style={{ marginLeft: 4 }}
       >
+        <Icon name="users" />
         Cohort…
       </button>
 
@@ -579,30 +610,32 @@ export function Toolbar() {
         title="Build publication-ready figures from sweeps across one or more recordings"
         style={{ marginLeft: 4 }}
       >
+        <Icon name="download" />
         Export Traces…
       </button>
-
-      <div className="toolbar-separator" />
-
-      <div className="toolbar-group" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {recording && <MetaStatusDot />}
-        <span className="toolbar-label">{recording ? recording.fileName : 'No file loaded'}</span>
-        {recording && <FileTagChips />}
-      </div>
 
       {loading && (
         <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 'var(--font-size-sm)' }}>Loading...</span>
       )}
 
+      {/* Help — opens the keyboard shortcut + manual modal */}
+      <button
+        className="btn btn-compact"
+        onClick={() => window.dispatchEvent(new CustomEvent('open-help'))}
+        title="Help — shortcuts and manual (?)"
+        style={{ marginLeft: 'auto' }}
+      >
+        <Icon name="help" size={15} />
+      </button>
+
       {/* Settings gear */}
-      <div style={{ marginLeft: 'auto', position: 'relative' }} ref={settingsRef}>
+      <div style={{ position: 'relative' }} ref={settingsRef}>
         <button
-          className="btn"
+          className="btn btn-compact"
           onClick={() => setShowSettings(!showSettings)}
           title="Settings"
-          style={{ fontSize: 15, padding: '3px 8px', lineHeight: 1 }}
         >
-          {'\u2699'}
+          <Icon name="gear" size={15} />
         </button>
 
         {showSettings && (
@@ -614,14 +647,18 @@ export function Toolbar() {
             <div className="settings-section">
               <div className="settings-label">Palette</div>
               <div className="theme-toggle">
-                {(['classic', 'telegraph'] as const).map((p) => (
+                {(['precision', 'classic', 'telegraph'] as const).map((p) => (
                   <button key={p}
                     className={palette === p ? 'active' : ''}
                     onClick={() => setPalette(p as PaletteName)}
-                    title={p === 'classic'
-                      ? 'Original blueish / neutral-grey palette'
-                      : 'Warm amber-on-near-black, mono-heavy, uppercase titles'}>
-                    {p === 'classic' ? 'Classic' : 'Telegraph'}
+                    title={
+                      p === 'precision'
+                        ? 'Warm-paper light / blue-black dark, calm phosphor-cyan accent'
+                        : p === 'classic'
+                          ? 'Original blueish / neutral-grey palette'
+                          : 'Warm amber-on-near-black, mono-heavy, uppercase titles'
+                    }>
+                    {p === 'precision' ? 'Precision' : p === 'classic' ? 'Classic' : 'Telegraph'}
                   </button>
                 ))}
               </div>
@@ -726,93 +763,3 @@ export function Toolbar() {
   )
 }
 
-/** Coloured pill in the toolbar that surfaces the active recording's
- *  tagging status. Subscribes to ``recordingMeta`` so it updates
- *  live as the user tags from the metadata window. Hover tooltip
- *  spells out exactly what's missing for non-green states. */
-function MetaStatusDot() {
-  const meta = useAppStore((s) => s.recordingMeta)
-  const groups = useAppStore((s) => s.recording?.groups ?? [])
-  const status = getMetaStatus(meta)
-  const colour =
-    status === 'green' ? 'var(--success)'
-      : status === 'yellow' ? 'var(--warning)'
-      : 'var(--error)'
-  const label = status === 'green' ? 'Tagged'
-    : status === 'yellow' ? 'No series tagged'
-    : 'Untagged'
-  // Tooltip expands the label with a count of what's been tagged so
-  // far so the user has actionable feedback without opening the
-  // metadata window.
-  const tooltip = (() => {
-    const fileTags = meta?.group_tags ?? []
-    const seriesTags = meta?.series_tags ?? {}
-    const taggedSeries = Object.values(seriesTags).filter(
-      (t) => Array.isArray(t) && t.length > 0).length
-    const totalSeries = groups.reduce(
-      (acc: number, g: any) => acc + (g.series?.length ?? 0), 0)
-    if (status === 'red') {
-      return 'No file-level tags. Cohort Analysis needs at least one (e.g. "WT", "male"). Click "Tags…" to add.'
-    }
-    if (status === 'yellow') {
-      return `File tagged with ${fileTags.length} tag${fileTags.length === 1 ? '' : 's'}, but no series tagged yet (0 / ${totalSeries}).`
-    }
-    return `File tagged with ${fileTags.length} tag${fileTags.length === 1 ? '' : 's'}; ${taggedSeries} of ${totalSeries} series tagged.`
-  })()
-  return (
-    <span
-      title={`${label} — ${tooltip}`}
-      aria-label={label}
-      style={{
-        display: 'inline-block',
-        width: 9, height: 9,
-        borderRadius: '50%',
-        background: colour,
-        boxShadow: '0 0 0 1px rgba(255,255,255,0.4)',
-        flexShrink: 0,
-        cursor: 'default',
-      }}
-    />
-  )
-}
-
-/** File-level tag chips next to the file name in the toolbar.
- *  Shows every file tag inline (file tags are usually a small set —
- *  genotype + sex + treatment etc.) with the same accent-dim styling
- *  the metadata window and tree-navigator series chips use. Hover
- *  shows the same comma-joined list as a tooltip for tagsthat get
- *  truncated when the toolbar is narrow. */
-function FileTagChips() {
-  const fileTags = useAppStore((s) => s.recordingMeta?.group_tags)
-  if (!fileTags || fileTags.length === 0) return null
-  const tooltip = fileTags.join(', ')
-  return (
-    <span
-      title={tooltip}
-      style={{
-        display: 'inline-flex', alignItems: 'center',
-        gap: 3, marginLeft: 2,
-        maxWidth: 320, overflow: 'hidden',
-      }}
-    >
-      {fileTags.map((tag, i) => (
-        <span
-          key={`${tag}-${i}`}
-          style={{
-            display: 'inline-block',
-            padding: '0 6px',
-            borderRadius: 8,
-            background: 'var(--accent-dim, rgba(100,150,200,0.18))',
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-mono)',
-            fontSize: 'var(--font-size-label)',
-            lineHeight: 1.6,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden', textOverflow: 'ellipsis',
-            maxWidth: 140,
-          }}
-        >{tag}</span>
-      ))}
-    </span>
-  )
-}

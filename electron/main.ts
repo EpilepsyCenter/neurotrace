@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { join, dirname, basename } from 'path'
 import { createServer } from 'net'
@@ -132,6 +132,13 @@ function createWindow() {
     minHeight: 700,
     title: 'NeuroTrace',
     icon: ICON_PATH,
+    // macOS: tuck the traffic-light controls into the toolbar by
+    // hiding the native title bar but keeping the OS buttons inset
+    // at the top-left. The renderer adds left padding to ``.toolbar``
+    // (via the ``[data-platform="mac"]`` body attribute) so buttons
+    // never sit underneath the controls.
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 14, y: 14 } : undefined,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -546,6 +553,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   kinetics: 'Kinetics & Fitting',
   field_potential: 'Field PSP',
   spectral: 'Spectral Analysis',
+  manual: 'User Manual',
 }
 
 function loadAnalysisWindowBounds(analysisType: string): { x?: number; y?: number; width: number; height: number } {
@@ -557,6 +565,9 @@ function loadAnalysisWindowBounds(analysisType: string): { x?: number; y?: numbe
       if (bounds) return bounds
     }
   } catch { /* ignore */ }
+  // The manual viewer has a TOC sidebar + content pane and benefits
+  // from a roomier default than the analysis windows.
+  if (analysisType === 'manual') return { width: 1080, height: 760 }
   return { width: 900, height: 650 }
 }
 
@@ -644,6 +655,26 @@ ipcMain.handle('get-open-analysis-windows', () => {
   }
   return open
 })
+
+// Open an external URL or local path in the user's default browser
+// / handler. Used by the Help modal to launch the manual.
+ipcMain.handle('open-external', async (_event, url: string) => {
+  try {
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mailto:')) {
+      await shell.openExternal(url)
+    } else {
+      // Local file path — opens with the OS default handler.
+      await shell.openPath(url)
+    }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err) }
+  }
+})
+
+// Tell the renderer which OS we're on so it can apply platform-
+// specific styling (e.g. macOS traffic-light gutter on the toolbar).
+ipcMain.handle('get-platform', () => process.platform)
 
 // -----------------------------------------------------------------
 // App lifecycle

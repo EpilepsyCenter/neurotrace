@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from 'react'
+import React, { useEffect, useCallback, useState } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useThemeStore } from './stores/themeStore'
 import { useLayoutStore } from './stores/layoutStore'
@@ -9,6 +9,10 @@ import { Toolbar } from './components/Toolbar/Toolbar'
 import { StatusBar } from './components/StatusBar/StatusBar'
 import { ResizeHandle } from './components/ResizeHandle/ResizeHandle'
 import { TagToast } from './components/TagToast/TagToast'
+import { RecordingHeader } from './components/RecordingHeader/RecordingHeader'
+import { CommandPalette } from './components/CommandPalette/CommandPalette'
+import { HelpModal } from './components/HelpModal/HelpModal'
+import { useGlobalTooltips } from './hooks/useGlobalTooltips'
 
 const MIN_SIDEBAR = 160
 const MIN_TRACE = 200
@@ -33,6 +37,29 @@ export default function App() {
     initLayout()
     initBackend()
   }, [initTheme, initLayout, initBackend])
+
+  useGlobalTooltips()
+
+  // Help modal — mounted at the App root so it's reachable by the
+  // ? keyboard shortcut, the toolbar button, and the command palette.
+  const [showHelp, setShowHelp] = useState(false)
+  useEffect(() => {
+    const onOpen = () => setShowHelp(true)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      // ``?`` is shift+/ on most keyboards — accept either
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault()
+        setShowHelp((v) => !v)
+      }
+    }
+    window.addEventListener('open-help', onOpen)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('open-help', onOpen)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
 
   // --- Keyboard shortcuts for panel toggles ---
   useEffect(() => {
@@ -97,6 +124,7 @@ export default function App() {
 
         {/* ---- Center: Trace viewer fills all remaining space ---- */}
         <div className="app-center">
+          <RecordingHeader />
           <div className="app-trace-area" style={{ minHeight: MIN_TRACE }}>
             <TraceViewer />
 
@@ -129,6 +157,8 @@ export default function App() {
       </div>
       <StatusBar />
       <TagToast />
+      <CommandPalette />
+      <HelpModal open={showHelp} onClose={() => setShowHelp(false)} />
     </div>
   )
 }

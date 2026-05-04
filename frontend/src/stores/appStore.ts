@@ -5036,6 +5036,8 @@ declare global {
   interface Window {
     electronAPI?: {
       syncPreferences: Record<string, unknown>
+      platform?: string
+      openExternal?: (url: string) => Promise<{ ok: boolean; error?: string }>
       getBackendUrl: () => Promise<string>
       openFileDialog: () => Promise<string | null>
       openFolderDialog: (defaultPath?: string) => Promise<string | null>

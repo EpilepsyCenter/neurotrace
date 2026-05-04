@@ -5,6 +5,7 @@ import { useAppStore, CursorPositions, STIMULUS_TRACE_INDEX } from '../../stores
 import { useThemeStore } from '../../stores/themeStore'
 import { ViewportBar, ViewportSlider } from './ViewportBar'
 import { usePlotMenu } from '../common/PlotMenu'
+import { Welcome } from '../Welcome/Welcome'
 
 // Palette for non-primary recorded channels. Must match TracesDropdown.
 const ADDITIONAL_CHANNEL_COLOR_VARS = [
@@ -759,8 +760,8 @@ export function TraceViewer() {
         ticks: { stroke: cssVar('--chart-tick'), width: 1 },
         label: 'Time (s)',
         labelSize: 16,
-        font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-        labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        font: `500 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        labelFont: `600 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
       },
       {
         stroke: cssVar('--chart-axis'),
@@ -768,8 +769,8 @@ export function TraceViewer() {
         ticks: { stroke: cssVar('--chart-tick'), width: 1 },
         label: traceData.units || 'Value',
         labelSize: 16,
-        font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-        labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        font: `500 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        labelFont: `600 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
         scale: 'y',
       },
     ]
@@ -875,8 +876,8 @@ export function TraceViewer() {
         ticks: { stroke: cssVar('--chart-tick'), width: 1 },
         label: altUnits || 'Alt',
         labelSize: 16,
-        font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-        labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        font: `500 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        labelFont: `600 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
         scale: 'y_alt',
         side: 1,
       })
@@ -930,8 +931,8 @@ export function TraceViewer() {
         ticks: { stroke: cssVar('--chart-tick'), width: 1 },
         label: `Stim (${stimulus.unit})`,
         labelSize: 16,
-        font: `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`,
-        labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        font: `500 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
+        labelFont: `600 ${cssVar('--font-size-sm')} ${cssVar('--font-mono')}`,
         scale: 'stim',
         side: 1,
       })
@@ -956,6 +957,10 @@ export function TraceViewer() {
           // No `uni` threshold — any rectangle drag zooms both axes.
         },
         focus: { prox: 30 },
+        // Crosshair line + point styling lives in CSS (.u-cursor-x,
+        // .u-cursor-y, .u-cursor-pt). uPlot's TS types make these
+        // config fields booleans, so styling via stylesheet is the
+        // sanctioned route.
       },
       scales,
       axes,
@@ -1733,7 +1738,7 @@ export function TraceViewer() {
   // The plot container is ALWAYS rendered so containerRef stays stable,
   // which is critical for the ResizeObserver to attach correctly.
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="trace-viewer-root" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* --- Control bar --- */}
       <div
         style={{
@@ -1897,53 +1902,7 @@ export function TraceViewer() {
         onContextMenu={onPlotContextMenu}
       >
         {plotMenu}
-        {!traceData && (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              pointerEvents: 'none',
-              textAlign: 'center',
-              color: 'var(--text-muted)',
-              zIndex: 20,
-              padding: 32,
-            }}
-          >
-            <div style={{ maxWidth: 520 }}>
-              {/* Horizontal lockup — plain <img> since the PNG sits in
-                  src/assets and Vite inlines/copies it automatically.
-                  Max-width keeps it readable on narrow plot panes;
-                  opacity softens it against the recorder's dark chrome
-                  without losing legibility. */}
-              <img
-                src={new URL('../../assets/lockup-horizontal.png', import.meta.url).href}
-                alt="NeuroTrace"
-                style={{
-                  maxWidth: '60%',
-                  height: 'auto',
-                  opacity: 0.88,
-                  marginBottom: 18,
-                }}
-              />
-              <p style={{
-                fontSize: 'var(--font-size-base)',
-                lineHeight: 1.55,
-                maxWidth: 440,
-                margin: '0 auto',
-              }}>
-                An open electrophysiology workbench. Load a HEKA DAT,
-                Axon ABF, or Neuralynx recording from the file menu, then
-                pick a group / series / sweep on the left. Cursors,
-                bursts, action potentials, fPSPs, I-V curves, and the
-                event-detection module run as live analyses on whichever
-                sweep you're looking at.
-              </p>
-            </div>
-          </div>
-        )}
+        {!traceData && <Welcome />}
         <canvas
           ref={canvasRef}
           style={{
@@ -1958,19 +1917,7 @@ export function TraceViewer() {
         {/* Hover coordinate tooltip — positioned by the setCursor hook. */}
         <div
           ref={coordTooltipRef}
-          style={{
-            position: 'absolute',
-            display: 'none',
-            pointerEvents: 'none',
-            zIndex: 15,
-            padding: '2px 6px',
-            background: 'rgba(0, 0, 0, 0.72)',
-            color: '#fff',
-            fontSize: 'var(--font-size-label)',
-            fontFamily: 'var(--font-mono)',
-            borderRadius: 3,
-            whiteSpace: 'nowrap',
-          }}
+          className="coord-tooltip"
         />
       </div>
 

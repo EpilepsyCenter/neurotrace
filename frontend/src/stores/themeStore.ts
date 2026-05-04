@@ -7,7 +7,7 @@ export type ThemeName = 'dark' | 'light'
  *    classic   — the original bluish / neutral-grey palette
  *    telegraph — warm amber-on-near-black dark / vellum-paper light,
  *                with mono-heavy typography and uppercase titles. */
-export type PaletteName = 'classic' | 'telegraph'
+export type PaletteName = 'classic' | 'telegraph' | 'precision'
 
 // Telegraph-branch dropdowns — IBM Plex Sans / JetBrains Mono first so
 // they're the defaults for new installs. ``Theme default`` is a magic
@@ -162,10 +162,14 @@ function applyToDOM(state: ThemeState) {
 }
 
 const defaults = {
-  theme: 'dark' as ThemeName,
-  // Default palette is Classic (the original blueish look). Users
-  // opt in to the warm Telegraph palette from the settings popover.
-  palette: 'classic' as PaletteName,
+  // Light is the new default — the user prefers working in light
+  // during the day, and the Precision palette is tuned for it.
+  theme: 'light' as ThemeName,
+  // Precision is the new default palette: warm-paper light /
+  // blue-black dark, calm phosphor-cyan accent, Instrument Sans /
+  // JetBrains Mono typography. Classic and Telegraph remain
+  // available in the palette toggle for back-compat.
+  palette: 'precision' as PaletteName,
   // Empty string = "Theme default" — let the stylesheet decide. New
   // installs on the Telegraph branch get IBM Plex Sans / JetBrains
   // Mono from telegraph.css; old themes get their own defaults.
@@ -191,7 +195,9 @@ function validateTheme(t: unknown): ThemeName {
 }
 
 function validatePalette(p: unknown): PaletteName {
-  return p === 'classic' || p === 'telegraph' ? p : defaults.palette
+  return p === 'classic' || p === 'telegraph' || p === 'precision'
+    ? p
+    : defaults.palette
 }
 
 function validateFontSize(s: unknown): number {

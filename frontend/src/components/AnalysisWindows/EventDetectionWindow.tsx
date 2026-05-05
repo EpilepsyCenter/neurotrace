@@ -388,6 +388,11 @@ export function EventDetectionWindow({
   // tagged events. Combined with the group filter via AND so users
   // can drill into "T2 + group 3" without rerunning anything.
   const [templateFilter, setTemplateFilter] = useState<TemplateFilter>({ kind: 'all' })
+  // Zero-offset toggle for the sweep mini-viewer trace fetch. Default
+  // off; persisted in Electron prefs so a user who normally works
+  // with offset-subtracted traces doesn't have to flip it every
+  // session. Mirrors the AP / Burst pattern.
+  const [zeroOffset, setZeroOffset] = useState(false)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -420,6 +425,9 @@ export function EventDetectionWindow({
         if (typeof ui.rateBinS === 'number' && ui.rateBinS > 0) {
           setRateBinS(ui.rateBinS)
         }
+        if (typeof ui.zeroOffset === 'boolean') {
+          setZeroOffset(ui.zeroOffset)
+        }
       } catch { /* ignore */ }
     })()
     return () => { cancelled = true }
@@ -432,6 +440,10 @@ export function EventDetectionWindow({
       const next = { ...(prefs.eventsWindowUI ?? {}), ...patch }
       await api.setPreferences({ ...prefs, eventsWindowUI: next })
     } catch { /* ignore */ }
+  }, [])
+  const setZeroOffsetAndPersist = useCallback((v: boolean) => {
+    setZeroOffset(v)
+    void writeUIPref({ zeroOffset: v })
   }, [])
   // Persist bin-size choices on change. Debounced at 300 ms so a
   // quick succession of Enter-commits doesn't spam setPreferences.
@@ -1252,6 +1264,8 @@ export function EventDetectionWindow({
               heightSignal={plotHeight}
               onAddEvent={onAddEventAtTime}
               onDiscardEvent={onDiscardEvent}
+              zeroOffset={zeroOffset}
+              onZeroOffsetChange={setZeroOffsetAndPersist}
             />
           </div>
 
@@ -2234,6 +2248,7 @@ function EventsSweepViewer({
   shiftViewport, goHome, goEnd,
   theme, fontSize, heightSignal,
   onAddEvent, onDiscardEvent,
+  zeroOffset, onZeroOffsetChange,
 }: {
   backendUrl: string
   group: number; series: number; channel: number; sweep: number
@@ -2263,6 +2278,12 @@ function EventsSweepViewer({
   heightSignal: number
   onAddEvent: (timeS: number) => void
   onDiscardEvent: (idx: number) => void
+  /** Zero-offset toggle — when on, the trace fetch passes
+   *  ``zero_offset=true`` and the backend subtracts the per-sweep
+   *  baseline before returning. Stored in prefs by the parent so
+   *  the choice survives across sessions. */
+  zeroOffset: boolean
+  onZeroOffsetChange: (v: boolean) => void
 }) {
   void theme; void fontSize
   const rootRef = useRef<HTMLDivElement>(null)
@@ -2371,6 +2392,14 @@ function EventsSweepViewer({
   groupFilterRef.current = groupFilter
   const templateFilterRef = useRef(templateFilter)
   templateFilterRef.current = templateFilter
+  // Zero-offset applied by the backend on the most recent fetch.
+  // Stored detection thresholds, the polynomial baseline curve, the
+  // RMS amp floor, and the biexp event fits all carry RAW signal
+  // y-values, so we subtract this before mapping them to pixels —
+  // keeps overlays glued to the visibly-shifted trace. Mirrored into
+  // a ref so the draw hook (bound at plot creation) reads the
+  // latest value without rebuilding.
+  const offsetRef = useRef<number>(0)
   // Route pointer-handler callbacks through refs so changing their
   // identity (e.g. the parent re-creating onAddEvent when `entry`
   // updates) doesn't tear down and rebuild the uPlot instance. Event
@@ -2389,6 +2418,12 @@ function EventsSweepViewer({
 
   const [data, setData] = useState<{
     time: Float64Array; values: Float64Array
+    /** DC baseline the backend subtracted when ``zero_offset=true``.
+     *  Stored y-values for stored detection thresholds, baseline
+     *  curves, and biexp fits are in RAW signal space, so we
+     *  subtract this before mapping them to pixels — keeps the
+     *  overlays glued to the visibly-shifted trace. */
+    zeroOffsetApplied: number
   } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   /** Detection-measure overlay (correlation r or filtered
@@ -2441,6 +2476,7 @@ function EventsSweepViewer({
         parts.push(`filter_high=${params.filterHigh}`)
         parts.push(`filter_order=${params.filterOrder}`)
       }
+      if (zeroOffset) parts.push('zero_offset=true')
       const url = `${backendUrl}/api/traces/data?${parts.join('&')}`
       fetch(url)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
@@ -2452,9 +2488,12 @@ function EventsSweepViewer({
           if (durationS > 0 && Math.abs(durationS - sweepDurationS) > 1e-3) {
             setSweepDurationS(durationS)
           }
+          const off = Number(d.zero_offset ?? 0)
+          offsetRef.current = off
           setData({
             time: new Float64Array(d.time ?? []),
             values: new Float64Array(d.values ?? []),
+            zeroOffsetApplied: off,
           })
           setErr(null)
         })
@@ -2463,7 +2502,8 @@ function EventsSweepViewer({
     return () => { cancelled = true; clearTimeout(timer) }
   }, [backendUrl, group, series, sweep, channel, viewport,
       params.filterEnabled, params.filterType, params.filterLow,
-      params.filterHigh, params.filterOrder, setSweepDurationS, sweepDurationS])
+      params.filterHigh, params.filterOrder, zeroOffset,
+      setSweepDurationS, sweepDurationS])
 
   // Fetch the detection-measure slice for the current viewport at
   // full sampling-rate resolution. Only runs when the toggle is on
@@ -2663,12 +2703,13 @@ function EventsSweepViewer({
       const nVisible = Math.max(1,
         Math.ceil((xMax - xMin) / dt))
       const stride = Math.max(1, Math.ceil(nVisible / 1500))
+      const yOffset = offsetRef.current
       for (let i = 0; i < bc.values.length; i += stride) {
         const t = bc.tStartS + i * dt
         if (t < xMin) continue
         if (t > xMax) break
         const px = u.valToPos(t, 'x', true)
-        const py = u.valToPos(bc.values[i], 'y', true)
+        const py = u.valToPos(bc.values[i] - yOffset, 'y', true)
         if (!started) {
           ctx.moveTo(px, py); started = true
         } else {
@@ -2690,7 +2731,7 @@ function EventsSweepViewer({
         threshold = base + sign * p.rmsMultiplier * p.rmsValue
       }
       if (threshold != null && isFinite(threshold)) {
-        const py = u.valToPos(threshold, 'y', true)
+        const py = u.valToPos(threshold - offsetRef.current, 'y', true)
         ctx.save()
         ctx.strokeStyle = '#e57373'
         ctx.lineWidth = 1 * dpr
@@ -2714,7 +2755,7 @@ function EventsSweepViewer({
       const sign = p.peakDirection === 'negative' ? -1 : 1
       const floor = base + sign * p.ampFloorRmsMultiplier * Math.abs(p.rmsValue)
       if (isFinite(floor)) {
-        const py = u.valToPos(floor, 'y', true)
+        const py = u.valToPos(floor - offsetRef.current, 'y', true)
         ctx.save()
         ctx.strokeStyle = '#ffa726'
         ctx.lineWidth = 1 * dpr
@@ -2773,7 +2814,7 @@ function EventsSweepViewer({
           const tx = tStart + tt
           if (tx < xMin || tx > xMax) continue
           const px = u.valToPos(tx, 'x', true)
-          const py = u.valToPos(yVal, 'y', true)
+          const py = u.valToPos(yVal - offsetRef.current, 'y', true)
           if (s === 0) ctx.moveTo(px, py)
           else ctx.lineTo(px, py)
         }
@@ -2964,6 +3005,41 @@ function EventsSweepViewer({
   useEffect(() => {
     yRangeRef.current = null
   }, [group, series, channel, sweep])
+
+  // Manual "Fit Y" recovery — re-fits the y range to the values
+  // currently visible inside the active x window. Mirrors the
+  // user-facing intent of the "Reset zoom" button in AP / Burst
+  // viewers, but Y-only so the user keeps their scrolled / zoomed
+  // x viewport. Clearing the ref ensures a subsequent rebuild
+  // starts from auto-fit again rather than re-locking to the cached
+  // value.
+  const fitYNow = useCallback(() => {
+    const u = plotRef.current
+    if (!u) return
+    const xs = u.data[0] as unknown as number[]
+    const ys = u.data[1] as unknown as number[]
+    if (!xs || !ys || ys.length === 0) return
+    const xMin = u.scales.x.min ?? xs[0]
+    const xMax = u.scales.x.max ?? xs[xs.length - 1]
+    let mn = Infinity, mx = -Infinity
+    for (let i = 0; i < ys.length; i++) {
+      const x = xs[i]
+      if (x < xMin || x > xMax) continue
+      const v = ys[i]
+      if (v < mn) mn = v
+      if (v > mx) mx = v
+    }
+    if (!isFinite(mn) || !isFinite(mx) || mn === mx) {
+      yRangeRef.current = null
+      // Empty / flat view → fall back to uPlot's default auto-scale.
+      u.setScale('y', { min: null as any, max: null as any })
+      return
+    }
+    const pad = (mx - mn) * 0.05
+    const r: [number, number] = [mn - pad, mx + pad]
+    yRangeRef.current = r
+    u.setScale('y', { min: r[0], max: r[1] })
+  }, [])
 
   // Build / rebuild plot when data changes.
   useEffect(() => {
@@ -3241,13 +3317,24 @@ function EventsSweepViewer({
           let hitDist = Infinity
           const gf = groupFilterRef.current
           const tf = templateFilterRef.current
+          // Marker y comes from sampling the displayed trace at
+          // peakTimeS — same source the overlay uses, so the click
+          // target lines up with what the user sees under any
+          // filter / zero-offset combination. Falls back to the
+          // stored peakVal (offset-shifted) when sampling can't
+          // find a value.
+          const tt = u.data[0] as unknown as number[]
+          const tv = u.data[1] as unknown as number[]
+          const yOffset = offsetRef.current
           for (let i = 0; i < e.events.length; i++) {
             const ev0 = e.events[i]
             // Skip hit-tests on filtered-out events — they're not
             // drawn, and clicking through to them would be confusing.
             if (!passesEventFilters(ev0, gf, tf)) continue
+            const sampled = sampleTraceYAt(tt, tv, ev0.peakTimeS)
+            const yUse = sampled != null ? sampled : (ev0.peakVal - yOffset)
             const mx = u.valToPos(ev0.peakTimeS, 'x', false)
-            const my = u.valToPos(ev0.peakVal, 'y', false)
+            const my = u.valToPos(yUse, 'y', false)
             const d = Math.hypot(mx - pxX, my - pxY)
             if (d < hitDist && d < 10) { hit = i; hitDist = d }
           }
@@ -3516,6 +3603,26 @@ function EventsSweepViewer({
         borderBottom: '1px solid var(--border)',
       }}>
         <span>Sweep {sweep + 1}{entry ? ` · ${entry.events.length} events` : ''}</span>
+        <button
+          className="btn"
+          onClick={fitYNow}
+          title="Re-fit the y range to the trace currently inside the visible x window. Useful after toggling the filter or zero-offset shifts the baseline out of view."
+          style={{ padding: '0 6px', fontSize: 'var(--font-size-label)' }}
+        >
+          Fit Y
+        </button>
+        <label
+          style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+          title="Subtract the per-sweep DC baseline server-side, mirroring the AP and Burst windows. Stored detection thresholds, baseline curve, and biexp fits are shifted to match."
+        >
+          <input
+            type="checkbox"
+            checked={zeroOffset}
+            onChange={(e) => onZeroOffsetChange(e.target.checked)}
+            style={{ margin: 0 }}
+          />
+          <span>Zero offset</span>
+        </label>
         <span style={{ marginLeft: 'auto', fontStyle: 'italic' }}>
           drag empty: pan · click empty: add event · click marker:
           prime / discard · drag cursor band: move · wheel: zoom

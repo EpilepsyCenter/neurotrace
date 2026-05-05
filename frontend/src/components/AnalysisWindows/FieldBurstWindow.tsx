@@ -1040,7 +1040,12 @@ function BurstSweepViewer({
   })
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
-  const justDoubleClickedRef = useRef(false)
+  // Index (within ``sweepBursts``) of the burst the user clicked first
+  // and is awaiting confirmation to delete. Mirrors the AP / Events
+  // prime+reclick flow. Reset on sweep change so an unconfirmed prime
+  // doesn't carry across sweeps.
+  const primedRemoveIdxRef = useRef<number | null>(null)
+  useEffect(() => { primedRemoveIdxRef.current = null }, [sweep])
 
   // Bursts on THIS sweep. Everything else (other sweeps' bursts) is
   // invisible here — they belong to a different trace.
@@ -1144,6 +1149,7 @@ function BurstSweepViewer({
         draw: [() => drawBurstOverlay(
           plotRef.current, overlayRef.current, entry, sweepBursts,
           data.zeroOffsetApplied,
+          primedRemoveIdxRef.current,
         )],
       },
     }
@@ -1154,6 +1160,7 @@ function BurstSweepViewer({
     drawBurstOverlay(
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data.zeroOffsetApplied,
+      primedRemoveIdxRef.current,
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
@@ -1164,8 +1171,19 @@ function BurstSweepViewer({
     drawBurstOverlay(
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data?.zeroOffsetApplied ?? 0,
+      primedRemoveIdxRef.current,
     )
   }, [entry, sweepBursts, theme, fontSize, data])
+
+  // Imperative redraw after a click toggles the primed index. Avoids
+  // adding the ref to a useEffect dep list (refs aren't reactive).
+  const redrawOverlay = useCallback(() => {
+    drawBurstOverlay(
+      plotRef.current, overlayRef.current, entry, sweepBursts,
+      data?.zeroOffsetApplied ?? 0,
+      primedRemoveIdxRef.current,
+    )
+  }, [entry, sweepBursts, data])
 
   // Keep uPlot sized to its container — ResizeObserver + parent
   // heightSignal (splitter drag) + window resize.
@@ -1214,23 +1232,70 @@ function BurstSweepViewer({
       return { tStart: 0, tEnd: data.sweepDurationS || data.time[data.time.length - 1] }
     }
 
-    let dragState: null | { kind: 'pan'; startPxX: number; startPxY: number;
-      vpStart: number; vpEnd: number; yMin: number; yMax: number } = null
+    type Drag = {
+      kind: 'maybe-pan'
+      startPxX: number; startPxY: number
+      vpStart: number; vpEnd: number
+      panning: boolean
+    }
+    let dragState: Drag | null = null
+    const DRAG_THRESHOLD_PX = 3
+    const MARKER_HIT_PX = 10
+
+    // Hit-test against burst peak dots only — start / decay / end
+    // markers stay visible but aren't click targets, so the user has
+    // a single deterministic prime location per burst (matches the
+    // AP and Events flows).
+    const findBurstHit = (pxX: number, pxY: number): number | null => {
+      const tt = u.data[0] as unknown as number[]
+      const tv = u.data[1] as unknown as number[]
+      const yOffset = data?.zeroOffsetApplied ?? 0
+      let best = -1, bestD = Infinity
+      for (let i = 0; i < sweepBursts.length; i++) {
+        const b = sweepBursts[i]
+        const sampled = sampleTraceYAt(tt, tv, b.peakTimeS)
+        const yUse = sampled != null
+          ? sampled
+          : (b.preBurstBaseline + b.peakSigned - yOffset)
+        const mx = u.valToPos(b.peakTimeS, 'x', false)
+        const my = u.valToPos(yUse, 'y', false)
+        const d = Math.hypot(mx - pxX, my - pxY)
+        if (d < bestD && d < MARKER_HIT_PX) { best = i; bestD = d }
+      }
+      return best >= 0 ? best : null
+    }
 
     const onPointerDown = (ev: PointerEvent) => {
-      if (ev.button !== 0) return // only left-button here; right handled via contextmenu
+      if (ev.button !== 0) return // right-click falls through to PlotMenu
       const rect = over.getBoundingClientRect()
       const pxX = ev.clientX - rect.left
       const pxY = ev.clientY - rect.top
+      // Priority 1: burst peak hit → prime / confirm-remove. Mirrors
+      // the AP and Events prime+reclick gesture; the actual delete
+      // happens here on the second click of the same primed marker.
+      const hit = findBurstHit(pxX, pxY)
+      if (hit != null) {
+        if (primedRemoveIdxRef.current === hit) {
+          const peakT = sweepBursts[hit].peakTimeS
+          primedRemoveIdxRef.current = null
+          onRemoveBurst(peakT)
+        } else {
+          primedRemoveIdxRef.current = hit
+          redrawOverlay()
+        }
+        ev.preventDefault()
+        return
+      }
+      // Priority 2: empty space → click-or-pan. X-only pan; the y
+      // scale is left to auto-fit (a pre-detection bandpass keeps
+      // traces centred around 0, so manual y panning isn't needed
+      // here — Reset zoom handles odd cases).
       const v = effectiveViewport()
-      const yMin = u.scales.y.min, yMax = u.scales.y.max
-      if (yMin == null || yMax == null) return
-      // Remember start for drag-pan; decide pan vs. click on pointer-up.
       dragState = {
-        kind: 'pan',
+        kind: 'maybe-pan',
         startPxX: pxX, startPxY: pxY,
         vpStart: v.tStart, vpEnd: v.tEnd,
-        yMin, yMax,
+        panning: false,
       }
       over.setPointerCapture(ev.pointerId)
     }
@@ -1242,60 +1307,40 @@ function BurstSweepViewer({
       const pxY = ev.clientY - rect.top
       const dxPx = pxX - dragState.startPxX
       const dyPx = pxY - dragState.startPxY
-      // Only start panning after a small drag threshold — otherwise
-      // a clean click would be misread as a tiny pan.
-      if (Math.abs(dxPx) < 3 && Math.abs(dyPx) < 3) return
+      if (!dragState.panning &&
+          (Math.abs(dxPx) > DRAG_THRESHOLD_PX || Math.abs(dyPx) > DRAG_THRESHOLD_PX)) {
+        dragState.panning = true
+        over.style.cursor = 'grabbing'
+      }
+      if (!dragState.panning) return
       const vpW = dragState.vpEnd - dragState.vpStart
       const bboxW = u.bbox.width / (devicePixelRatio || 1)
       const dt = -(dxPx / bboxW) * vpW
-      const yRange = dragState.yMax - dragState.yMin
-      const bboxH = u.bbox.height / (devicePixelRatio || 1)
-      const dy = (dyPx / bboxH) * yRange
       setViewport({
         tStart: dragState.vpStart + dt,
         tEnd: dragState.vpEnd + dt,
       })
-      u.setScale('y', {
-        min: dragState.yMin + dy,
-        max: dragState.yMax + dy,
-      })
-      over.style.cursor = 'grabbing'
     }
 
     const onPointerUp = (ev: PointerEvent) => {
       if (!dragState) return
-      const rect = over.getBoundingClientRect()
-      const pxX = ev.clientX - rect.left
-      const pxY = ev.clientY - rect.top
-      const dxPx = pxX - dragState.startPxX
-      const dyPx = pxY - dragState.startPxY
-      const isClick = Math.abs(dxPx) < 3 && Math.abs(dyPx) < 3
+      const clickCandidate = !dragState.panning
       dragState = null
       try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
       over.style.cursor = ''
-      if (isClick && !justDoubleClickedRef.current) {
-        // Left-click ADDS a manual burst at the click time.
-        const timeS = pxToX(pxX)
-        if (isFinite(timeS)) onAddBurst(timeS)
+      if (clickCandidate) {
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const tClick = pxToX(pxX)
+        // Empty-space click clears any pending prime — a deliberate
+        // "no, don't delete that one" gesture — then ADDS a manual
+        // burst at the click time.
+        if (primedRemoveIdxRef.current != null) {
+          primedRemoveIdxRef.current = null
+          redrawOverlay()
+        }
+        if (isFinite(tClick)) onAddBurst(tClick)
       }
-      justDoubleClickedRef.current = false
-    }
-
-    const onContextMenu = (ev: MouseEvent) => {
-      // Right-click REMOVES the nearest burst on this sweep.
-      ev.preventDefault()
-      const rect = over.getBoundingClientRect()
-      const timeS = pxToX(ev.clientX - rect.left)
-      if (isFinite(timeS)) onRemoveBurst(timeS)
-    }
-
-    const onDblClick = (ev: MouseEvent) => {
-      // Double-click ALSO removes; guards against the pointerup click
-      // handler also firing and re-adding a burst right after.
-      justDoubleClickedRef.current = true
-      const rect = over.getBoundingClientRect()
-      const timeS = pxToX(ev.clientX - rect.left)
-      if (isFinite(timeS)) onRemoveBurst(timeS)
     }
 
     const onWheel = (ev: WheelEvent) => {
@@ -1325,18 +1370,16 @@ function BurstSweepViewer({
     over.addEventListener('pointerdown', onPointerDown)
     over.addEventListener('pointermove', onPointerMove)
     over.addEventListener('pointerup', onPointerUp)
-    over.addEventListener('contextmenu', onContextMenu)
-    over.addEventListener('dblclick', onDblClick)
+    over.addEventListener('pointercancel', onPointerUp)
     over.addEventListener('wheel', onWheel, { passive: false })
     return () => {
       over.removeEventListener('pointerdown', onPointerDown)
       over.removeEventListener('pointermove', onPointerMove)
       over.removeEventListener('pointerup', onPointerUp)
-      over.removeEventListener('contextmenu', onContextMenu)
-      over.removeEventListener('dblclick', onDblClick)
+      over.removeEventListener('pointercancel', onPointerUp)
       over.removeEventListener('wheel', onWheel)
     }
-  }, [data, viewport, setViewport, onAddBurst, onRemoveBurst])
+  }, [data, viewport, setViewport, onAddBurst, onRemoveBurst, sweepBursts, redrawOverlay])
 
   // Keyboard navigation — active only when the viewer has focus.
   //   ←/→      = back/forward by one viewport width
@@ -1539,6 +1582,10 @@ function drawBurstOverlay(
    *  so we subtract the same offset here to keep markers glued to the
    *  visibly shifted trace (mirrors the main viewer's overlay). */
   yOffset: number = 0,
+  /** Index of the burst (within ``bursts``) the user has primed for
+   *  removal — drawn with a blue confirmation ring outside the dot.
+   *  ``null`` = no prime. Mirrors the AP / Events flow. */
+  primedIdx: number | null = null,
 ) {
   if (!u || !canvas) return
   const ctx = canvas.getContext('2d')
@@ -1620,7 +1667,9 @@ function drawBurstOverlay(
     }
   }
 
-  for (const b of bursts) {
+  let primedPos: [number, number] | null = null
+  for (let bi = 0; bi < bursts.length; bi++) {
+    const b = bursts[bi]
     const peakY = b.preBurstBaseline + b.peakSigned
     const [px0, py0] = toPx(b.startS, b.preBurstBaseline)
     const [px1, py1] = toPx(b.peakTimeS, peakY)
@@ -1635,6 +1684,19 @@ function drawBurstOverlay(
     drawDot(px1, py1, MARKER_COLORS.peak, !!b.manual)
     if (decay) drawDot(decay[0], decay[1], MARKER_COLORS.decay)
     drawDot(px3, py3, MARKER_COLORS.end)
+    if (bi === primedIdx) primedPos = [px1, py1]
+  }
+  // Primed-remove confirmation ring around the peak dot, drawn last
+  // so it sits over the manual-orange ring (which lands at radius
+  // ~9.5). Same hue / weight as the AP and Events windows.
+  if (primedPos) {
+    ctx.save()
+    ctx.strokeStyle = '#64b5f6'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.arc(primedPos[0], primedPos[1], 12, 0, 2 * Math.PI)
+    ctx.stroke()
+    ctx.restore()
   }
 }
 

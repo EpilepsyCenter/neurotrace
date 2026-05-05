@@ -2987,17 +2987,41 @@ export const useAppStore = create<AppState>((set, get) => ({
           : null
       }
 
+      // The probe above used ``viewport=null`` to learn the full
+      // duration. For a long continuous recording that means the
+      // returned trace is the WHOLE sweep decimated to
+      // ``viewportMaxPoints`` — typically ~8 points fall inside the
+      // default 1 s viewport, which the user perceives as a severely
+      // downsampled trace. Refetch once with the windowed viewport so
+      // the plot has high-resolution samples inside the visible
+      // range. Episodic series (``viewportNow == null``) skip this —
+      // the full-sweep probe IS what they want.
+      let displayResp = traceResp
+      if (sweepChanged && isContinuous && viewportNow) {
+        try {
+          displayResp = await apiFetch(
+            backendUrl,
+            traceDataUrl(group, series, sweep, trace, filter, viewportNow, viewportMaxPoints, zeroOffset),
+          )
+        } catch {
+          // Network blip — fall back to the probe data. The viewport
+          // is still set, so the user sees a sparse trace they can
+          // recover from by interacting (any pan / zoom triggers a
+          // fresh fetch via refetchViewport).
+        }
+      }
+
       const updates: Partial<AppState> = {
         traceData: {
-          time: new Float64Array(traceResp.time),
-          values: new Float64Array(traceResp.values),
-          samplingRate: traceResp.sampling_rate,
-          units: traceResp.units,
-          label: traceResp.label,
+          time: new Float64Array(displayResp.time),
+          values: new Float64Array(displayResp.values),
+          samplingRate: displayResp.sampling_rate,
+          units: displayResp.units,
+          label: displayResp.label,
         },
         sweepDuration: duration,
         viewport: viewportNow,
-        currentZeroOffset: Number(traceResp.zero_offset ?? 0),
+        currentZeroOffset: Number(displayResp.zero_offset ?? 0),
       }
 
       if (stimResp && stimResp.segments?.length > 0) {

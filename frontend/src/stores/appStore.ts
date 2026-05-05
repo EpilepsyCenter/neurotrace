@@ -1847,11 +1847,15 @@ interface AppState {
   /** Highlight one spike row in the per-spike table + on the mini-viewer. */
   selectAPSpike: (group: number, series: number, idx: number | null) => void
   /** Add a manual spike at ``timeS`` (within ``sweep``) for the given
-   *  series. Pushes the time into ``manualEdits.added`` and injects an
-   *  optimistic ``APPoint`` (manual: true, kinetics blank) so the
-   *  marker shows up immediately — kinetics fields fill in on the
-   *  next Run. Returns the index of the new spike in ``perSpike``. */
-  addManualAPSpike: (group: number, series: number, sweep: number, timeS: number) => void
+   *  series. Inserts an optimistic ``APPoint`` placeholder (manual:
+   *  true, kinetics blank) so the marker shows up immediately, then
+   *  calls ``/api/ap/measure_one`` to fill in threshold / amplitude /
+   *  rise / decay / FWHM / fAHP / mAHP / max-slope using the same
+   *  math the auto-detector uses. Falls back to the placeholder if
+   *  the measurement endpoint can't fit a spike at the click point.
+   *  Always also pushes the click time into ``manualEdits.added`` so
+   *  the next Run sees the same edit. */
+  addManualAPSpike: (group: number, series: number, sweep: number, timeS: number) => Promise<void>
   /** Remove the spike on ``sweep`` whose peak is closest to ``timeS``
    *  (within a tolerance). Updates ``manualEdits`` so the change
    *  survives the next Run, and prunes the spike from ``perSweep`` /
@@ -4400,8 +4404,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     _broadcastAP(get().apAnalyses)
   },
 
-  addManualAPSpike: (group, series, sweep, timeS) => {
+  addManualAPSpike: async (group, series, sweep, timeS) => {
     const key = `${group}:${series}`
+    // Insert the optimistic placeholder synchronously so the marker
+    // appears immediately even on slow links. If the backend
+    // measurement returns kinetics, we'll overwrite this row's
+    // numeric fields below; if not, the placeholder stays and the
+    // user can still see / remove it.
+    let inserted = false
     set((s) => {
       const entry = s.apAnalyses[key]
       if (!entry) return s
@@ -4420,11 +4430,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         [sweep]: [...addedForSweep, timeS].sort((a, b) => a - b),
       }
       // Optimistic perSpike row — kinetics fields are blank until
-      // the user re-Runs. The marker overlay only needs sweep + peakT
-      // + manual flag to draw a peak dot, so the rest stays null/0.
+      // either ``measure_one`` returns or the user re-Runs.
       const newSpike: APPoint = {
         sweep,
-        spikeIndex: 0,             // will be re-numbered on next Run
+        spikeIndex: 0,             // re-numbered on next Run
         thresholdVm: 0,
         thresholdT: 0,
         peakVm: 0,
@@ -4454,6 +4463,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           peakTimes: [...p.peakTimes, timeS].sort((a, b) => a - b),
         }
       })
+      inserted = true
       return {
         apAnalyses: {
           ...s.apAnalyses,
@@ -4466,7 +4476,86 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       }
     })
+    if (!inserted) return
     _broadcastAP(get().apAnalyses)
+    // Async: ask the backend for full kinetics on this single spike.
+    // Uses the entry's last-Run detection + kinetics so the manual
+    // measurement matches the auto-detected ones (same threshold
+    // method, same filter, same rise/decay percents, …). If the
+    // measurement fails (out-of-range, no clear spike at the click
+    // point) the placeholder stays put and the user can still
+    // remove it via the prime+reclick gesture.
+    const st = get()
+    if (!st.backendUrl) return
+    const entry = st.apAnalyses[key]
+    if (!entry) return
+    try {
+      const resp = await fetch(`${st.backendUrl}/api/ap/measure_one`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group, series, trace: entry.trace, sweep, peak_t_s: timeS,
+          detection: entry.detection,
+          kinetics: entry.kinetics,
+        }),
+      })
+      if (!resp.ok) return
+      const m: any = await resp.json()
+      const measuredPeakT = Number(m.peak_t_s ?? timeS)
+      set((s) => {
+        const e = s.apAnalyses[key]
+        if (!e) return s
+        // Find the placeholder we just inserted. Match on the click
+        // time (peakT === timeS) since the backend may have snapped
+        // its peak to a slightly different sample.
+        const idx = e.perSpike.findIndex(
+          (sp) => sp.sweep === sweep && sp.manual && Math.abs(sp.peakT - timeS) < 1e-9,
+        )
+        if (idx < 0) return s
+        const measured: APPoint = {
+          ...e.perSpike[idx],
+          thresholdVm: Number(m.threshold_vm ?? 0),
+          thresholdT: Number(m.threshold_t_s ?? 0),
+          peakVm: Number(m.peak_vm ?? 0),
+          peakT: measuredPeakT,
+          amplitudeMv: Number(m.amplitude_mv ?? 0),
+          riseTimeS: m.rise_time_s != null ? Number(m.rise_time_s) : null,
+          decayTimeS: m.decay_time_s != null ? Number(m.decay_time_s) : null,
+          halfWidthS: m.half_width_s != null ? Number(m.half_width_s) : null,
+          fahpVm: m.fahp_vm != null ? Number(m.fahp_vm) : null,
+          fahpT: m.fahp_t_s != null ? Number(m.fahp_t_s) : null,
+          mahpVm: m.mahp_vm != null ? Number(m.mahp_vm) : null,
+          mahpT: m.mahp_t_s != null ? Number(m.mahp_t_s) : null,
+          maxRiseSlopeMvMs: m.max_rise_slope_mv_ms != null ? Number(m.max_rise_slope_mv_ms) : null,
+          maxDecaySlopeMvMs: m.max_decay_slope_mv_ms != null ? Number(m.max_decay_slope_mv_ms) : null,
+          manual: true,
+        }
+        const nextPerSpike = [...e.perSpike]
+        nextPerSpike[idx] = measured
+        nextPerSpike.sort((a, b) =>
+          a.sweep !== b.sweep ? a.sweep - b.sweep : a.peakT - b.peakT,
+        )
+        // Keep perSweep.peakTimes consistent with the snapped peak.
+        const nextPerSweep = e.perSweep.map((p) => {
+          if (p.sweep !== sweep) return p
+          // Replace the original click time with the measured peak.
+          const peakTimes = p.peakTimes
+            .filter((t) => Math.abs(t - timeS) >= 1e-9)
+          peakTimes.push(measuredPeakT)
+          peakTimes.sort((a, b) => a - b)
+          return { ...p, peakTimes }
+        })
+        return {
+          apAnalyses: {
+            ...s.apAnalyses,
+            [key]: { ...e, perSpike: nextPerSpike, perSweep: nextPerSweep },
+          },
+        }
+      })
+      _broadcastAP(get().apAnalyses)
+    } catch {
+      /* network error — keep the placeholder; user can still curate */
+    }
   },
 
   removeManualAPSpikeAt: (group, series, sweep, timeS) => {

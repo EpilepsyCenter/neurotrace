@@ -33,7 +33,8 @@ from pydantic import BaseModel
 from api.files import get_current_recording
 from api.fpsp import _stim_for_series, _detect_stim_onset_s
 from utils.scaling import scaled
-from analysis.ap import run_ap, phase_plot_for_spike
+from analysis.ap import run_ap, phase_plot_for_spike, _Spike, _measure_spike
+from analysis.bursts import _apply_pre_detection_filter
 
 router = APIRouter()
 
@@ -441,3 +442,109 @@ async def ap_auto_im_params(
         t += dur
 
     return {"type": "none"}
+
+
+# ---------------------------------------------------------------------------
+# /measure_one — single-spike kinetics for a manually-added AP
+# ---------------------------------------------------------------------------
+
+class MeasureOneRequest(BaseModel):
+    """Inputs for measuring kinetics on a single click-added spike.
+
+    The frontend's prime+click manual-edit flow inserts an optimistic
+    placeholder marker at the click time and dispatches this request
+    to fill in threshold, amplitude, rise/decay, FWHM, fAHP, mAHP, and
+    max-slope fields — same numbers the auto-detector would produce
+    for the same peak. Mirrors how Burst's /measure_at extends a click
+    into a fully-measured burst.
+    """
+    group: int
+    series: int
+    trace: int
+    sweep: int
+    peak_t_s: float
+    # Same shapes the /run endpoint accepts. Detection is consulted
+    # only for the pre-detection filter and ``min_distance_ms`` (the
+    # peak-snap window). Kinetics drives the measurement itself.
+    detection: dict = {}
+    kinetics: dict = {}
+
+
+@router.post("/measure_one")
+async def ap_measure_one(req: MeasureOneRequest):
+    """Measure full kinetics for a single spike at ``peak_t_s``.
+
+    Strategy:
+      1. Apply the same pre-detection filter the auto-detector used so
+         the measurement matches what the user is looking at.
+      2. Snap the click to the nearest local Vm max within ±half the
+         configured ``min_distance_ms``. Same snap helper logic as the
+         /run endpoint's manual-edits replay so the result is
+         deterministic relative to a Run.
+      3. Wrap the snapped peak in a ``_Spike`` and call ``_measure_spike``
+         with the user's kinetics params.
+    """
+    rec = get_current_recording()
+    try:
+        grp = rec.groups[req.group]
+        ser = grp.series_list[req.series]
+    except IndexError:
+        raise HTTPException(status_code=400, detail="Invalid group/series index")
+
+    if req.sweep < 0 or req.sweep >= ser.sweep_count:
+        raise HTTPException(status_code=400, detail=f"Sweep index {req.sweep} out of range")
+    sw = ser.sweeps[req.sweep]
+    if req.trace < 0 or req.trace >= sw.trace_count:
+        raise HTTPException(status_code=400, detail=f"Trace index {req.trace} out of range")
+    tr = sw.traces[req.trace]
+
+    vm = np.asarray(scaled(tr), dtype=float)
+    sr = float(tr.sampling_rate)
+    if vm.size == 0 or sr <= 0:
+        raise HTTPException(status_code=400, detail="Empty sweep")
+
+    vm_for_measure = _apply_pre_detection_filter(vm, sr, req.detection)
+
+    dt_ms = 1000.0 / sr
+    min_dist_ms = float(req.detection.get("min_distance_ms", 2.0))
+    snap = max(1, int(round((min_dist_ms / 2.0) / dt_ms)))
+    click_idx = int(round(req.peak_t_s * sr))
+    i0 = max(0, click_idx - snap)
+    i1 = min(vm_for_measure.size, click_idx + snap + 1)
+    if i1 <= i0:
+        raise HTTPException(status_code=400, detail="Click out of sweep range")
+    seg = vm_for_measure[i0:i1]
+    peak_idx = i0 + int(np.argmax(seg))
+
+    spike = _Spike(
+        onset_idx=peak_idx,
+        peak_idx=peak_idx,
+        fall_idx=peak_idx,
+        peak_vm=float(vm_for_measure[peak_idx]),
+        manual=True,
+    )
+
+    m = _measure_spike(
+        vm_for_measure, sr, spike,
+        threshold_method=str(req.kinetics.get("threshold_method", "first_deriv_cutoff")),
+        threshold_cutoff_mv_ms=float(req.kinetics.get("threshold_cutoff_mv_ms", 20.0)),
+        threshold_search_ms_before_peak=float(req.kinetics.get("threshold_search_ms_before_peak", 5.0)),
+        sekerli_lower_bound_mv_ms=float(req.kinetics.get("sekerli_lower_bound_mv_ms", 5.0)),
+        rise_low_pct=float(req.kinetics.get("rise_low_pct", 10.0)),
+        rise_high_pct=float(req.kinetics.get("rise_high_pct", 90.0)),
+        decay_low_pct=float(req.kinetics.get("decay_low_pct", 10.0)),
+        decay_high_pct=float(req.kinetics.get("decay_high_pct", 90.0)),
+        decay_end=str(req.kinetics.get("decay_end", "to_threshold")),
+        fahp_search_start_ms=float(req.kinetics.get("fahp_search_start_ms", 0.0)),
+        fahp_search_end_ms=float(req.kinetics.get("fahp_search_end_ms", 5.0)),
+        mahp_search_start_ms=float(req.kinetics.get("mahp_search_start_ms", 5.0)),
+        mahp_search_end_ms=float(req.kinetics.get("mahp_search_end_ms", 100.0)),
+        max_slope_window_ms=float(req.kinetics.get("max_slope_window_ms", 0.5)),
+        interpolate=bool(req.kinetics.get("interpolate_to_200khz", True)),
+    )
+    if not m:
+        raise HTTPException(status_code=400, detail="Could not measure spike at click point")
+    m["sweep"] = int(req.sweep)
+    m["spike_index"] = 0
+    m["manual"] = True
+    return m

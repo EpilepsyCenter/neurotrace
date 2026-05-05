@@ -1,21 +1,43 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react'
 import { useThemeStore } from './stores/themeStore'
 import { CursorPositions, useAppStore } from './stores/appStore'
-import { ResistanceWindow } from './components/AnalysisWindows/ResistanceWindow'
-import { FieldBurstWindow } from './components/AnalysisWindows/FieldBurstWindow'
-import { IVCurveWindow } from './components/AnalysisWindows/IVCurveWindow'
-import { FPspWindow } from './components/AnalysisWindows/FPspWindow'
-import { CursorAnalysisWindow } from './components/AnalysisWindows/CursorAnalysisWindow'
-import { APWindow } from './components/AnalysisWindows/APWindow'
-import { EventDetectionWindow } from './components/AnalysisWindows/EventDetectionWindow'
-import { EventsTemplateGeneratorWindow } from './components/AnalysisWindows/EventsTemplateGeneratorWindow'
-import { EventsTemplateRefinementWindow } from './components/AnalysisWindows/EventsTemplateRefinementWindow'
-import { EventsBrowserWindow } from './components/AnalysisWindows/EventsBrowserWindow'
-import { MetadataWindow } from './components/AnalysisWindows/MetadataWindow'
-import { BatchWindow } from './components/AnalysisWindows/BatchWindow'
-import { CohortWindow } from './components/AnalysisWindows/CohortWindow'
-import { TraceExportWindow } from './components/AnalysisWindows/TraceExportWindow'
-import { Manual } from './components/Manual/Manual'
+
+// Each analysis window is its own lazy chunk so the shared bundle
+// doesn't carry code for all 14 windows in every renderer process.
+// Vite emits one chunk per dynamic ``import()`` target; each window
+// is loaded only when the user actually opens it. Named-exports get
+// shimmed into ``{ default: ... }`` because ``React.lazy`` insists on
+// default exports — the modules themselves stay unchanged.
+const ResistanceWindow = lazy(() =>
+  import('./components/AnalysisWindows/ResistanceWindow').then((m) => ({ default: m.ResistanceWindow })))
+const FieldBurstWindow = lazy(() =>
+  import('./components/AnalysisWindows/FieldBurstWindow').then((m) => ({ default: m.FieldBurstWindow })))
+const IVCurveWindow = lazy(() =>
+  import('./components/AnalysisWindows/IVCurveWindow').then((m) => ({ default: m.IVCurveWindow })))
+const FPspWindow = lazy(() =>
+  import('./components/AnalysisWindows/FPspWindow').then((m) => ({ default: m.FPspWindow })))
+const CursorAnalysisWindow = lazy(() =>
+  import('./components/AnalysisWindows/CursorAnalysisWindow').then((m) => ({ default: m.CursorAnalysisWindow })))
+const APWindow = lazy(() =>
+  import('./components/AnalysisWindows/APWindow').then((m) => ({ default: m.APWindow })))
+const EventDetectionWindow = lazy(() =>
+  import('./components/AnalysisWindows/EventDetectionWindow').then((m) => ({ default: m.EventDetectionWindow })))
+const EventsTemplateGeneratorWindow = lazy(() =>
+  import('./components/AnalysisWindows/EventsTemplateGeneratorWindow').then((m) => ({ default: m.EventsTemplateGeneratorWindow })))
+const EventsTemplateRefinementWindow = lazy(() =>
+  import('./components/AnalysisWindows/EventsTemplateRefinementWindow').then((m) => ({ default: m.EventsTemplateRefinementWindow })))
+const EventsBrowserWindow = lazy(() =>
+  import('./components/AnalysisWindows/EventsBrowserWindow').then((m) => ({ default: m.EventsBrowserWindow })))
+const MetadataWindow = lazy(() =>
+  import('./components/AnalysisWindows/MetadataWindow').then((m) => ({ default: m.MetadataWindow })))
+const BatchWindow = lazy(() =>
+  import('./components/AnalysisWindows/BatchWindow').then((m) => ({ default: m.BatchWindow })))
+const CohortWindow = lazy(() =>
+  import('./components/AnalysisWindows/CohortWindow').then((m) => ({ default: m.CohortWindow })))
+const TraceExportWindow = lazy(() =>
+  import('./components/AnalysisWindows/TraceExportWindow').then((m) => ({ default: m.TraceExportWindow })))
+const Manual = lazy(() =>
+  import('./components/Manual/Manual').then((m) => ({ default: m.Manual })))
 
 /**
  * Shell for all analysis windows. Runs in a separate Electron BrowserWindow.
@@ -301,8 +323,18 @@ export function AnalysisWindow({ view }: { view: string }) {
         </span>
       </div>
 
-      {/* Analysis content */}
+      {/* Analysis content. Each window is its own lazy chunk —
+          Suspense covers the brief disk read + parse on first open. */}
       <div style={{ flex: 1, overflow: 'auto' }}>
+        <Suspense fallback={
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            height: '100%', color: 'var(--text-muted)',
+            fontSize: 'var(--font-size-label)', fontStyle: 'italic',
+          }}>
+            Loading…
+          </div>
+        }>
         {view === 'resistance' ? (
           <ResistanceWindow
             backendUrl={backendUrl}
@@ -418,6 +450,7 @@ export function AnalysisWindow({ view }: { view: string }) {
             {title} — coming soon
           </div>
         )}
+        </Suspense>
       </div>
     </div>
   )

@@ -1846,6 +1846,17 @@ interface AppState {
   clearAP: (group?: number, series?: number) => void
   /** Highlight one spike row in the per-spike table + on the mini-viewer. */
   selectAPSpike: (group: number, series: number, idx: number | null) => void
+  /** Add a manual spike at ``timeS`` (within ``sweep``) for the given
+   *  series. Pushes the time into ``manualEdits.added`` and injects an
+   *  optimistic ``APPoint`` (manual: true, kinetics blank) so the
+   *  marker shows up immediately — kinetics fields fill in on the
+   *  next Run. Returns the index of the new spike in ``perSpike``. */
+  addManualAPSpike: (group: number, series: number, sweep: number, timeS: number) => void
+  /** Remove the spike on ``sweep`` whose peak is closest to ``timeS``
+   *  (within a tolerance). Updates ``manualEdits`` so the change
+   *  survives the next Run, and prunes the spike from ``perSweep`` /
+   *  ``perSpike`` so the marker disappears immediately. */
+  removeManualAPSpikeAt: (group: number, series: number, sweep: number, timeS: number) => void
 
   // Event-detection actions — see backend/api/events.py for the
   // endpoint behavior. Templates live in the global library;
@@ -4385,6 +4396,147 @@ export const useAppStore = create<AppState>((set, get) => ({
       const entry = s.apAnalyses[key]
       if (!entry) return s
       return { apAnalyses: { ...s.apAnalyses, [key]: { ...entry, selectedSpikeIdx: idx } } }
+    })
+    _broadcastAP(get().apAnalyses)
+  },
+
+  addManualAPSpike: (group, series, sweep, timeS) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.apAnalyses[key]
+      if (!entry) return s
+      // Idempotency — if a spike (manual or auto) already exists at
+      // this time within ~0.5 ms, skip the add. Stops a quick
+      // double-click from inserting two markers on top of each other.
+      const collidesAt = (t: number) =>
+        entry.perSpike.some((sp) => sp.sweep === sweep && Math.abs(sp.peakT - t) < 5e-4)
+      if (collidesAt(timeS)) return s
+      // Append to manualEdits.added so the next Run applies the same
+      // edit. Existing array might be undefined for sweeps the user
+      // hasn't touched before.
+      const addedForSweep = entry.manualEdits.added[sweep] ?? []
+      const nextAdded = {
+        ...entry.manualEdits.added,
+        [sweep]: [...addedForSweep, timeS].sort((a, b) => a - b),
+      }
+      // Optimistic perSpike row — kinetics fields are blank until
+      // the user re-Runs. The marker overlay only needs sweep + peakT
+      // + manual flag to draw a peak dot, so the rest stays null/0.
+      const newSpike: APPoint = {
+        sweep,
+        spikeIndex: 0,             // will be re-numbered on next Run
+        thresholdVm: 0,
+        thresholdT: 0,
+        peakVm: 0,
+        peakT: timeS,
+        amplitudeMv: 0,
+        riseTimeS: null,
+        decayTimeS: null,
+        halfWidthS: null,
+        fahpVm: null,
+        fahpT: null,
+        mahpVm: null,
+        mahpT: null,
+        maxRiseSlopeMvMs: null,
+        maxDecaySlopeMvMs: null,
+        manual: true,
+      }
+      const nextPerSpike = [...entry.perSpike, newSpike].sort((a, b) =>
+        a.sweep !== b.sweep ? a.sweep - b.sweep : a.peakT - b.peakT,
+      )
+      // Mirror into perSweep[sweep].peakTimes so the counting view
+      // reflects the manual addition.
+      const nextPerSweep = entry.perSweep.map((p) => {
+        if (p.sweep !== sweep) return p
+        return {
+          ...p,
+          spikeCount: p.spikeCount + 1,
+          peakTimes: [...p.peakTimes, timeS].sort((a, b) => a - b),
+        }
+      })
+      return {
+        apAnalyses: {
+          ...s.apAnalyses,
+          [key]: {
+            ...entry,
+            manualEdits: { ...entry.manualEdits, added: nextAdded },
+            perSpike: nextPerSpike,
+            perSweep: nextPerSweep,
+          },
+        },
+      }
+    })
+    _broadcastAP(get().apAnalyses)
+  },
+
+  removeManualAPSpikeAt: (group, series, sweep, timeS) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const entry = s.apAnalyses[key]
+      if (!entry) return s
+      // Find the closest spike on this sweep within 0.5 s; otherwise
+      // the right-clicked / clicked location was just empty space.
+      let bestIdx = -1, bestDist = Infinity
+      entry.perSpike.forEach((sp, i) => {
+        if (sp.sweep !== sweep) return
+        const d = Math.abs(sp.peakT - timeS)
+        if (d < bestDist) { bestDist = d; bestIdx = i }
+      })
+      if (bestIdx < 0 || bestDist > 0.5) return s
+      const target = entry.perSpike[bestIdx]
+      // Update manualEdits. Two cases:
+      //   (a) target was a previously-added manual spike → strip it
+      //       from manualEdits.added and skip ``removed`` (no auto
+      //       spike to suppress).
+      //   (b) target was auto-detected → push its peak time into
+      //       manualEdits.removed so the next Run drops it again.
+      const APPROX = 5e-4   // 0.5 ms tolerance for time-key matching
+      let nextAdded = entry.manualEdits.added
+      let nextRemoved = entry.manualEdits.removed
+      const addedForSweep = entry.manualEdits.added[sweep] ?? []
+      const matchedAddedIdx = addedForSweep.findIndex((t) => Math.abs(t - target.peakT) < APPROX)
+      if (matchedAddedIdx >= 0) {
+        const nextAddedForSweep = addedForSweep.filter((_, i) => i !== matchedAddedIdx)
+        nextAdded = nextAddedForSweep.length > 0
+          ? { ...entry.manualEdits.added, [sweep]: nextAddedForSweep }
+          : Object.fromEntries(Object.entries(entry.manualEdits.added).filter(([k]) => k !== String(sweep)))
+      } else {
+        const removedForSweep = entry.manualEdits.removed[sweep] ?? []
+        nextRemoved = {
+          ...entry.manualEdits.removed,
+          [sweep]: [...removedForSweep, target.peakT].sort((a, b) => a - b),
+        }
+      }
+      const nextPerSpike = entry.perSpike.filter((_, i) => i !== bestIdx)
+      const nextPerSweep = entry.perSweep.map((p) => {
+        if (p.sweep !== sweep) return p
+        return {
+          ...p,
+          spikeCount: Math.max(0, p.spikeCount - 1),
+          peakTimes: p.peakTimes.filter((t) => Math.abs(t - target.peakT) >= APPROX),
+        }
+      })
+      // Drop selectedSpikeIdx if it pointed at the removed spike.
+      const nextSelected =
+        entry.selectedSpikeIdx == null
+          ? null
+          : entry.selectedSpikeIdx === bestIdx
+            ? null
+            : entry.selectedSpikeIdx > bestIdx
+              ? entry.selectedSpikeIdx - 1
+              : entry.selectedSpikeIdx
+      return {
+        apAnalyses: {
+          ...s.apAnalyses,
+          [key]: {
+            ...entry,
+            manualEdits: { added: nextAdded, removed: nextRemoved },
+            perSpike: nextPerSpike,
+            perSweep: nextPerSweep,
+            selectedSpikeIdx: nextSelected,
+          },
+        },
+      }
     })
     _broadcastAP(get().apAnalyses)
   },

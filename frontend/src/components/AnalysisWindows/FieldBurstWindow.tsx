@@ -8,6 +8,7 @@ import { usePlotMenu } from '../common/PlotMenu'
 import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { attachHoverCoords } from '../../utils/hoverCoords'
+import { sampleTraceYAt } from '../../utils/sampleTraceY'
 
 const MARKER_COLORS = {
   baseline: '#9e9e9e',
@@ -1555,10 +1556,20 @@ function drawBurstOverlay(
   const left = u.bbox.left / dpr
   const right = left + u.bbox.width / dpr
 
-  const toPx = (x: number, y: number): [number, number] => [
-    u.valToPos(x, 'x', true) / dpr,
-    u.valToPos(y - yOffset, 'y', true) / dpr,
-  ]
+  // Sample the displayed trace (already filter / zero-offset adjusted)
+  // so markers ride on the visible line whether the user toggles the
+  // pre-detection filter on or off. Falls back to the stored y when
+  // the time is out of range or data isn't loaded.
+  const tt = u.data[0] as unknown as number[]
+  const tv = u.data[1] as unknown as number[]
+  const toPx = (x: number, fallbackY: number): [number, number] => {
+    const sampled = sampleTraceYAt(tt, tv, x)
+    const yUse = sampled != null ? sampled : (fallbackY - yOffset)
+    return [
+      u.valToPos(x, 'x', true) / dpr,
+      u.valToPos(yUse, 'y', true) / dpr,
+    ]
+  }
 
   // Dashed horizontal lines: detection thresholds (once per view, not
   // per burst). Pre-burst-baseline varies per burst so we draw short

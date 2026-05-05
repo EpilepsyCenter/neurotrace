@@ -16,6 +16,7 @@ import { usePlotMenu } from '../common/PlotMenu'
 import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { attachHoverCoords } from '../../utils/hoverCoords'
+import { sampleTraceYAt } from '../../utils/sampleTraceY'
 
 /**
  * Event detection & analysis — Phase 1 (expanded).
@@ -2830,14 +2831,20 @@ function EventsSweepViewer({
       const peakR = 4 * dpr
       const dotR = 2.5 * dpr
 
+      // Sample the displayed trace (post-filter, post-zero-offset)
+      // so markers stay glued to the line whatever the user toggles.
+      const tt = u.data[0] as unknown as number[]
+      const tv = u.data[1] as unknown as number[]
+
       for (let i = 0; i < e.events.length; i++) {
         const ev = e.events[i]
         if (ev.peakTimeS < xMin) continue
         if (ev.peakTimeS > xMax) break  // events are time-sorted
         if (!passesEventFilters(ev, gf, tf)) continue
 
+        const peakSampled = sampleTraceYAt(tt, tv, ev.peakTimeS)
         const px = u.valToPos(ev.peakTimeS, 'x', true)
-        const py = u.valToPos(ev.peakVal, 'y', true)
+        const py = u.valToPos(peakSampled != null ? peakSampled : ev.peakVal, 'y', true)
         const color = ev.manual
           ? '#ffb74d'
           : (ev.templateIdx != null && TEMPLATE_COLORS[ev.templateIdx])
@@ -2851,15 +2858,17 @@ function EventsSweepViewer({
         if (primedDiscardIdxRef.current === i) primedXY = [px, py]
 
         if (!dense) {
-          // Foot
+          // Foot — sample displayed trace at footTimeS.
+          const footSampled = sampleTraceYAt(tt, tv, ev.footTimeS)
           const fpx = u.valToPos(ev.footTimeS, 'x', true)
-          const fpy = u.valToPos(ev.baselineVal, 'y', true)
+          const fpy = u.valToPos(footSampled != null ? footSampled : ev.baselineVal, 'y', true)
           footPts.push(fpx, fpy)
-          // Decay endpoint
+          // Decay endpoint — also pinned to the trace.
           if (ev.decayEndpointIdx != null) {
             const dt = ev.decayEndpointIdx / sr
+            const epSampled = sampleTraceYAt(tt, tv, dt)
             const dpx = u.valToPos(dt, 'x', true)
-            const dpy = u.valToPos(ev.baselineVal, 'y', true)
+            const dpy = u.valToPos(epSampled != null ? epSampled : ev.baselineVal, 'y', true)
             decayPts.push(dpx, dpy)
           }
           // Group digit
@@ -4334,31 +4343,16 @@ function EventsResultsTable({
   // selection survives across re-renders, drops on row-count shrink.
   const events = entry?.events ?? []
   const sel = useRowSelection(events.length)
-  // Cmd/Ctrl-C on a selected row also copies — covered later in the
-  // copy menu (which builds the TSV at click time).
-  if (!entry || entry.events.length === 0) {
-    return (
-      <div style={{
-        padding: 16, textAlign: 'center',
-        color: 'var(--text-muted)', fontStyle: 'italic',
-        fontSize: 'var(--font-size-label)',
-      }}>
-        {entry
-          ? 'No events detected. Try lowering the cutoff / amplitude threshold.'
-          : 'Run detection to populate the events table.'}
-      </div>
-    )
-  }
-  const unit = entry.units
   // Cross-sweep detection → show a Sweep column so rows are
   // unambiguously placed. Single-sweep skips the column to keep the
   // table compact.
-  const multiSweep = (entry.sweepsAnalysed?.length ?? 1) > 1
+  const multiSweep = (entry?.sweepsAnalysed?.length ?? 1) > 1
   // Show a Template column only when multi-template detection (or
   // mixed manual + auto) actually produced a non-null tag — otherwise
   // it's a wasted column for single-template / threshold runs.
-  const showTplCol = entry.events.some(
+  const showTplCol = !!entry && entry.events.some(
     (e) => e.templateIdx != null || e.manual)
+  const unit = entry?.units ?? ''
   const headers = [
     '#',
     ...(multiSweep ? ['Sweep'] : []),
@@ -4372,8 +4366,8 @@ function EventsResultsTable({
   // so spreadsheets can sort cleanly.
   const tsvHeaders = headers.slice(0, -1)
   const rowToCells = (i: number): Array<string | number | null> => {
-    const e = entry.events[i]
-    const prev = i === 0 ? null : entry.events[i - 1]
+    const e = entry!.events[i]
+    const prev = i === 0 ? null : entry!.events[i - 1]
     const iei = prev && (!multiSweep || prev.sweep === e.sweep)
       ? (e.peakTimeS - prev.peakTimeS) * 1000
       : null
@@ -4401,10 +4395,24 @@ function EventsResultsTable({
   const copyMenu = useRowCopyMenu({
     selectionCount: sel.selectedIndexes.length,
     getTSV: () => {
-      if (sel.selectedIndexes.length === 0) return null
+      if (!entry || sel.selectedIndexes.length === 0) return null
       return buildTSV(tsvHeaders, sel.selectedIndexes.map(rowToCells))
     },
   })
+  // All hooks above this line — early return is now safe.
+  if (!entry || entry.events.length === 0) {
+    return (
+      <div style={{
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        {entry
+          ? 'No events detected. Try lowering the cutoff / amplitude threshold.'
+          : 'Run detection to populate the events table.'}
+      </div>
+    )
+  }
   return (
     <>
     <table style={{

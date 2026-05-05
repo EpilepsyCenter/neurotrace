@@ -1289,7 +1289,7 @@ function BurstSweepViewer({
       // Priority 2: empty space → click-or-pan. X-only pan; the y
       // scale is left to auto-fit (a pre-detection bandpass keeps
       // traces centred around 0, so manual y panning isn't needed
-      // here — Reset zoom handles odd cases).
+      // here — Fit Y handles odd cases).
       const v = effectiveViewport()
       dragState = {
         kind: 'maybe-pan',
@@ -1439,12 +1439,15 @@ function BurstSweepViewer({
 
   const manualCount = sweepBursts.filter((b) => b.manual).length
 
-  /** Reset zoom = re-autoscale Y to the currently-visible data.
-   *  X is driven by the viewport preset buttons, so leave it alone
-   *  (the user just picked a width — resetting it would override
-   *  that). Finds the min/max of the samples inside the current
-   *  viewport and applies a small pad so the trace doesn't clip. */
-  const resetZoom = () => {
+  /** Fit Y = re-autoscale Y to the currently-visible data. X is
+   *  driven by the viewport preset buttons, so leave it alone (the
+   *  user just picked a width — resetting it would override that).
+   *  Finds the min/max of the samples inside the current viewport
+   *  and applies a small pad so the trace doesn't clip.
+   *
+   *  Same name + behaviour as the Events miniviewer's Fit Y so the
+   *  gesture is consistent across windows. */
+  const fitYNow = () => {
     const u = plotRef.current
     if (!u || !data || data.time.length === 0) return
     const v = viewport ?? { tStart: 0, tEnd: data.sweepDurationS }
@@ -1501,11 +1504,11 @@ function BurstSweepViewer({
           </label>
           <button
             className="btn"
-            onClick={resetZoom}
+            onClick={fitYNow}
             style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-            title="Autoscale Y to the currently-visible data (use the preset buttons above to reset X)"
+            title="Re-fit the y range to the trace currently inside the visible x window. Useful after toggling the filter or zero-offset shifts the baseline out of view."
           >
-            Reset zoom
+            Fit Y
           </button>
           <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
           <LegendDot color={MARKER_COLORS.baseline} label="baseline" />

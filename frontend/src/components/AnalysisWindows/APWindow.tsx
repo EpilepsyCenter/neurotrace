@@ -103,6 +103,7 @@ export function APWindow({
 }) {
   const {
     apAnalyses, runAP, clearAP, selectAPSpike,
+    addManualAPSpike, removeManualAPSpikeAt,
     loading, error, setError,
   } = useAppStore()
   const theme = useThemeStore((s) => s.theme)
@@ -893,6 +894,8 @@ export function APWindow({
                   heightSignal={topHeight}
                   zoomToSpikeRequest={zoomRequest}
                   onXRangeChange={(xMin, xMax) => setPrimaryXRange([xMin, xMax])}
+                  onAddSpike={(t) => addManualAPSpike(group, series, previewSweep, t)}
+                  onRemoveSpikeAt={(t) => removeManualAPSpikeAt(group, series, previewSweep, t)}
                 />
               </div>
               {/* Overlay subplots — one per selected overlay channel.
@@ -2140,6 +2143,8 @@ function APSweepViewer({
   heightSignal,
   zoomToSpikeRequest,
   onXRangeChange,
+  onAddSpike,
+  onRemoveSpikeAt,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -2166,6 +2171,11 @@ function APSweepViewer({
   /** Fired when the user pans / wheel-zooms / resets, so stacked
    *  overlay viewers can mirror the x range. */
   onXRangeChange?: (xMin: number, xMax: number) => void
+  /** Click-on-empty-space adds a manual spike at the click time
+   *  (matches the Events-window prime+confirm gesture set). */
+  onAddSpike?: (timeS: number) => void
+  /** Click-on-primed-marker confirms removal at that peak time. */
+  onRemoveSpikeAt?: (timeS: number) => void
 }) {
   void previewSweep; void totalSweeps; void traceUnits
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2194,6 +2204,19 @@ function APSweepViewer({
   const emitXRange = (xMin: number, xMax: number) => {
     try { onXRangeChangeRef.current?.(xMin, xMax) } catch { /* ignore */ }
   }
+  // Manual spike add/remove callbacks, also stashed in refs because
+  // the pointer handlers below are wired once per uPlot rebuild.
+  const onAddSpikeRef = useRef(onAddSpike)
+  onAddSpikeRef.current = onAddSpike
+  const onRemoveSpikeAtRef = useRef(onRemoveSpikeAt)
+  onRemoveSpikeAtRef.current = onRemoveSpikeAt
+  // Index (within ``previewSpikes``) of the marker the user clicked
+  // first, awaiting a confirmation click to delete. Mirrors the
+  // Events-window primedDiscardIdxRef pattern. Reset on sweep /
+  // series change so an unconfirmed prime doesn't persist across
+  // navigation.
+  const primedRemoveIdxRef = useRef<number | null>(null)
+  useEffect(() => { primedRemoveIdxRef.current = null }, [previewSweep])
 
   const drawOverlays = (u: uPlot) => {
     const ctx = u.ctx
@@ -2242,19 +2265,24 @@ function APSweepViewer({
     oCtx.clearRect(0, 0, cssW, cssH)
     if (spikes.length === 0) return
 
-    // toPx variants. ``toPxRaw`` keeps the legacy "use stored y"
-    // behaviour for half-amplitude crossings (whose y is computed,
-    // not sampled). ``toPx`` samples the displayed trace at time t so
-    // peak / threshold / fAHP / mAHP dots ride on the visible line
-    // regardless of filter state. Falls back to the stored y when
-    // sampling isn't available (out-of-range / unloaded trace).
+    // toPx variants. ``traceValues`` is already in display space (the
+    // backend has applied zero-offset when on), so sampled values
+    // plot as-is. Stored marker y-values are RAW signal, so they map
+    // to display by subtracting ``offset``.
+    //   ``toPxRaw`` — caller passes a known raw y (e.g. stored peak
+    //                 amplitude) and we shift to display.
+    //   ``toPx``    — peak / threshold / fAHP / mAHP: sample the
+    //                 displayed trace at t so dots ride the visible
+    //                 line regardless of filter state. Falls back to
+    //                 the raw stored y (with offset shift) when the
+    //                 sample is out-of-range.
     const toPxRaw = (t: number, v: number): [number, number] => [
       u.valToPos(t, 'x', true) / dpr,
       u.valToPos(v - offset, 'y', true) / dpr,
     ]
     const toPx = (t: number, fallbackV: number): [number, number] => {
       const sampled = sampleTraceYAt(traceTime, traceValues, t)
-      const yUse = sampled != null ? sampled - offset : (fallbackV - offset)
+      const yUse = sampled != null ? sampled : (fallbackV - offset)
       return [
         u.valToPos(t, 'x', true) / dpr,
         u.valToPos(yUse, 'y', true) / dpr,
@@ -2289,19 +2317,26 @@ function APSweepViewer({
       return tv[idx]
     }
 
-    for (const sp of spikes) {
+    // Track the primed marker's screen position so we can stamp a
+    // confirmation ring after the rest of the layer is drawn.
+    let primedPos: [number, number] | null = null
+    const primedIdx = primedRemoveIdxRef.current
+    for (let spi = 0; spi < spikes.length; spi++) {
+      const sp = spikes[spi]
+      let peakXY: [number, number] | null = null
       // Peak — always present (manual flag rings it).
       if (sp.peakVm !== 0 || sp.thresholdVm !== 0) {
-        const [px, py] = toPx(sp.peakT, sp.peakVm)
-        dot(px, py, SPIKE_COLOR, sp.manual)
+        peakXY = toPx(sp.peakT, sp.peakVm)
+        dot(peakXY[0], peakXY[1], SPIKE_COLOR, sp.manual)
       } else {
         // Fallback (no kinetics) — place peak at the nearest sample y.
         const y = nearestY(sp.peakT)
         if (y != null) {
-          const [px, py] = toPx(sp.peakT, y)
-          dot(px, py, SPIKE_COLOR, sp.manual)
+          peakXY = toPx(sp.peakT, y)
+          dot(peakXY[0], peakXY[1], SPIKE_COLOR, sp.manual)
         }
       }
+      if (peakXY && spi === primedIdx) primedPos = peakXY
       // Threshold dot (foot of the spike).
       if (sp.thresholdVm !== 0 || sp.thresholdT !== 0) {
         const [px, py] = toPx(sp.thresholdT, sp.thresholdVm)
@@ -2314,7 +2349,13 @@ function APSweepViewer({
       // approximation drifted off the trace, so we walk the displayed
       // samples here. Slightly more code, dots actually land on it.
       if (sp.halfWidthS != null && sp.amplitudeMv > 0 && tt && tv) {
-        const halfV = sp.thresholdVm + sp.amplitudeMv / 2
+        // ``thresholdVm`` / ``amplitudeMv`` are in raw signal space.
+        // ``halfVRaw`` keeps that frame for ``toPx`` (which applies
+        // ``- offset`` for the fallback path). ``halfV`` is the same
+        // value shifted into display space so the crossing scan
+        // against ``tv`` (already display-space) compares correctly.
+        const halfVRaw = sp.thresholdVm + sp.amplitudeMv / 2
+        const halfV = halfVRaw - offset
         // Clip search to a sensible window: from threshold time to
         // peak time + half-width-extra (so we catch the falling
         // crossing even if it sits slightly past peak + halfWidth).
@@ -2348,8 +2389,8 @@ function APSweepViewer({
         const tLeft = findCrossing(tLo, sp.peakT, true)
         const tRight = findCrossing(sp.peakT, tHi, false)
         if (tLeft != null && tRight != null) {
-          const [pxL, pyL] = toPx(tLeft, halfV)
-          const [pxR, pyR] = toPx(tRight, halfV)
+          const [pxL, pyL] = toPx(tLeft, halfVRaw)
+          const [pxR, pyR] = toPx(tRight, halfVRaw)
           if (isFinite(pxL) && isFinite(pyL) && isFinite(pxR) && isFinite(pyR)) {
             oCtx.save()
             oCtx.strokeStyle = '#ffeb3b'
@@ -2375,6 +2416,19 @@ function APSweepViewer({
         dot(px, py, '#ff7043')
       }
     }
+    // Primed-remove confirmation ring — drawn LAST so it sits over
+    // any per-spike rings from manual / kinetics layers. Same hue as
+    // the Events window (``#64b5f6``) so the prime-then-confirm
+    // gesture is visually consistent across windows.
+    if (primedPos) {
+      oCtx.save()
+      oCtx.strokeStyle = '#64b5f6'
+      oCtx.lineWidth = 2
+      oCtx.beginPath()
+      oCtx.arc(primedPos[0], primedPos[1], 11, 0, Math.PI * 2)
+      oCtx.stroke()
+      oCtx.restore()
+    }
   }
 
   const resetZoom = () => {
@@ -2385,9 +2439,13 @@ function APSweepViewer({
     if (traceTime.length === 0) return
     const xmin = traceTime[0], xmax = traceTime[traceTime.length - 1]
     let ymin = Infinity, ymax = -Infinity
+    // ``traceValues`` is already the displayed trace — the backend
+    // applied zero-offset server-side via the ``zero_offset=true``
+    // flag on the trace fetch. No further subtraction here, otherwise
+    // the auto-fit Y range would be computed against a doubly-shifted
+    // trace.
     for (const v of traceValues) {
-      const vv = v - zeroOffsetApplied
-      if (vv < ymin) ymin = vv; if (vv > ymax) ymax = vv
+      if (v < ymin) ymin = v; if (v > ymax) ymax = v
     }
     if (isFinite(xmin) && isFinite(xmax) && xmax > xmin) {
       u.setScale('x', { min: xmin, max: xmax })
@@ -2409,8 +2467,13 @@ function APSweepViewer({
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
       const w = Math.max(container.clientWidth, 200)
       const h = Math.max(container.clientHeight, 100)
-      const offset = zeroOffsetApplied
-      const adjusted = traceValues.map((v) => v - offset)
+      // ``traceValues`` already reflects the requested zero-offset
+      // (subtracted server-side when zeroOffset is on, otherwise
+      // unchanged). Plot it directly — subtracting ``zeroOffsetApplied``
+      // here too would shift the trace by twice the intended amount.
+      // Markers stored in raw signal space still apply ``- offset``
+      // when they map onto this displayed trace; see ``toPx``.
+      const adjusted = traceValues
       const opts: uPlot.Options = {
         width: w, height: h,
         legend: { show: false },
@@ -2477,9 +2540,15 @@ function APSweepViewer({
       type Drag =
         | { kind: 'bound-edge'; which: 'start' | 'end' }
         | { kind: 'bound-band'; startPxX: number; startStart: number; startEnd: number }
-        | { kind: 'pan'; startPxX: number; startPxY: number;
-            xMin: number; xMax: number; yMin: number; yMax: number }
+        | {
+            kind: 'maybe-pan'
+            startPxX: number; startPxY: number
+            xMin: number; xMax: number; yMin: number; yMax: number
+            panning: boolean
+          }
       let drag: Drag | null = null
+      const DRAG_THRESHOLD_PX = 3
+      const MARKER_HIT_PX = 10
 
       const findHit = (pxX: number): Drag | null => {
         const b = boundsRef.current
@@ -2494,23 +2563,78 @@ function APSweepViewer({
         return null
       }
 
+      // Hit-test against a spike marker (peak dot). Returns the index
+      // into ``previewSpikes`` if within MARKER_HIT_PX of the dot's
+      // screen position, else null. The marker y comes from sampling
+      // the displayed trace at peakT — same source the overlay uses,
+      // so the click target lines up with what the user sees.
+      const findSpikeHit = (pxX: number, pxY: number): number | null => {
+        const sps = spikesRef.current
+        if (!sps || sps.length === 0) return null
+        let best = -1, bestD = Infinity
+        for (let i = 0; i < sps.length; i++) {
+          const sp = sps[i]
+          const sampled = sampleTraceYAt(traceTime, traceValues, sp.peakT)
+          const yUse = sampled != null
+            ? sampled
+            : (sp.peakVm !== 0 ? sp.peakVm - offsetRef.current : null)
+          if (yUse == null) continue
+          const mx = u.valToPos(sp.peakT, 'x', false)
+          const my = u.valToPos(yUse, 'y', false)
+          const d = Math.hypot(mx - pxX, my - pxY)
+          if (d < bestD && d < MARKER_HIT_PX) { best = i; bestD = d }
+        }
+        return best >= 0 ? best : null
+      }
+
       const onPointerDown = (ev: PointerEvent) => {
         if (ev.button !== 0) return
         const rect = over.getBoundingClientRect()
         const pxX = ev.clientX - rect.left
         const pxY = ev.clientY - rect.top
+
+        // Priority 1: bound edges / band — keep the existing drag.
         const hit = findHit(pxX)
         if (hit) {
           drag = hit
-        } else {
-          // Empty area → pan both axes.
-          const xMin = u.scales.x.min, xMax = u.scales.x.max
-          const yMin = u.scales.y.min, yMax = u.scales.y.max
-          if (xMin == null || xMax == null || yMin == null || yMax == null) return
-          drag = { kind: 'pan', startPxX: pxX, startPxY: pxY, xMin, xMax, yMin, yMax }
+          over.setPointerCapture(ev.pointerId)
+          over.style.cursor = 'ew-resize'
+          ev.preventDefault()
+          return
+        }
+
+        // Priority 2: spike marker — prime on first click, confirm
+        // remove on second click of the same primed marker. Matches
+        // the Events-window prime+confirm gesture.
+        const spikeHit = findSpikeHit(pxX, pxY)
+        if (spikeHit != null) {
+          if (primedRemoveIdxRef.current === spikeHit) {
+            const sp = spikesRef.current[spikeHit]
+            primedRemoveIdxRef.current = null
+            onRemoveSpikeAtRef.current?.(sp.peakT)
+          } else {
+            primedRemoveIdxRef.current = spikeHit
+            plotRef.current?.redraw()
+          }
+          ev.preventDefault()
+          return
+        }
+
+        // Priority 3: empty space — start click-or-pan. Plain click
+        // (release without movement) ADDS a manual spike at the
+        // click time. Movement past DRAG_THRESHOLD_PX commits to a
+        // pan. Run analysis is NOT triggered from here — it has its
+        // own button (see ``onRun``).
+        const xMin = u.scales.x.min, xMax = u.scales.x.max
+        const yMin = u.scales.y.min, yMax = u.scales.y.max
+        if (xMin == null || xMax == null || yMin == null || yMax == null) return
+        drag = {
+          kind: 'maybe-pan',
+          startPxX: pxX, startPxY: pxY,
+          xMin, xMax, yMin, yMax,
+          panning: false,
         }
         over.setPointerCapture(ev.pointerId)
-        over.style.cursor = drag.kind === 'pan' ? 'grabbing' : 'ew-resize'
       }
       const onPointerMove = (ev: PointerEvent) => {
         if (!drag) {
@@ -2537,11 +2661,17 @@ function APSweepViewer({
             Math.max(0, drag.startStart + dx),
             Math.max(drag.startStart + dx + 0.001, drag.startEnd + dx),
           )
-        } else if (drag.kind === 'pan') {
-          const bboxW = u.bbox.width / (devicePixelRatio || 1)
-          const bboxH = u.bbox.height / (devicePixelRatio || 1)
+        } else if (drag.kind === 'maybe-pan') {
           const dxPx = pxX - drag.startPxX
           const dyPx = pxY - drag.startPxY
+          if (!drag.panning &&
+              (Math.abs(dxPx) > DRAG_THRESHOLD_PX || Math.abs(dyPx) > DRAG_THRESHOLD_PX)) {
+            drag.panning = true
+            over.style.cursor = 'grabbing'
+          }
+          if (!drag.panning) return
+          const bboxW = u.bbox.width / (devicePixelRatio || 1)
+          const bboxH = u.bbox.height / (devicePixelRatio || 1)
           const dx = -(dxPx / bboxW) * (drag.xMax - drag.xMin)
           const dy = (dyPx / bboxH) * (drag.yMax - drag.yMin)
           const nx: [number, number] = [drag.xMin + dx, drag.xMax + dx]
@@ -2555,9 +2685,24 @@ function APSweepViewer({
       }
       const onPointerUp = (ev: PointerEvent) => {
         if (!drag) return
+        // Capture click-or-pan resolution before clearing drag so the
+        // narrow type assertion holds when reading .panning below.
+        const clickCandidate = drag.kind === 'maybe-pan' && !drag.panning
         drag = null
         try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
         over.style.cursor = ''
+        if (clickCandidate) {
+          const rect = over.getBoundingClientRect()
+          const pxX = ev.clientX - rect.left
+          const tClick = pxToX(pxX)
+          // Clear any primed-remove state — clicking empty space is
+          // a deliberate "no, don't delete that one" gesture.
+          if (primedRemoveIdxRef.current != null) {
+            primedRemoveIdxRef.current = null
+            plotRef.current?.redraw()
+          }
+          if (isFinite(tClick)) onAddSpikeRef.current?.(tClick)
+        }
       }
       const onWheel = (ev: WheelEvent) => {
         ev.preventDefault()
@@ -2587,6 +2732,7 @@ function APSweepViewer({
       over.addEventListener('pointerdown', onPointerDown)
       over.addEventListener('pointermove', onPointerMove)
       over.addEventListener('pointerup', onPointerUp)
+      over.addEventListener('pointercancel', onPointerUp)
       over.addEventListener('wheel', onWheel, { passive: false })
     })
     return () => cancelAnimationFrame(frame)
@@ -2917,13 +3063,19 @@ function APSpikesOverlayViewer({
     // legend once. The trace LINES are colour-cycled per spike; only
     // the marker dots use these semantic colours.
     spikesToShow.forEach((sp) => {
-      // Per-spike slice (time relative to peak, values aligned). When
-      // present, sample it for marker y so dots ride the displayed
-      // trace under filter / no-filter, falling back to the stored y.
+      // Per-spike slice. ``slice.time`` is in ABSOLUTE seconds (what
+      // the backend returned), while the overlay plot's x-axis is
+      // relative-to-peak (``longest = sl.time - sp.peakT`` above), so
+      // dot calls pass ``xRel``. Convert back via ``sp.peakT + xRel``
+      // to look up the slice's y at that absolute time. (Earlier
+      // attempts sampled at ``xRel`` directly — that pulled values
+      // from the start of the slice and put markers way off the
+      // trace.) Falls back to the stored marker y if sampling
+      // can't find a value (out-of-range / unloaded slice).
       const slice = slicesRef.current[`${sp.sweep}:${sp.peakT}`]
       const sliceY = (xRel: number, fallbackY: number) => {
         if (!slice || slice.time.length < 2) return fallbackY
-        const s = sampleTraceYAt(slice.time, slice.values, xRel)
+        const s = sampleTraceYAt(slice.time, slice.values, sp.peakT + xRel)
         return s != null ? s : fallbackY
       }
       const dotAt = (xRel: number, y: number, colour: string) => {
@@ -2952,12 +3104,18 @@ function APSpikesOverlayViewer({
         dotAt(xR, sliceY(xR, sp.mahpVm), '#ff7043')             // mAHP
       }
       // FWHM crossings — walk the per-spike slice to find the two
-      // times the trace actually crosses (threshold + amp/2). Dots
-      // land on the trace, not on an approximation.
+      // times the trace actually crosses half-amplitude. Derive
+      // halfV from sampled values so it stays in the same frame as
+      // ``slice.values`` (display space when zero-offset is on,
+      // raw otherwise) — going through ``sp.thresholdVm`` /
+      // ``sp.peakVm`` directly would put halfV in raw space and
+      // misplace the crossing dots whenever zero-offset is on.
       if (sp.halfWidthS != null && sp.amplitudeMv > 0) {
         const slice = slicesRef.current[`${sp.sweep}:${sp.peakT}`]
         if (slice && slice.time.length > 1) {
-          const halfV = sp.thresholdVm + sp.amplitudeMv / 2
+          const peakYFrame = sampleTraceYAt(slice.time, slice.values, sp.peakT) ?? sp.peakVm
+          const thrYFrame = sampleTraceYAt(slice.time, slice.values, sp.thresholdT) ?? sp.thresholdVm
+          const halfV = thrYFrame + (peakYFrame - thrYFrame) / 2
           // Bound the search to threshold → peak (rising) and
           // peak → peak+halfWidth+slop (falling), in absolute time.
           const tLo = sp.thresholdT

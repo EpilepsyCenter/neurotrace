@@ -247,6 +247,38 @@ export function APWindow({
   // both the zoomed-spike viewer and the phase plot. Useful when
   // overlaying many spikes — markers from N spikes get noisy.
   const [hideMarkers, setHideMarkers] = useState(false)
+  // Visibility of the analysis-bounds bands in the AP sweep viewer.
+  // Toggling this to ``false`` hides the blue cursors AND disables
+  // their hit-test so the user can click straight through the area
+  // they normally cover (helpful when manual add/remove markers fall
+  // behind a bound). Persisted in Electron prefs under
+  // ``apWindowUI.showBounds`` so the choice survives restarts.
+  const [showBounds, setShowBounds] = useState(true)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences) return
+        const prefs = (await api.getPreferences()) as Record<string, any> | undefined
+        const saved = prefs?.apWindowUI?.showBounds
+        if (!cancelled && typeof saved === 'boolean') setShowBounds(saved)
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  const setShowBoundsAndPersist = useCallback((v: boolean) => {
+    setShowBounds(v)
+    ;(async () => {
+      try {
+        const api = window.electronAPI
+        if (!api?.getPreferences || !api?.setPreferences) return
+        const prefs = (await api.getPreferences()) ?? {}
+        const next = { ...(prefs.apWindowUI ?? {}), showBounds: v }
+        await api.setPreferences({ ...prefs, apWindowUI: next })
+      } catch { /* ignore */ }
+    })()
+  }, [])
   // Reset selection when the entry changes (new run, new series).
   useEffect(() => {
     setSelectedSpikeSet(new Set())
@@ -712,7 +744,10 @@ export function APWindow({
               detected={entry?.imSource ?? null}
             />
             {/* Detection params (filter + method + bounds) live here. */}
-            <APDetectionPanel detection={detection} setDetection={setDetection} />
+            <APDetectionPanel
+              detection={detection} setDetection={setDetection}
+              showBounds={showBounds} setShowBounds={setShowBoundsAndPersist}
+            />
             {/* Tab-specific params. */}
             {tab === 'counting' && (
               <APRheobasePanel
@@ -896,6 +931,7 @@ export function APWindow({
                   onXRangeChange={(xMin, xMax) => setPrimaryXRange([xMin, xMax])}
                   onAddSpike={(t) => addManualAPSpike(group, series, previewSweep, t)}
                   onRemoveSpikeAt={(t) => removeManualAPSpikeAt(group, series, previewSweep, t)}
+                  showBounds={showBounds}
                 />
               </div>
               {/* Overlay subplots — one per selected overlay channel.
@@ -1042,9 +1078,12 @@ export function APWindow({
 
 function APDetectionPanel({
   detection, setDetection,
+  showBounds, setShowBounds,
 }: {
   detection: APDetectionParams
   setDetection: React.Dispatch<React.SetStateAction<APDetectionParams>>
+  showBounds: boolean
+  setShowBounds: (v: boolean) => void
 }) {
   const set = <K extends keyof APDetectionParams>(k: K, v: APDetectionParams[K]) =>
     setDetection((d) => ({ ...d, [k]: v }))
@@ -1144,6 +1183,23 @@ function APDetectionPanel({
           value={detection.min_distance_ms} step={0.5} min={0.1}
           onChange={(v) => set('min_distance_ms', v)} />
         <SubHeader>Analysis bounds</SubHeader>
+        <label
+          style={{
+            // Span the full grid row so the start / end ParamRows
+            // below pair up as before (col 1 + col 2). Without this
+            // the checkbox would take col 1 and push the start input
+            // out of line with the end input.
+            gridColumn: '1 / -1',
+            display: 'flex', alignItems: 'center', gap: 6,
+            fontSize: 'var(--font-size-label)', marginBottom: 4,
+          }}
+          title="Hide the blue analysis-bounds cursors so you can click through them when adding / removing manual spikes underneath. Bounds values stay; only their on-trace markers are hidden."
+        >
+          <input type="checkbox"
+            checked={showBounds}
+            onChange={(e) => setShowBounds(e.target.checked)} />
+          <span>Show bounds on viewer</span>
+        </label>
         <ParamRow label="Bounds start (s)"
           value={detection.bounds_start_s} step={0.05} min={0}
           onChange={(v) => set('bounds_start_s', Math.max(0, v))} />
@@ -2145,6 +2201,7 @@ function APSweepViewer({
   onXRangeChange,
   onAddSpike,
   onRemoveSpikeAt,
+  showBounds,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -2176,6 +2233,10 @@ function APSweepViewer({
   onAddSpike?: (timeS: number) => void
   /** Click-on-primed-marker confirms removal at that peak time. */
   onRemoveSpikeAt?: (timeS: number) => void
+  /** When false, the analysis-bounds bands are hidden AND the
+   *  drag-edge / drag-band hit-test is skipped, so click-through
+   *  works in the area they normally cover. */
+  showBounds: boolean
 }) {
   void previewSweep; void totalSweeps; void traceUnits
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2217,6 +2278,12 @@ function APSweepViewer({
   // navigation.
   const primedRemoveIdxRef = useRef<number | null>(null)
   useEffect(() => { primedRemoveIdxRef.current = null }, [previewSweep])
+  // Mirror ``showBounds`` into a ref so the once-wired pointer
+  // handlers and the uPlot draw hook always see the latest value
+  // without rebuilding the plot.
+  const showBoundsRef = useRef(showBounds)
+  showBoundsRef.current = showBounds
+  useEffect(() => { plotRef.current?.redraw() }, [showBounds])
 
   const drawOverlays = (u: uPlot) => {
     const ctx = u.ctx
@@ -2243,7 +2310,11 @@ function APSweepViewer({
     const effEnd = b.end > b.start
       ? b.end
       : (u.scales.x.max ?? b.start)
-    drawBand(b.start, effEnd, BOUND_COLOR, 'analysis bounds')
+    // ``showBounds`` toggles the band visibility (and the hit-test
+    // below). Bounds values are kept; the user just hides them.
+    if (showBoundsRef.current) {
+      drawBand(b.start, effEnd, BOUND_COLOR, 'analysis bounds')
+    }
 
     // Per-spike markers on the trace. Drawn on the overlay canvas
     // (separate from the uPlot canvas so they don't interact with
@@ -2551,6 +2622,10 @@ function APSweepViewer({
       const MARKER_HIT_PX = 10
 
       const findHit = (pxX: number): Drag | null => {
+        // Skip hit-test entirely when bounds are hidden — clicking
+        // through the area should pan / add markers, not grab an
+        // invisible cursor edge.
+        if (!showBoundsRef.current) return null
         const b = boundsRef.current
         const effEnd = b.end > b.start ? b.end : (u.scales.x.max ?? b.start)
         const pxStart = xToPx(b.start)

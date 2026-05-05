@@ -378,6 +378,14 @@ type SidecarPayload = {
    *  on every edit. Empty / absent → recording uses file-reported
    *  units and ``y_scale=1, y_offset=0`` (the dormant case). */
   scale_overrides?: ScaleOverrides
+  /** Per-series filter snapshot keyed ``${group}:${series}``. Each
+   *  entry bundles the default ``filter`` plus any per-channel
+   *  overrides so switching series restores the full context. When
+   *  absent, ``selectSweep`` falls back to the legacy events-derived
+   *  filter mirror (so old recordings still match what detection
+   *  saw). Older sidecars that stored a flat ``FilterState`` value
+   *  are migrated on load. */
+  filters_by_series?: Record<string, { filter: FilterState; filtersByChannel?: Record<number, FilterState> } | FilterState>
 }
 
 async function _loadSidecar(filePath: string): Promise<SidecarPayload | null> {
@@ -417,6 +425,8 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
     cursors: state.cursors,
     scale_overrides: Object.keys(state.scaleOverrides).length > 0
       ? state.scaleOverrides : undefined,
+    filters_by_series: Object.keys(state.filtersBySeries).length > 0
+      ? state.filtersBySeries : undefined,
   }
 }
 
@@ -1426,6 +1436,15 @@ interface AppState {
    *  one filter at a time (the panel reads/writes this slot for the
    *  channel the user has selected in the panel). */
   filtersByChannel: Record<number, FilterState>
+  /** Per-series filter snapshot, keyed ``${group}:${series}``. Bundles
+   *  both the default (all-channels) filter AND any per-channel
+   *  overrides — that way switching series faithfully restores the
+   *  whole filter context, no matter which slot ("Default" or a
+   *  specific channel) the user toggled. Round-trips through the
+   *  .neurotrace sidecar; ``selectSweep`` restores it on series
+   *  change, and both ``setFilter`` and ``setFilterFor`` keep the
+   *  current-series slot in sync. */
+  filtersBySeries: Record<string, { filter: FilterState; filtersByChannel: Record<number, FilterState> }>
 
   // Zero offset subtraction
   zeroOffset: boolean
@@ -2048,6 +2067,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   scaleOverrides: {},
   filter: { enabled: false, type: 'bandpass', lowCutoff: 1, highCutoff: 50, order: 4 },
   filtersByChannel: {},
+  filtersBySeries: {},
   zeroOffset: false,
   currentZeroOffset: 0,
   viewport: null,
@@ -2184,7 +2204,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         const cur = next[channel] ?? s.filter
         next[channel] = { ...cur, ...patch }
       }
-      return { filtersByChannel: next }
+      // Per-channel filter changes also belong to the current series
+      // — capture them in the per-series sidecar slot alongside the
+      // default filter so a round-trip through series-select restores
+      // them.
+      const key = `${s.currentGroup}:${s.currentSeries}`
+      const filtersBySeries = {
+        ...s.filtersBySeries,
+        [key]: { filter: s.filter, filtersByChannel: next },
+      }
+      return { filtersByChannel: next, filtersBySeries }
     })
     // Trigger a refetch for the affected channel — the primary
     // goes through ``refetchViewport``; additional channels are
@@ -2209,7 +2238,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     return s.filtersByChannel[channel] ?? s.filter
   },
   setFilter: (f) => {
-    set((s) => ({ filter: { ...s.filter, ...f } }))
+    set((s) => {
+      const filter = { ...s.filter, ...f }
+      // Persist to the per-series sidecar slot for the active series so
+      // navigating away and back restores the same filter state.
+      // Snapshot the per-channel overrides too — restoring just the
+      // default would leave stale per-channel slots from another series.
+      const key = `${s.currentGroup}:${s.currentSeries}`
+      const filtersBySeries = {
+        ...s.filtersBySeries,
+        [key]: { filter, filtersByChannel: s.filtersByChannel },
+      }
+      return { filter, filtersBySeries }
+    })
     // Re-fetch the current trace with updated filter params (respecting viewport).
     const st = get()
     if (!st.backendUrl) return
@@ -2569,6 +2610,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // entries in place lets a re-open within the same session
       // restore the user's last zoom on that file.
       filtersByChannel: {},
+      // Per-series filter overrides are file-scoped — wipe them on
+      // open so a new recording starts with a clean slate (the
+      // sidecar load below will repopulate if it has any).
+      filtersBySeries: {},
     })
     try {
       const recording = await apiFetch(backendUrl, '/api/files/open', {
@@ -2684,6 +2729,30 @@ export const useAppStore = create<AppState>((set, get) => ({
             patch.cursors = { ...get().cursors, ...sidecar.cursors }
             post({ type: 'cursor-update', cursors: patch.cursors })
           }
+          // Per-series filter overrides — restore the dictionary so
+          // selectSweep can pick the right filter when the user
+          // navigates between series. The active filter will get
+          // mirrored from this dict the next time selectSweep runs.
+          // Older sidecars stored a flat ``FilterState`` per series;
+          // migrate by wrapping it into the new bundle shape.
+          if (sidecar.filters_by_series && Object.keys(sidecar.filters_by_series).length > 0) {
+            const migrated: AppState['filtersBySeries'] = {}
+            for (const [k, v] of Object.entries(sidecar.filters_by_series)) {
+              if (v && typeof v === 'object' && 'filter' in (v as any)) {
+                const slot = v as { filter: FilterState; filtersByChannel?: Record<number, FilterState> }
+                migrated[k] = {
+                  filter: slot.filter,
+                  filtersByChannel: slot.filtersByChannel ?? {},
+                }
+              } else {
+                migrated[k] = {
+                  filter: v as FilterState,
+                  filtersByChannel: {},
+                }
+              }
+            }
+            patch.filtersBySeries = migrated
+          }
           if (sidecar.forms?.resistance) {
             patch.resistanceForm = { ...get().resistanceForm, ...sidecar.forms.resistance }
           }
@@ -2791,42 +2860,60 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    // When navigating to a series that has stored event-detection
-    // results, mirror the filter the detector ran with into the main
-    // viewer's filter slice. Without this, the displayed trace is
-    // unfiltered while the event markers were computed against the
-    // filtered trace — peaks would visibly miss the trace by a few
-    // samples and amplitudes wouldn't read correctly off the line.
+    // When navigating to a series, ALWAYS pick an explicit filter
+    // context for that series so the previous series' filter doesn't
+    // bleed through. The per-series slot bundles both the default
+    // ``filter`` and the ``filtersByChannel`` overrides — restoring
+    // both keeps the per-channel picker honest. Resolution order:
+    //   1. Per-series sidecar slot (the user's remembered choice)
+    //   2. Events-derived mirror (back-compat for recordings whose
+    //      events were detected with a filter, before the per-series
+    //      slot existed — keeps the displayed trace matching what
+    //      detection saw; only fills the default slot)
+    //   3. Filter OFF, with the user's last-used params kept so a
+    //      simple toggle picks up where they left off.
     //
     // Field-name shim: ``EventsParams`` uses ``filterLow / filterHigh``
     // while the main store's ``FilterState`` uses ``lowCutoff /
     // highCutoff``. Same numbers, different keys.
-    //
-    // Series with no stored events leave the filter alone — switching
-    // away from a filtered series doesn't auto-reset, so the user
-    // can intentionally keep the same filter across series.
     if (seriesChanged) {
       const evKey = `${group}:${series}`
-      const evEntry = state.eventsAnalyses[evKey]
-      const evParams = evEntry?.params
-      if (evParams) {
-        const nextFilter: FilterState = {
-          enabled: !!evParams.filterEnabled,
-          type: evParams.filterType,
-          lowCutoff: Number(evParams.filterLow ?? 1),
-          highCutoff: Number(evParams.filterHigh ?? 1000),
-          order: Number(evParams.filterOrder ?? 1),
+      const slot = state.filtersBySeries[evKey]
+      let nextFilter: FilterState
+      let nextFiltersByChannel: Record<number, FilterState>
+      if (slot) {
+        nextFilter = slot.filter
+        nextFiltersByChannel = slot.filtersByChannel ?? {}
+      } else {
+        const evParams = state.eventsAnalyses[evKey]?.params
+        if (evParams) {
+          nextFilter = {
+            enabled: !!evParams.filterEnabled,
+            type: evParams.filterType,
+            lowCutoff: Number(evParams.filterLow ?? 1),
+            highCutoff: Number(evParams.filterHigh ?? 1000),
+            order: Number(evParams.filterOrder ?? 1),
+          }
+        } else {
+          // Default-off, params inherited from the prior filter so
+          // toggling on later keeps the user's chosen cutoffs.
+          nextFilter = { ...state.filter, enabled: false }
         }
-        patch.filter = nextFilter
-        // Echo to other windows so the analysis-window filter strip
-        // stays in lockstep — same broadcast type the detection
-        // window listens for.
-        try {
-          const ch = new BroadcastChannel('neurotrace-sync')
-          ch.postMessage({ type: 'detection-filter', filter: nextFilter })
-          ch.close()
-        } catch { /* ignore */ }
+        // Series with no slot start with no per-channel overrides —
+        // the per-channel UI shouldn't carry data from a previous
+        // series' channel pinned by index alone.
+        nextFiltersByChannel = {}
       }
+      patch.filter = nextFilter
+      patch.filtersByChannel = nextFiltersByChannel
+      // Echo to other windows so the analysis-window filter strip
+      // stays in lockstep — same broadcast type the detection
+      // window listens for.
+      try {
+        const ch = new BroadcastChannel('neurotrace-sync')
+        ch.postMessage({ type: 'detection-filter', filter: nextFilter })
+        ch.close()
+      } catch { /* ignore */ }
     }
 
     set(patch)
@@ -4976,6 +5063,7 @@ let _sidecarRefs = {
   resistanceForm: null as any,
   recordingMeta: null as any,
   scaleOverrides: null as any,
+  filtersBySeries: null as any,
 }
 useAppStore.subscribe((state) => {
   // Same gate as the per-slice prefs subscribers above: skip while
@@ -4999,6 +5087,7 @@ useAppStore.subscribe((state) => {
     resistanceForm: state.resistanceForm,
     recordingMeta: state.recordingMeta,
     scaleOverrides: state.scaleOverrides,
+    filtersBySeries: state.filtersBySeries,
   }
   // Reference-equality check across the tracked slices — avoids
   // re-scheduling on unrelated state churn (e.g. trace fetches).

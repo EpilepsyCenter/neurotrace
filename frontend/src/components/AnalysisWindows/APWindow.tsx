@@ -16,6 +16,7 @@ import { usePlotMenu } from '../common/PlotMenu'
 import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { attachHoverCoords } from '../../utils/hoverCoords'
+import { sampleTraceYAt } from '../../utils/sampleTraceY'
 
 /**
  * Action Potentials analysis window.
@@ -2241,10 +2242,24 @@ function APSweepViewer({
     oCtx.clearRect(0, 0, cssW, cssH)
     if (spikes.length === 0) return
 
-    const toPx = (t: number, v: number): [number, number] => [
+    // toPx variants. ``toPxRaw`` keeps the legacy "use stored y"
+    // behaviour for half-amplitude crossings (whose y is computed,
+    // not sampled). ``toPx`` samples the displayed trace at time t so
+    // peak / threshold / fAHP / mAHP dots ride on the visible line
+    // regardless of filter state. Falls back to the stored y when
+    // sampling isn't available (out-of-range / unloaded trace).
+    const toPxRaw = (t: number, v: number): [number, number] => [
       u.valToPos(t, 'x', true) / dpr,
       u.valToPos(v - offset, 'y', true) / dpr,
     ]
+    const toPx = (t: number, fallbackV: number): [number, number] => {
+      const sampled = sampleTraceYAt(traceTime, traceValues, t)
+      const yUse = sampled != null ? sampled - offset : (fallbackV - offset)
+      return [
+        u.valToPos(t, 'x', true) / dpr,
+        u.valToPos(yUse, 'y', true) / dpr,
+      ]
+    }
     const dot = (px: number, py: number, color: string, ring: boolean = false) => {
       if (!isFinite(px) || !isFinite(py)) return
       oCtx.beginPath()
@@ -2902,6 +2917,15 @@ function APSpikesOverlayViewer({
     // legend once. The trace LINES are colour-cycled per spike; only
     // the marker dots use these semantic colours.
     spikesToShow.forEach((sp) => {
+      // Per-spike slice (time relative to peak, values aligned). When
+      // present, sample it for marker y so dots ride the displayed
+      // trace under filter / no-filter, falling back to the stored y.
+      const slice = slicesRef.current[`${sp.sweep}:${sp.peakT}`]
+      const sliceY = (xRel: number, fallbackY: number) => {
+        if (!slice || slice.time.length < 2) return fallbackY
+        const s = sampleTraceYAt(slice.time, slice.values, xRel)
+        return s != null ? s : fallbackY
+      }
       const dotAt = (xRel: number, y: number, colour: string) => {
         const px = u.valToPos(xRel, 'x', true) / dpr
         const py = u.valToPos(y, 'y', true) / dpr
@@ -2914,15 +2938,18 @@ function APSpikesOverlayViewer({
         ctx.stroke()
       }
       // x is time-relative-to-peak (s).
-      dotAt(0, sp.peakVm, '#e57373')                            // peak (red)
+      dotAt(0, sliceY(0, sp.peakVm), '#e57373')                 // peak (red)
       if (sp.thresholdT !== 0 || sp.thresholdVm !== 0) {
-        dotAt(sp.thresholdT - sp.peakT, sp.thresholdVm, '#9e9e9e')  // threshold
+        const xR = sp.thresholdT - sp.peakT
+        dotAt(xR, sliceY(xR, sp.thresholdVm), '#9e9e9e')        // threshold
       }
       if (sp.fahpT != null && sp.fahpVm != null) {
-        dotAt(sp.fahpT - sp.peakT, sp.fahpVm, '#ffb74d')        // fAHP
+        const xR = sp.fahpT - sp.peakT
+        dotAt(xR, sliceY(xR, sp.fahpVm), '#ffb74d')             // fAHP
       }
       if (sp.mahpT != null && sp.mahpVm != null) {
-        dotAt(sp.mahpT - sp.peakT, sp.mahpVm, '#ff7043')        // mAHP
+        const xR = sp.mahpT - sp.peakT
+        dotAt(xR, sliceY(xR, sp.mahpVm), '#ff7043')             // mAHP
       }
       // FWHM crossings — walk the per-spike slice to find the two
       // times the trace actually crosses (threshold + amp/2). Dots

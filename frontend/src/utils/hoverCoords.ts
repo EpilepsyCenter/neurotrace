@@ -9,7 +9,13 @@ export type HoverCoordOptions = {
 }
 
 function createTip(container: HTMLElement): HTMLDivElement {
+  // Mini-viewers rebuild the uPlot instance on data change, calling
+  // attachHoverCoords each time. Strip any prior tip we left in this
+  // container so badges don't multiply during pan/rebuild storms.
+  const prior = container.querySelectorAll('[data-hover-coords-tip="1"]')
+  prior.forEach((n) => n.remove())
   const tip = document.createElement('div')
+  tip.setAttribute('data-hover-coords-tip', '1')
   tip.style.position = 'absolute'
   tip.style.display = 'none'
   tip.style.pointerEvents = 'none'

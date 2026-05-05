@@ -6,6 +6,7 @@ import { useThemeStore } from '../../stores/themeStore'
 import { ViewportBar, ViewportSlider } from './ViewportBar'
 import { usePlotMenu } from '../common/PlotMenu'
 import { Welcome } from '../Welcome/Welcome'
+import { sampleTraceYAt } from '../../utils/sampleTraceY'
 
 // Palette for non-primary recorded channels. Must match TracesDropdown.
 const ADDITIONAL_CHANNEL_COLOR_VARS = [
@@ -278,23 +279,32 @@ export function TraceViewer() {
         end: '#81c784',        // green
       }
 
+      // Pull the displayed trace samples (already filter / zero-offset
+      // adjusted server-side) so markers track whatever's actually on
+      // screen. Falls back to the stored y-values if the trace isn't
+      // loaded for some reason.
+      const tdB = traceDataRef.current
+      const ttB = tdB?.time
+      const tvB = tdB?.values
       for (let i = 0; i < fb.bursts.length; i++) {
         const b = fb.bursts[i]
         if (b.sweepIndex !== sweep) continue
         if (b.endS < xMin || b.startS > xMax) continue
 
-        const toPx = (x: number, y: number): [number, number] => {
+        const toPxAtTrace = (x: number, fallback: number): [number, number] => {
+          const sampled = sampleTraceYAt(ttB, tvB, x)
+          const yUse = sampled != null ? sampled : (fallback - yOffset)
           const px = u.valToPos(x, 'x', true) / dpr
-          const py = u.valToPos(y - yOffset, 'y', true) / dpr
+          const py = u.valToPos(yUse, 'y', true) / dpr
           return [px, py]
         }
         const peakY = b.preBurstBaseline + b.peakSigned
-        const [px0, py0] = toPx(b.startS, b.preBurstBaseline)
-        const [px1, py1] = toPx(b.peakTimeS, peakY)
-        const [px3, py3] = toPx(b.endS, b.preBurstBaseline)
+        const [px0, py0] = toPxAtTrace(b.startS, b.preBurstBaseline)
+        const [px1, py1] = toPxAtTrace(b.peakTimeS, peakY)
+        const [px3, py3] = toPxAtTrace(b.endS, b.preBurstBaseline)
         const decayCoord =
           b.decayHalfTimeMs != null
-            ? toPx(
+            ? toPxAtTrace(
                 b.peakTimeS + b.decayHalfTimeMs / 1000,
                 b.preBurstBaseline + b.peakSigned * 0.5,
               )
@@ -381,14 +391,19 @@ export function TraceViewer() {
         const tv = td?.values
         for (const sp of sweepSpikes) {
           if (sp.peakT < xMin2 || sp.peakT > xMax2) continue
-          // Peak (always)
+          // Peak (always) — sample displayed trace so the dot stays
+          // glued to the line under filter / no-filter / zero-offset.
+          const peakSampled = sampleTraceYAt(tt, tv, sp.peakT)
+          const peakY = peakSampled != null ? peakSampled : (sp.peakVm - yOffset)
           const px = u.valToPos(sp.peakT, 'x', true) / dpr
-          const py = u.valToPos(sp.peakVm - yOffset, 'y', true) / dpr
+          const py = u.valToPos(peakY, 'y', true) / dpr
           drawAPDot(px, py, '#e57373', sp.manual)
           // Threshold (when kinetics measured)
           if (sp.thresholdT !== 0 || sp.thresholdVm !== 0) {
+            const thrSampled = sampleTraceYAt(tt, tv, sp.thresholdT)
+            const thrY = thrSampled != null ? thrSampled : (sp.thresholdVm - yOffset)
             const tpx = u.valToPos(sp.thresholdT, 'x', true) / dpr
-            const tpy = u.valToPos(sp.thresholdVm - yOffset, 'y', true) / dpr
+            const tpy = u.valToPos(thrY, 'y', true) / dpr
             drawAPDot(tpx, tpy, '#9e9e9e')
           }
           // FWHM crossings — find them on the main viewer's trace
@@ -449,14 +464,18 @@ export function TraceViewer() {
           }
           // fAHP
           if (sp.fahpVm != null && sp.fahpT != null) {
+            const fSampled = sampleTraceYAt(tt, tv, sp.fahpT)
+            const fY = fSampled != null ? fSampled : (sp.fahpVm - yOffset)
             const px2 = u.valToPos(sp.fahpT, 'x', true) / dpr
-            const py2 = u.valToPos(sp.fahpVm - yOffset, 'y', true) / dpr
+            const py2 = u.valToPos(fY, 'y', true) / dpr
             drawAPDot(px2, py2, '#ffb74d')
           }
           // mAHP
           if (sp.mahpVm != null && sp.mahpT != null) {
+            const mSampled = sampleTraceYAt(tt, tv, sp.mahpT)
+            const mY = mSampled != null ? mSampled : (sp.mahpVm - yOffset)
             const px3 = u.valToPos(sp.mahpT, 'x', true) / dpr
-            const py3 = u.valToPos(sp.mahpVm - yOffset, 'y', true) / dpr
+            const py3 = u.valToPos(mY, 'y', true) / dpr
             drawAPDot(px3, py3, '#ff7043')
           }
         }
@@ -517,25 +536,34 @@ export function TraceViewer() {
           ctx.lineWidth = 1.5
           ctx.stroke()
         }
+        const tdE = traceDataRef.current
+        const ttE = tdE?.time
+        const tvE = tdE?.values
         for (let i = 0; i < ev.events.length; i++) {
           const e = ev.events[i]
           if (e.peakTimeS < xMin3 || e.peakTimeS > xMax3) continue
-          // Peak (red, larger for selected)
+          // Peak (red, larger for selected) — sample displayed trace
+          // so the dot follows the line under any filter / offset.
           const selected = i === ev.selectedIdx
+          const peakSampled = sampleTraceYAt(ttE, tvE, e.peakTimeS)
+          const peakY = peakSampled != null ? peakSampled : (e.peakVal - yOffset)
           const px = u.valToPos(e.peakTimeS, 'x', true) / dpr
-          const py = u.valToPos(e.peakVal - yOffset, 'y', true) / dpr
+          const py = u.valToPos(peakY, 'y', true) / dpr
           drawEvDot(px, py, e.manual ? '#ffb74d' : '#e57373', selected ? PEAK_R_SELECTED : PEAK_R)
-          // Foot (gray) at (footTimeS, baselineVal)
+          // Foot (gray) at footTimeS — also pinned to the trace.
+          const footSampled = sampleTraceYAt(ttE, tvE, e.footTimeS)
+          const footY = footSampled != null ? footSampled : (e.baselineVal - yOffset)
           const fpx = u.valToPos(e.footTimeS, 'x', true) / dpr
-          const fpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
+          const fpy = u.valToPos(footY, 'y', true) / dpr
           drawEvDot(fpx, fpy, '#9e9e9e', FOOT_R)
-          // Decay endpoint (purple) at (endpointT, baselineVal) — the
-          // endpoint is where the trace returned to baseline, so the
-          // y-value is the event baseline.
+          // Decay endpoint (purple) — the endpoint sits on the trace
+          // where it returned to baseline, so sample there too.
           if (e.decayEndpointIdx != null) {
             const endpointT = e.decayEndpointIdx / sr
+            const epSampled = sampleTraceYAt(ttE, tvE, endpointT)
+            const epY = epSampled != null ? epSampled : (e.baselineVal - yOffset)
             const dpx = u.valToPos(endpointT, 'x', true) / dpr
-            const dpy = u.valToPos(e.baselineVal - yOffset, 'y', true) / dpr
+            const dpy = u.valToPos(epY, 'y', true) / dpr
             drawEvDot(dpx, dpy, '#ab47bc', ENDPOINT_R)
           }
         }

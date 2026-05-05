@@ -404,7 +404,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
   return {
     format: 'neurotrace-sidecar',
     version: SIDECAR_VERSION,
-    app_version: '0.4.0',
+    app_version: '0.5.0',
     recording_name: state.recording?.filePath?.split(/[/\\]/).pop(),
     meta: state.recordingMeta ?? undefined,
     analyses: {

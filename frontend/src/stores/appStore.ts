@@ -1508,17 +1508,30 @@ export function defaultPairedForm(): PairedFormState {
       min_distance_ms: 5.0,
       bounds_start_s: 0.0,
       bounds_end_s: 0.0,
+      // Pre-detection filter (off by default — pre channels are
+      // typically AP traces or square TTL pulses where filtering
+      // wouldn't help). Same key shape the backend's filter helper
+      // expects for the rest of the analyses.
+      filter_enabled: false,
+      filter_type: 'lowpass',
+      filter_low: 1.0,
+      filter_high: 1000.0,
+      filter_order: 1,
     },
     postParams: {
       preMs: 1.0,
       postMs: 30.0,
       baselineMs: 2.0,
       peakDirection: 'auto',
-      filterEnabled: false,
+      // Post pre-detection filter — on by default with lowpass
+      // 1 kHz, order 1. Post channels are usually noisy PSCs / PSPs
+      // where a gentle lowpass removes high-frequency hash without
+      // distorting the rising edge enough to bias rise / latency.
+      filterEnabled: true,
       filterType: 'lowpass',
       filterLow: 1.0,
       filterHigh: 1000.0,
-      filterOrder: 2,
+      filterOrder: 1,
     },
     failureParams: {
       rule: 'k_sd',

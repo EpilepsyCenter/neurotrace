@@ -1394,6 +1394,10 @@ export interface PairedTrial {
   latencyMs: number | null
   riseMs: number | null
   decayMs: number | null
+  /** Monoexponential decay τ from a fit on the post window. Same
+   *  estimator as ``analysis.events.measure_event_kinetics``. */
+  decayTauMs: number | null
+  halfWidthMs: number | null
   truncated: boolean
   manual: boolean
 }

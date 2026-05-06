@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import {
-  PairedData, PairedFormState, PairedTrial,
+  PairedData, PairedFormState, PairedManualEdits, PairedTrial,
   defaultPairedForm, useAppStore,
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
@@ -225,6 +225,23 @@ export function PairedWindow({
   // Reset shared X when we switch series.
   useEffect(() => { setXRange(null) }, [group, series])
 
+  // ---- Manual edits (pre-event add / remove via clicks on the viewer) ----
+  // Local React state so click handlers can mutate fast and the
+  // re-run hits the latest values via a ref (the run callback is
+  // useCallback'd; we don't want clicks to recreate it). The
+  // rehydration effect copies the most recently-stored edits back
+  // into local state when the user navigates between series.
+  const [manualEdits, setManualEdits] = useState<PairedManualEdits>(
+    { added: {}, removed: {} },
+  )
+  const manualEditsRef = useRef(manualEdits)
+  manualEditsRef.current = manualEdits
+  useEffect(() => {
+    const stored = pairedAnalyses[`${group}:${series}`]
+    setManualEdits(stored?.manualEdits ?? { added: {}, removed: {} })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group, series])
+
   // ---- Post-detection bounds (analysis cursors on the post viewer) ----
   // ``null`` start = no clip (use post_ms only). When both are set,
   // peak search per trial is intersected with [start, end] in
@@ -358,7 +375,7 @@ export function PairedWindow({
           rule: form.latencyParams.rule,
           fraction: form.latencyParams.fraction,
         },
-        manual_edits: pairedAnalyses[formKey]?.manualEdits ?? null,
+        manual_edits: manualEditsRef.current ?? null,
       }
       const r = await fetch(`${backendUrl}/api/paired/run`, {
         method: 'POST',
@@ -381,7 +398,7 @@ export function PairedWindow({
         postParams: form.postParams,
         failureParams: form.failureParams,
         latencyParams: form.latencyParams,
-        manualEdits: pairedAnalyses[formKey]?.manualEdits ?? { added: {}, removed: {} },
+        manualEdits: manualEditsRef.current,
         perTrial: (d.per_trial as any[]).map((t: any): PairedTrial => ({
           sweep: t.sweep,
           trialIdx: t.trial_idx,
@@ -447,6 +464,54 @@ export function PairedWindow({
   ])
 
   const stored = pairedAnalyses[formKey] ?? null
+
+  // ---- Manual click handlers (pre + post viewer) ----
+  // ``onAddPreEvent`` is called when the user left-clicks on empty
+  // space in either viewer — adds a new pre event at the click time.
+  // ``onRemoveTrialAt`` is called when the prime + reclick gesture
+  // confirms a removal — drops the corresponding pre event from the
+  // detected list (or from manualEdits.added if it was a manual add).
+  // Both trigger an immediate re-run via setTimeout so the closure
+  // sees the just-updated manualEditsRef value.
+  const onAddPreEvent = useCallback((t: number) => {
+    if (totalSweeps === 0) return
+    setManualEdits((prev) => {
+      const added = { ...prev.added }
+      const arr = added[sweep] ? [...added[sweep]] : []
+      arr.push(t)
+      added[sweep] = arr
+      return { ...prev, added }
+    })
+    setTimeout(() => onRun(), 0)
+  }, [sweep, onRun, totalSweeps])
+  const onRemoveTrialAt = useCallback((preT: number) => {
+    if (totalSweeps === 0) return
+    // Tolerance for matching: minimum spacing between pre events,
+    // converted to seconds. Falls back to 1 ms if not set.
+    const minDistMs = Number(form.preParams.min_distance_ms ?? 2.0)
+    const tol = Math.max(0.001, minDistMs / 1000.0)
+    setManualEdits((prev) => {
+      const addedSweep = prev.added[sweep] ?? []
+      // Was this a manual add? Then strip it from added (instead
+      // of pushing to removed, which would create both add+remove
+      // entries that cancel out).
+      const matchAddedIdx = addedSweep.findIndex((x) => Math.abs(x - preT) <= tol)
+      if (matchAddedIdx >= 0) {
+        const arr = [...addedSweep]
+        arr.splice(matchAddedIdx, 1)
+        const added = { ...prev.added, [sweep]: arr }
+        if (arr.length === 0) delete added[sweep]
+        return { ...prev, added }
+      }
+      // Auto-detected event — push to removed.
+      const removed = { ...prev.removed }
+      const arr = removed[sweep] ? [...removed[sweep]] : []
+      arr.push(preT)
+      removed[sweep] = arr
+      return { ...prev, removed }
+    })
+    setTimeout(() => onRun(), 0)
+  }, [sweep, onRun, totalSweeps, form.preParams.min_distance_ms])
 
   // ---- Resizable left sidebar ----
   const [leftPanelWidth, setLeftPanelWidth] = useState(360)
@@ -673,13 +738,15 @@ export function PairedWindow({
               detectionMarkers={stored && stored.preTrace === preTrace
                 ? stored.perTrial
                     .filter((t) => t.sweep === sweep)
-                    .map((t) => ({ t: t.preTS, manual: t.manual }))
+                    .map((t) => ({ t: t.preTS, preT: t.preTS, manual: t.manual }))
                 : []}
               postPeakMarkers={stored && stored.postTrace === postTrace
                 ? stored.perTrial.filter((t) => t.sweep === sweep).map((t) => ({
-                  t: t.postPeakTS, y: t.postPeak, success: t.success,
+                  t: t.postPeakTS, y: t.postPeak, preT: t.preTS, success: t.success,
                 }))
                 : []}
+              onAddPreEvent={onAddPreEvent}
+              onRemoveTrialAt={onRemoveTrialAt}
               preBounds={{
                 start: Number(form.preParams.bounds_start_s ?? 0),
                 end:   Number(form.preParams.bounds_end_s ?? 0),
@@ -1252,6 +1319,7 @@ function OverlayViewer({
   detectionMarkers, postPeakMarkers,
   preBounds, onPreBoundsChange, showPreBounds,
   postBounds, onPostBoundsChange, showPostBounds,
+  onAddPreEvent, onRemoveTrialAt,
 }: {
   preData: { time: number[]; values: number[] } | null
   postData: { time: number[]; values: number[] } | null
@@ -1262,14 +1330,23 @@ function OverlayViewer({
   xRange: [number, number] | null
   onXRangeChange: (r: [number, number] | null) => void
   heightSignal?: number
-  detectionMarkers: { t: number; manual: boolean }[]
-  postPeakMarkers?: { t: number; y: number; success: boolean }[]
+  /** Each pre marker carries the trial's pre-event time (``preT``)
+   *  so a click can prime / remove the corresponding trial. */
+  detectionMarkers: { t: number; preT: number; manual: boolean }[]
+  /** Each post marker carries the trial's pre-event time (``preT``)
+   *  too — clicking a post marker primes / removes the SAME trial. */
+  postPeakMarkers?: { t: number; y: number; preT: number; success: boolean }[]
   preBounds: { start: number; end: number }
   onPreBoundsChange: (next: { start: number; end: number }) => void
   showPreBounds: boolean
   postBounds: { start: number | null; end: number | null }
   onPostBoundsChange: (next: { start: number | null; end: number | null }) => void
   showPostBounds: boolean
+  /** Click on empty area → add a pre event at that time. */
+  onAddPreEvent?: (t: number) => void
+  /** Confirmed prime+reclick → remove the trial whose pre event is
+   *  at ``preT``. */
+  onRemoveTrialAt?: (preT: number) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -1299,6 +1376,18 @@ function OverlayViewer({
   onPreBoundsRef.current = onPreBoundsChange
   const onPostBoundsRef = useRef(onPostBoundsChange)
   onPostBoundsRef.current = onPostBoundsChange
+  const onAddPreEventRef = useRef(onAddPreEvent)
+  onAddPreEventRef.current = onAddPreEvent
+  const onRemoveTrialAtRef = useRef(onRemoveTrialAt)
+  onRemoveTrialAtRef.current = onRemoveTrialAt
+  // Currently primed trial (= pre-event time) — click a marker once
+  // to prime, click the same one again to confirm remove. Cleared
+  // by clicking empty space, switching sweeps, or starting a drag.
+  const primedPreTRef = useRef<number | null>(null)
+  // Reset the prime when sweep data changes — the user's "I want to
+  // delete THIS one" intent doesn't carry across sweep navigation
+  // or re-runs.
+  useEffect(() => { primedPreTRef.current = null }, [preData, postData])
   const [, setVer] = useState(0)
   const bump = useCallback(() => setVer((n) => n + 1), [])
   // Bumped from inside the rebuild RAF callback once the new uPlot
@@ -1529,6 +1618,8 @@ function OverlayViewer({
     // overlay drawing. Replaces the old "next sample after t"
     // bisect logic that put the dot below the actual peak when
     // LTTB decimation removed the peak sample.
+    const primedT = primedPreTRef.current
+    const tolPrime = 1e-6
     const markers = detectionRef.current
     if (markers.length > 0 && preData) {
       ctx.save()
@@ -1537,19 +1628,32 @@ function OverlayViewer({
         if (sampled == null) continue
         const px = u.valToPos(m.t, 'x', true)
         const py = u.valToPos(sampled, 'y', true)
+        // Manual edits get the AP-style outer ring; primed-for-
+        // remove markers get a thicker confirmation ring on top.
         dot(px, py, PRE_MARKER_COLOR, m.manual)
+        if (primedT != null && Math.abs(primedT - m.preT) <= tolPrime) {
+          ctx.beginPath()
+          ctx.arc(px, py, MARKER_RING_RADIUS + 2, 0, Math.PI * 2)
+          ctx.strokeStyle = '#64b5f6'; ctx.lineWidth = 2; ctx.stroke()
+        }
       }
       ctx.restore()
     }
     // Post-peak markers (success / failure) — y is in post units, so
-    // route through the y_post scale.
+    // route through the y_post scale. Same primed ring treatment.
     const ppm = postPeakRef.current
     if (ppm.length > 0) {
       ctx.save()
       for (const m of ppm) {
+        if (!isFinite(m.y)) continue
         const px = u.valToPos(m.t, 'x', true)
         const py = u.valToPos(m.y, 'y_post', true)
         dot(px, py, m.success ? SUCCESS_COLOR : FAILURE_COLOR, false)
+        if (primedT != null && Math.abs(primedT - m.preT) <= tolPrime) {
+          ctx.beginPath()
+          ctx.arc(px, py, MARKER_RING_RADIUS + 2, 0, Math.PI * 2)
+          ctx.strokeStyle = '#64b5f6'; ctx.lineWidth = 2; ctx.stroke()
+        }
       }
       ctx.restore()
     }
@@ -1607,6 +1711,39 @@ function OverlayViewer({
       return bestKey
     }
 
+    const MARKER_HIT_PX = 10
+    // Marker hit-test — returns the trial's pre-event time of the
+    // closest pre OR post marker within MARKER_HIT_PX, or null. Lets
+    // the user click any marker (pre or post) to manage the same
+    // trial. Pre markers ride the displayed pre line; post markers
+    // sit on the post Y axis.
+    const findMarkerHit = (pxX: number, pxY: number): number | null => {
+      let bestT: number | null = null
+      let bestD = Infinity
+      const pre = detectionRef.current
+      if (preData && pre.length > 0) {
+        for (const m of pre) {
+          const sampled = sampleTraceYAt(preData.time, preData.values, m.t)
+          if (sampled == null) continue
+          const px = u.valToPos(m.t, 'x', false)
+          const py = u.valToPos(sampled, 'y', false)
+          const d = Math.hypot(px - pxX, py - pxY)
+          if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+        }
+      }
+      const post = postPeakRef.current
+      if (post.length > 0) {
+        for (const m of post) {
+          if (!isFinite(m.y)) continue
+          const px = u.valToPos(m.t, 'x', false)
+          const py = u.valToPos(m.y, 'y_post' as any, false)
+          const d = Math.hypot(px - pxX, py - pxY)
+          if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+        }
+      }
+      return bestT
+    }
+
     const findHit = (pxX: number): Drag | null => {
       // Test post bounds first (drawn on top, more interactive).
       if (showPostBoundsRef.current) {
@@ -1650,23 +1787,45 @@ function OverlayViewer({
       const rect = over.getBoundingClientRect()
       const pxX = ev.clientX - rect.left
       const pxY = ev.clientY - rect.top
+
+      // Priority 1: bound edges / band — drag the cursor.
       const hit = findHit(pxX)
       if (hit) {
         drag = hit
-      } else {
-        // Pick the Y axis to pan based on cursor proximity at
-        // mousedown — sticky for the whole drag so panning across
-        // the other trace doesn't switch axes mid-drag.
-        const yKey = pickYScale(pxX, pxY)
-        const ys = (u.scales as any)[yKey]
-        drag = {
-          kind: 'maybe-pan',
-          startX: pxX, startY: pxY,
-          xMin: u.scales.x.min ?? 0, xMax: u.scales.x.max ?? 1,
-          yKey,
-          yMin: ys?.min ?? 0, yMax: ys?.max ?? 1,
-          panning: false,
+        try { over.setPointerCapture(ev.pointerId) } catch { /* ignore */ }
+        return
+      }
+
+      // Priority 2: marker (pre or post) — prime on first click,
+      // confirm remove on second click of the same primed trial.
+      // Same gesture as AP / Events / Bursts.
+      const markerT = findMarkerHit(pxX, pxY)
+      if (markerT != null) {
+        if (primedPreTRef.current != null
+            && Math.abs(primedPreTRef.current - markerT) < 1e-6) {
+          primedPreTRef.current = null
+          plotRef.current?.redraw()
+          onRemoveTrialAtRef.current?.(markerT)
+        } else {
+          primedPreTRef.current = markerT
+          plotRef.current?.redraw()
         }
+        ev.preventDefault()
+        return
+      }
+
+      // Priority 3: empty space — start click-or-pan. Plain click
+      // (release without movement) ADDS a new pre event at click
+      // time. Movement past DRAG_THRESHOLD_PX commits to a pan.
+      const yKey = pickYScale(pxX, pxY)
+      const ys = (u.scales as any)[yKey]
+      drag = {
+        kind: 'maybe-pan',
+        startX: pxX, startY: pxY,
+        xMin: u.scales.x.min ?? 0, xMax: u.scales.x.max ?? 1,
+        yKey,
+        yMin: ys?.min ?? 0, yMax: ys?.max ?? 1,
+        panning: false,
       }
       try { over.setPointerCapture(ev.pointerId) } catch { /* ignore */ }
     }
@@ -1750,7 +1909,26 @@ function OverlayViewer({
         onXRef.current(nx)
       }
     }
-    const onPointerUp = () => { drag = null; over.style.cursor = '' }
+    const onPointerUp = (ev: PointerEvent) => {
+      if (!drag) return
+      // Capture click-or-pan resolution before clearing drag.
+      const clickCandidate = drag.kind === 'maybe-pan' && !drag.panning
+      drag = null
+      try { over.releasePointerCapture(ev.pointerId) } catch { /* ignore */ }
+      over.style.cursor = ''
+      if (clickCandidate) {
+        const rect = over.getBoundingClientRect()
+        const pxX = ev.clientX - rect.left
+        const tClick = pxToX(pxX)
+        // Clicking empty space cancels any prime — same as AP /
+        // Events: "no, don't delete that one".
+        if (primedPreTRef.current != null) {
+          primedPreTRef.current = null
+          plotRef.current?.redraw()
+        }
+        if (isFinite(tClick)) onAddPreEventRef.current?.(tClick)
+      }
+    }
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault()
       const rect = over.getBoundingClientRect()

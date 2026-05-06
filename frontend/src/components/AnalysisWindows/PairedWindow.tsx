@@ -47,8 +47,15 @@ export function PairedWindow({
     pairedAnalyses, pairedForm, setPairedAnalysis, clearPairedAnalysis, setPairedForm,
   } = useAppStore()
   const theme = useThemeStore((s) => s.theme)
+  const palette = useThemeStore((s) => s.palette)
   const fontSize = useThemeStore((s) => s.fontSize)
-  void theme; void fontSize  // referenced only to make uPlot rebuilds reactive to theme
+  // Subscribe to traceColors so per-slot overrides set in the
+  // global Settings panel re-render the viewer (cssVar() resolves
+  // ``--trace-color-N`` against :root, which themeStore updates
+  // when the user picks a new colour). Reference everything to
+  // keep the subscriptions live.
+  const traceColors = useThemeStore((s) => s.traceColors)
+  void theme; void fontSize; void palette; void traceColors
 
   // ---- Selectors ----
   const [group, setGroup] = useState(mainGroup ?? 0)
@@ -359,12 +366,13 @@ export function PairedWindow({
           filter_high: form.postParams.filterHigh,
           filter_order: form.postParams.filterOrder,
           // Optional absolute-time clip from the post-search cursors.
-          // Only applied when the user has the cursors visible —
-          // unchecking the box treats them as inactive even if the
-          // numeric values are still in state. Backend treats null /
+          // Applied whenever both values are set, regardless of
+          // whether the user has the visualisation checkbox ticked
+          // (the checkbox is now visibility-only — clear the start /
+          // end values to disable the clip). Backend treats null /
           // undefined as "no clip".
-          post_search_start_s: showPostBounds ? postBounds.start : null,
-          post_search_end_s:   showPostBounds ? postBounds.end   : null,
+          post_search_start_s: postBounds.start,
+          post_search_end_s:   postBounds.end,
         },
         failure_params: {
           rule: form.failureParams.rule,
@@ -375,7 +383,13 @@ export function PairedWindow({
           rule: form.latencyParams.rule,
           fraction: form.latencyParams.fraction,
         },
-        manual_edits: manualEditsRef.current ?? null,
+        manual_edits: manualEditsRef.current ? {
+          added: manualEditsRef.current.added,
+          removed: manualEditsRef.current.removed,
+          // Backend uses snake_case; ``postFailed`` is camelCase in
+          // our store so we translate here at the API boundary.
+          post_failed: manualEditsRef.current.postFailed ?? {},
+        } : null,
       }
       const r = await fetch(`${backendUrl}/api/paired/run`, {
         method: 'POST',
@@ -417,6 +431,7 @@ export function PairedWindow({
           halfWidthMs: t.half_width_ms,
           truncated: t.truncated,
           manual: t.manual,
+          postManualFailure: t.post_manual_failure,
         })),
         perSweepSummary: (d.per_sweep_summary as any[]).map((s: any) => ({
           sweep: s.sweep, nTrials: s.n_trials, nSuccess: s.n_success,
@@ -484,6 +499,26 @@ export function PairedWindow({
     })
     setTimeout(() => onRun(), 0)
   }, [sweep, onRun, totalSweeps])
+  const onTogglePostFailure = useCallback((preT: number) => {
+    if (totalSweeps === 0) return
+    const minDistMs = Number(form.preParams.min_distance_ms ?? 2.0)
+    const tol = Math.max(0.001, minDistMs / 1000.0)
+    setManualEdits((prev) => {
+      const pf = { ...(prev.postFailed ?? {}) }
+      const arr = pf[sweep] ? [...pf[sweep]] : []
+      const idx = arr.findIndex((x) => Math.abs(x - preT) <= tol)
+      if (idx >= 0) {
+        arr.splice(idx, 1)
+        if (arr.length === 0) delete pf[sweep]
+        else pf[sweep] = arr
+      } else {
+        arr.push(preT)
+        pf[sweep] = arr
+      }
+      return { ...prev, postFailed: pf }
+    })
+    setTimeout(() => onRun(), 0)
+  }, [sweep, onRun, totalSweeps, form.preParams.min_distance_ms])
   const onRemoveTrialAt = useCallback((preT: number) => {
     if (totalSweeps === 0) return
     // Tolerance for matching: minimum spacing between pre events,
@@ -728,8 +763,8 @@ export function PairedWindow({
             <OverlayViewer
               preData={preData}
               postData={postData}
-              preColor="#64b5f6"
-              postColor="#81c784"
+              preColor={cssVar('--trace-color-1') || '#64b5f6'}
+              postColor={cssVar('--trace-color-2') || '#81c784'}
               preUnits={channels[preTrace]?.units ?? ''}
               postUnits={channels[postTrace]?.units ?? ''}
               xRange={xRange}
@@ -742,11 +777,14 @@ export function PairedWindow({
                 : []}
               postPeakMarkers={stored && stored.postTrace === postTrace
                 ? stored.perTrial.filter((t) => t.sweep === sweep).map((t) => ({
-                  t: t.postPeakTS, y: t.postPeak, preT: t.preTS, success: t.success,
+                  t: t.postPeakTS, y: t.postPeak, preT: t.preTS,
+                  success: t.success,
+                  postManualFailure: t.postManualFailure,
                 }))
                 : []}
               onAddPreEvent={onAddPreEvent}
               onRemoveTrialAt={onRemoveTrialAt}
+              onTogglePostFailure={onTogglePostFailure}
               preBounds={{
                 start: Number(form.preParams.bounds_start_s ?? 0),
                 end:   Number(form.preParams.bounds_end_s ?? 0),
@@ -1185,7 +1223,7 @@ function PostWindowCard({
         display: 'flex', alignItems: 'center', gap: 6,
         fontSize: 'var(--font-size-label)',
       }}
-        title="When checked, peak detection per trial is clipped to the [start, end] window in absolute sweep time. Drag the cursors on the viewer or edit the values below.">
+        title="Show / hide the post-search cursor band on the viewer. Detection always honours the Start / End values below when both are set; this toggle is for visualisation only.">
         <input type="checkbox" checked={showBounds}
           onChange={(e) => {
             const v = e.target.checked
@@ -1199,7 +1237,7 @@ function PostWindowCard({
               })
             }
           }} />
-        <span>Show post-search cursors</span>
+        <span>Show post-search cursors on viewer</span>
       </label>
       <ParamRow label="Start (ms)"
         value={startMs} step={5}
@@ -1319,7 +1357,7 @@ function OverlayViewer({
   detectionMarkers, postPeakMarkers,
   preBounds, onPreBoundsChange, showPreBounds,
   postBounds, onPostBoundsChange, showPostBounds,
-  onAddPreEvent, onRemoveTrialAt,
+  onAddPreEvent, onRemoveTrialAt, onTogglePostFailure,
 }: {
   preData: { time: number[]; values: number[] } | null
   postData: { time: number[]; values: number[] } | null
@@ -1334,8 +1372,10 @@ function OverlayViewer({
    *  so a click can prime / remove the corresponding trial. */
   detectionMarkers: { t: number; preT: number; manual: boolean }[]
   /** Each post marker carries the trial's pre-event time (``preT``)
-   *  too — clicking a post marker primes / removes the SAME trial. */
-  postPeakMarkers?: { t: number; y: number; preT: number; success: boolean }[]
+   *  too. ``postManualFailure`` is true when the user has marked
+   *  this trial via prime+reclick on the post side; the marker
+   *  draws greyed-out so the user knows it's their override. */
+  postPeakMarkers?: { t: number; y: number; preT: number; success: boolean; postManualFailure?: boolean }[]
   preBounds: { start: number; end: number }
   onPreBoundsChange: (next: { start: number; end: number }) => void
   showPreBounds: boolean
@@ -1344,9 +1384,13 @@ function OverlayViewer({
   showPostBounds: boolean
   /** Click on empty area → add a pre event at that time. */
   onAddPreEvent?: (t: number) => void
-  /** Confirmed prime+reclick → remove the trial whose pre event is
-   *  at ``preT``. */
+  /** Confirmed prime+reclick on a PRE marker → remove the trial
+   *  whose pre event is at ``preT`` (drops both pre and post). */
   onRemoveTrialAt?: (preT: number) => void
+  /** Confirmed prime+reclick on a POST marker → toggle the trial's
+   *  manual-failure flag. The pre event stays; the trial is just
+   *  reclassified to a failure (or back to its auto state). */
+  onTogglePostFailure?: (preT: number) => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -1380,14 +1424,18 @@ function OverlayViewer({
   onAddPreEventRef.current = onAddPreEvent
   const onRemoveTrialAtRef = useRef(onRemoveTrialAt)
   onRemoveTrialAtRef.current = onRemoveTrialAt
-  // Currently primed trial (= pre-event time) — click a marker once
-  // to prime, click the same one again to confirm remove. Cleared
-  // by clicking empty space, switching sweeps, or starting a drag.
-  const primedPreTRef = useRef<number | null>(null)
-  // Reset the prime when sweep data changes — the user's "I want to
-  // delete THIS one" intent doesn't carry across sweep navigation
-  // or re-runs.
-  useEffect(() => { primedPreTRef.current = null }, [preData, postData])
+  const onTogglePostFailureRef = useRef(onTogglePostFailure)
+  onTogglePostFailureRef.current = onTogglePostFailure
+  // Currently primed marker — tracks BOTH which side (pre / post)
+  // and which trial (pre-event time). Click a marker once to prime,
+  // click the same one again to confirm. The two sides have
+  // independent meanings:
+  //   - ``side: 'pre'``  → confirm drops the trial entirely.
+  //   - ``side: 'post'`` → confirm toggles manual-failure on the
+  //                        trial without dropping it.
+  const primedRef = useRef<{ side: 'pre' | 'post'; preT: number } | null>(null)
+  // Reset the prime when sweep data changes.
+  useEffect(() => { primedRef.current = null }, [preData, postData])
   const [, setVer] = useState(0)
   const bump = useCallback(() => setVer((n) => n + 1), [])
   // Bumped from inside the rebuild RAF callback once the new uPlot
@@ -1618,7 +1666,7 @@ function OverlayViewer({
     // overlay drawing. Replaces the old "next sample after t"
     // bisect logic that put the dot below the actual peak when
     // LTTB decimation removed the peak sample.
-    const primedT = primedPreTRef.current
+    const primed = primedRef.current
     const tolPrime = 1e-6
     const markers = detectionRef.current
     if (markers.length > 0 && preData) {
@@ -1628,10 +1676,10 @@ function OverlayViewer({
         if (sampled == null) continue
         const px = u.valToPos(m.t, 'x', true)
         const py = u.valToPos(sampled, 'y', true)
-        // Manual edits get the AP-style outer ring; primed-for-
-        // remove markers get a thicker confirmation ring on top.
+        // Manual edits get the AP-style outer ring; primed pre-side
+        // markers get a thicker confirmation ring on top.
         dot(px, py, PRE_MARKER_COLOR, m.manual)
-        if (primedT != null && Math.abs(primedT - m.preT) <= tolPrime) {
+        if (primed?.side === 'pre' && Math.abs(primed.preT - m.preT) <= tolPrime) {
           ctx.beginPath()
           ctx.arc(px, py, MARKER_RING_RADIUS + 2, 0, Math.PI * 2)
           ctx.strokeStyle = '#64b5f6'; ctx.lineWidth = 2; ctx.stroke()
@@ -1639,8 +1687,9 @@ function OverlayViewer({
       }
       ctx.restore()
     }
-    // Post-peak markers (success / failure) — y is in post units, so
-    // route through the y_post scale. Same primed ring treatment.
+    // Post-peak markers — y on the post (right) axis. Marker fill
+    // colour reflects classification: green = auto success, red =
+    // auto failure, grey = user-overridden post-manual-failure.
     const ppm = postPeakRef.current
     if (ppm.length > 0) {
       ctx.save()
@@ -1648,8 +1697,11 @@ function OverlayViewer({
         if (!isFinite(m.y)) continue
         const px = u.valToPos(m.t, 'x', true)
         const py = u.valToPos(m.y, 'y_post', true)
-        dot(px, py, m.success ? SUCCESS_COLOR : FAILURE_COLOR, false)
-        if (primedT != null && Math.abs(primedT - m.preT) <= tolPrime) {
+        const fill = m.postManualFailure
+          ? '#9e9e9e'
+          : (m.success ? SUCCESS_COLOR : FAILURE_COLOR)
+        dot(px, py, fill, false)
+        if (primed?.side === 'post' && Math.abs(primed.preT - m.preT) <= tolPrime) {
           ctx.beginPath()
           ctx.arc(px, py, MARKER_RING_RADIUS + 2, 0, Math.PI * 2)
           ctx.strokeStyle = '#64b5f6'; ctx.lineWidth = 2; ctx.stroke()
@@ -1712,36 +1764,46 @@ function OverlayViewer({
     }
 
     const MARKER_HIT_PX = 10
-    // Marker hit-test — returns the trial's pre-event time of the
-    // closest pre OR post marker within MARKER_HIT_PX, or null. Lets
-    // the user click any marker (pre or post) to manage the same
-    // trial. Pre markers ride the displayed pre line; post markers
-    // sit on the post Y axis.
-    const findMarkerHit = (pxX: number, pxY: number): number | null => {
+    // Marker hit-test — returns ``{ side, preT }`` for the closest
+    // marker within MARKER_HIT_PX, or null. Pre and post markers
+    // are tested INDEPENDENTLY: ``pickYScale`` decides which side
+    // the cursor is closer to (= which trace the user is "pointing
+    // at"), and only that side's markers are considered. So a click
+    // near the pre trace primes a pre event regardless of how close
+    // the post marker happens to be in the X direction.
+    const findMarkerHit = (
+      pxX: number, pxY: number,
+    ): { side: 'pre' | 'post'; preT: number } | null => {
+      const ySide = pickYScale(pxX, pxY)
+      const wantPre = ySide === 'y'
       let bestT: number | null = null
       let bestD = Infinity
-      const pre = detectionRef.current
-      if (preData && pre.length > 0) {
-        for (const m of pre) {
-          const sampled = sampleTraceYAt(preData.time, preData.values, m.t)
-          if (sampled == null) continue
-          const px = u.valToPos(m.t, 'x', false)
-          const py = u.valToPos(sampled, 'y', false)
-          const d = Math.hypot(px - pxX, py - pxY)
-          if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+      if (wantPre) {
+        const pre = detectionRef.current
+        if (preData && pre.length > 0) {
+          for (const m of pre) {
+            const sampled = sampleTraceYAt(preData.time, preData.values, m.t)
+            if (sampled == null) continue
+            const px = u.valToPos(m.t, 'x', false)
+            const py = u.valToPos(sampled, 'y', false)
+            const d = Math.hypot(px - pxX, py - pxY)
+            if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+          }
         }
-      }
-      const post = postPeakRef.current
-      if (post.length > 0) {
-        for (const m of post) {
-          if (!isFinite(m.y)) continue
-          const px = u.valToPos(m.t, 'x', false)
-          const py = u.valToPos(m.y, 'y_post' as any, false)
-          const d = Math.hypot(px - pxX, py - pxY)
-          if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+        return bestT == null ? null : { side: 'pre', preT: bestT }
+      } else {
+        const post = postPeakRef.current
+        if (post.length > 0) {
+          for (const m of post) {
+            if (!isFinite(m.y)) continue
+            const px = u.valToPos(m.t, 'x', false)
+            const py = u.valToPos(m.y, 'y_post' as any, false)
+            const d = Math.hypot(px - pxX, py - pxY)
+            if (d < bestD && d < MARKER_HIT_PX) { bestD = d; bestT = m.preT }
+          }
         }
+        return bestT == null ? null : { side: 'post', preT: bestT }
       }
-      return bestT
     }
 
     const findHit = (pxX: number): Drag | null => {
@@ -1796,20 +1858,61 @@ function OverlayViewer({
         return
       }
 
-      // Priority 2: marker (pre or post) — prime on first click,
-      // confirm remove on second click of the same primed trial.
-      // Same gesture as AP / Events / Bursts.
-      const markerT = findMarkerHit(pxX, pxY)
-      if (markerT != null) {
-        if (primedPreTRef.current != null
-            && Math.abs(primedPreTRef.current - markerT) < 1e-6) {
-          primedPreTRef.current = null
-          plotRef.current?.redraw()
-          onRemoveTrialAtRef.current?.(markerT)
-        } else {
-          primedPreTRef.current = markerT
-          plotRef.current?.redraw()
+      // Priority 2a: if a marker is currently primed, the second
+      // click should confirm the SAME primed marker even when the
+      // mouse drifted slightly off it (so pickYScale would otherwise
+      // pick the wrong axis and miss the hit). We hit-test the
+      // primed marker directly with a generous tolerance before
+      // running the side-aware findMarkerHit.
+      const cur = primedRef.current
+      if (cur != null) {
+        let primedPx: number | null = null
+        let primedPy: number | null = null
+        if (cur.side === 'pre' && preData) {
+          const m = detectionRef.current.find(
+            (x) => Math.abs(x.preT - cur.preT) < 1e-6,
+          )
+          if (m) {
+            const sampled = sampleTraceYAt(preData.time, preData.values, m.t)
+            if (sampled != null) {
+              primedPx = u.valToPos(m.t, 'x', false)
+              primedPy = u.valToPos(sampled, 'y', false)
+            }
+          }
+        } else if (cur.side === 'post') {
+          const m = postPeakRef.current.find(
+            (x) => Math.abs(x.preT - cur.preT) < 1e-6,
+          )
+          if (m && isFinite(m.y)) {
+            primedPx = u.valToPos(m.t, 'x', false)
+            primedPy = u.valToPos(m.y, 'y_post' as any, false)
+          }
         }
+        if (primedPx != null && primedPy != null) {
+          const d = Math.hypot(primedPx - pxX, primedPy - pxY)
+          if (d < MARKER_HIT_PX * 1.5) {
+            // Confirm — clear prime, redraw, fire side-specific cb.
+            primedRef.current = null
+            plotRef.current?.redraw()
+            if (cur.side === 'pre') {
+              onRemoveTrialAtRef.current?.(cur.preT)
+            } else {
+              onTogglePostFailureRef.current?.(cur.preT)
+            }
+            ev.preventDefault()
+            return
+          }
+        }
+      }
+
+      // Priority 2b: side-aware first prime. ``pickYScale`` chooses
+      // the trace the user is pointing at; only that side's markers
+      // are tested. A hit primes the marker; the next click within
+      // the primed-tolerance above confirms.
+      const markerHit = findMarkerHit(pxX, pxY)
+      if (markerHit != null) {
+        primedRef.current = markerHit
+        plotRef.current?.redraw()
         ev.preventDefault()
         return
       }
@@ -1922,8 +2025,8 @@ function OverlayViewer({
         const tClick = pxToX(pxX)
         // Clicking empty space cancels any prime — same as AP /
         // Events: "no, don't delete that one".
-        if (primedPreTRef.current != null) {
-          primedPreTRef.current = null
+        if (primedRef.current != null) {
+          primedRef.current = null
           plotRef.current?.redraw()
         }
         if (isFinite(tClick)) onAddPreEventRef.current?.(tClick)
@@ -2206,6 +2309,16 @@ function mapSta(s: any): import('../../stores/appStore').PairedSta | null {
   return {
     time: s.time, mean: s.mean, sem: s.sem, n: s.n,
     traces: s.traces, traceSuccess: s.trace_success,
+    fit: s.fit ? {
+      baseline: s.fit.baseline,
+      amplitude: s.fit.amplitude,
+      peakTS: s.fit.peak_t_s,
+      peakV: s.fit.peak_v,
+      tauDecayMs: s.fit.tau_decay_ms,
+      r2: s.fit.r2,
+      fitCurve: s.fit.fit_curve,
+      fitCurveMask: s.fit.fit_curve_mask,
+    } : undefined,
   }
 }
 
@@ -2343,7 +2456,7 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
     <div style={{
       padding: 8, display: 'grid', gap: 8,
       gridTemplateColumns: 'minmax(280px, 1fr) minmax(280px, 1fr)',
-      gridTemplateRows: 'minmax(180px, auto) minmax(180px, auto) minmax(180px, auto)',
+      gridTemplateRows: 'minmax(180px, auto) minmax(180px, auto)',
       height: '100%', boxSizing: 'border-box', overflow: 'auto',
     }}>
       <div style={{
@@ -2419,24 +2532,6 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
           </table>
         )}
       </div>
-      {/* Amplitude histogram — successes vs failures stacked, with
-          a vertical line at the failure threshold (median k·SD,
-          since per-trial baseline σ varies). Spans the full row. */}
-      <div style={{
-        gridColumn: '1 / -1',
-        border: '1px solid var(--border)', borderRadius: 4,
-        background: 'var(--bg-primary)',
-        minHeight: 200, display: 'flex', flexDirection: 'column',
-      }}>
-        <div style={{
-          padding: '4px 10px', fontSize: 'var(--font-size-label)',
-          fontWeight: 600, color: 'var(--text-muted)',
-          textTransform: 'uppercase', letterSpacing: 0.4,
-          borderBottom: '1px solid var(--border)',
-          background: 'var(--bg-secondary)',
-        }}>Amplitude histogram</div>
-        <AmplitudeHistogram trials={data.perTrial} failureK={data.failureParams.kSd} />
-      </div>
       {/* Trial-sequence plot — amplitude vs trial index across all
           sweeps, success vs failure coloured. Useful for spotting
           rundown / wash-in trends. */}
@@ -2455,141 +2550,6 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
         }}>Trial sequence</div>
         <TrialSequencePlot trials={data.perTrial} />
       </div>
-    </div>
-  )
-}
-
-/** Stacked-bar amplitude histogram. Successes paint blue, failures
- *  red (translucent), with a black dashed line at the median per-
- *  trial threshold (k·SD of baseline, the value the run actually
- *  used to classify each trial). */
-function AmplitudeHistogram({
-  trials, failureK,
-}: {
-  trials: PairedTrial[]
-  failureK: number
-}) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const plotRef = useRef<uPlot | null>(null)
-  const menu = usePlotMenu({
-    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
-    defaultName: 'paired-amplitude-histogram',
-  })
-
-  useEffect(() => {
-    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!containerRef.current) return
-    if (trials.length === 0) return
-    const amps = trials.map((t) => t.amplitude).filter((v) => isFinite(v))
-    if (amps.length < 2) return
-    let lo = Math.min(...amps), hi = Math.max(...amps)
-    if (hi <= lo) { hi = lo + 1 }
-    const span = hi - lo
-    // Bin count tuned by Freedman-Diaconis-ish defaults — clamp so
-    // we don't get one-bin-per-trial on small N or 100s on very wide
-    // ranges. ~25 bins is a good default for typical paired stats.
-    const nBins = Math.max(8, Math.min(40, Math.round(Math.sqrt(amps.length) * 2)))
-    const bw = span / nBins
-    const binCenters: number[] = []
-    const successCounts: number[] = new Array(nBins).fill(0)
-    const failureCounts: number[] = new Array(nBins).fill(0)
-    for (let i = 0; i < nBins; i++) binCenters.push(lo + (i + 0.5) * bw)
-    for (const t of trials) {
-      if (!isFinite(t.amplitude)) continue
-      const idx = Math.min(nBins - 1, Math.max(0, Math.floor((t.amplitude - lo) / bw)))
-      if (t.success) successCounts[idx]++
-      else failureCounts[idx]++
-    }
-    // Median per-trial threshold magnitude (baseline_sd × k) so we
-    // can draw the typical decision line. Trial-by-trial it varies;
-    // showing the median is the cleanest summary.
-    const sds = trials
-      .map((t) => t.baselineSd)
-      .filter((v) => isFinite(v) && v > 0)
-      .sort((a, b) => a - b)
-    const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : 0
-    const thrMag = medSd * (failureK || 0)
-
-    const w = containerRef.current.clientWidth
-    const h = containerRef.current.clientHeight
-    const opts: uPlot.Options = {
-      width: Math.max(200, w),
-      height: Math.max(80, h),
-      legend: { show: false },
-      cursor: { drag: { x: false, y: false } },
-      scales: { x: { time: false } },
-      axes: [
-        { stroke: cssVar('--chart-axis'),
-          grid: { stroke: cssVar('--chart-grid'), width: 1 },
-          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-          label: 'Amplitude', labelSize: 22,
-          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
-          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
-        { stroke: cssVar('--chart-axis'),
-          grid: { stroke: cssVar('--chart-grid'), width: 1 },
-          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-          label: 'count', labelSize: 22,
-          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
-          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
-      ],
-      series: [
-        {},
-        { stroke: '#64b5f6', width: 1.5, label: 'successes',
-          paths: barPaths(bw), points: { show: false } },
-        { stroke: '#e57373', width: 1.5, label: 'failures',
-          paths: barPaths(bw), points: { show: false } },
-      ],
-      hooks: {
-        // Draw two thin dashed verticals at ±median threshold so the
-        // user can see where the success/failure cutoff typically
-        // sits on this run. Failure rule = absolute draws a single
-        // line; k·SD draws ± since amplitudes can be either sign.
-        draw: [(u) => {
-          if (thrMag <= 0) return
-          const yTop = u.bbox.top
-          const yBot = u.bbox.top + u.bbox.height
-          const ctx = u.ctx
-          ctx.save()
-          ctx.setLineDash([4, 3])
-          ctx.strokeStyle = cssVar('--text-muted') || '#999'
-          ctx.lineWidth = 1
-          for (const v of [-thrMag, thrMag]) {
-            if (v < (u.scales.x.min ?? -Infinity) || v > (u.scales.x.max ?? Infinity)) continue
-            const px = u.valToPos(v, 'x', true)
-            ctx.beginPath()
-            ctx.moveTo(px, yTop); ctx.lineTo(px, yBot); ctx.stroke()
-          }
-          ctx.restore()
-        }],
-      },
-    }
-    plotRef.current = new uPlot(opts, [
-      binCenters, successCounts, failureCounts,
-    ] as any, containerRef.current)
-    return () => {
-      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    }
-  }, [trials, failureK])
-
-  // Refit on container resize.
-  useEffect(() => {
-    const cont = containerRef.current
-    if (!cont) return
-    const ro = new ResizeObserver(() => {
-      const u = plotRef.current
-      if (!u) return
-      const w = cont.clientWidth, h = cont.clientHeight
-      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
-    })
-    ro.observe(cont)
-    return () => ro.disconnect()
-  }, [])
-
-  return (
-    <div ref={containerRef}
-      onContextMenu={menu.onContextMenu}
-      style={{ flex: 1, minHeight: 0 }}>
-      {menu.menu}
     </div>
   )
 }
@@ -2676,31 +2636,6 @@ function TrialSequencePlot({ trials }: { trials: PairedTrial[] }) {
   )
 }
 
-/** uPlot ``paths`` factory that draws each y-series sample as a
- *  filled rectangular bar centered on its x value with the given
- *  pixel width fraction of the data spacing. Used by the amplitude
- *  histogram so each bin paints as a real bar (uPlot's default
- *  paths drawer connects points with a line, which is wrong here). */
-function barPaths(bw: number): uPlot.Series.PathBuilder {
-  return (u: uPlot, seriesIdx: number) => {
-    const path = new Path2D()
-    const xData = u.data[0] as number[]
-    const yData = u.data[seriesIdx] as (number | null)[]
-    const halfW = bw / 2
-    const yZeroPx = u.valToPos(0, 'y', true)
-    for (let i = 0; i < xData.length; i++) {
-      const v = yData[i]
-      if (v == null || !isFinite(v) || v === 0) continue
-      const left = u.valToPos(xData[i] - halfW, 'x', true)
-      const right = u.valToPos(xData[i] + halfW, 'x', true)
-      const top = u.valToPos(v, 'y', true)
-      path.rect(Math.min(left, right), Math.min(top, yZeroPx),
-        Math.abs(right - left), Math.abs(yZeroPx - top))
-    }
-    return { fill: path, stroke: path }
-  }
-}
-
 function STATab({ data }: { data: PairedData | null }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -2708,6 +2643,7 @@ function STATab({ data }: { data: PairedData | null }) {
   const [seriesPick, setSeriesPick] = useState<SeriesPick>('all')
   const [showOverlay, setShowOverlay] = useState(false)
   const [overlayIncludesFailures, setOverlayIncludesFailures] = useState(false)
+  const [showFit, setShowFit] = useState(true)
   const staMenu = usePlotMenu({
     getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
     defaultName: 'paired-sta',
@@ -2773,6 +2709,21 @@ function STATab({ data }: { data: PairedData | null }) {
       stroke: '#1976d2', width: 2.0,
       label: `Mean (n=${sta.n})`, points: { show: false },
     })
+    // Optional monoexponential decay fit overlay. Drawn AFTER mean
+    // so it sits on top; dashed accent stroke distinguishes it from
+    // the data line. ``fitCurveMask`` picks out the peak→end span.
+    let fitValues: (number | null)[] | null = null
+    if (showFit && sta.fit) {
+      fitValues = sta.fit.fitCurve.map((v, i) =>
+        sta.fit!.fitCurveMask[i] ? v : null,
+      )
+      series.push({
+        stroke: '#ffb74d', width: 1.75,
+        dash: [6, 4],
+        label: `Fit (τ=${sta.fit.tauDecayMs.toFixed(2)} ms)`,
+        points: { show: false },
+      } as any)
+    }
 
     const opts: uPlot.Options = {
       width: Math.max(200, w),
@@ -2809,13 +2760,13 @@ function STATab({ data }: { data: PairedData | null }) {
       ],
       series,
     }
-    plotRef.current = new uPlot(opts, [
-      sta.time, upper, lower, ...overlayValues, sta.mean,
-    ] as any, containerRef.current)
+    const plotData: any[] = [sta.time, upper, lower, ...overlayValues, sta.mean]
+    if (fitValues) plotData.push(fitValues)
+    plotRef.current = new uPlot(opts, plotData as any, containerRef.current)
     return () => {
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     }
-  }, [sta, showOverlay, overlayIncludesFailures])
+  }, [sta, showOverlay, overlayIncludesFailures, showFit])
 
   if (!data) return <Empty msg="Run analysis to see the spike-triggered average." />
   return (
@@ -2877,8 +2828,21 @@ function STATab({ data }: { data: PairedData | null }) {
             Include failures
           </label>
         )}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          title={
+            sta?.fit
+              ? `Show the monoexponential fit on the average's decay phase. τ_decay = ${sta.fit.tauDecayMs.toFixed(2)} ms (R² = ${sta.fit.r2.toFixed(3)}).`
+              : 'Re-run the analysis to populate the decay fit. Older results don\'t carry the fit.'
+          }>
+          <input type="checkbox" checked={showFit}
+            disabled={!sta?.fit}
+            onChange={(e) => setShowFit(e.target.checked)} />
+          Show fit
+        </label>
         <span style={{ marginLeft: 'auto' }}>
-          {sta ? `n = ${sta.n}` : 'no trials'}
+          {sta?.fit
+            ? `n = ${sta.n} · τ = ${sta.fit.tauDecayMs.toFixed(2)} ms · R² = ${sta.fit.r2.toFixed(2)}`
+            : (sta ? `n = ${sta.n}` : 'no trials')}
         </span>
       </div>
       <div ref={containerRef}
@@ -2908,7 +2872,10 @@ function STATab({ data }: { data: PairedData | null }) {
         mean, wide band = the average is dominated by trial-to-trial
         variability. With "Show sweeps" enabled, faint blue overlays
         are individual successful trials and faint red overlays are
-        individual failures.
+        individual failures. With "Show fit" enabled, the orange
+        dashed line is a monoexponential ``y = baseline + a·exp(-Δt/τ)``
+        fitted to the decay phase of the mean — τ and R² are reported
+        in the header strip.
       </div>
     </div>
   )

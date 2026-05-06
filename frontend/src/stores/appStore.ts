@@ -1473,6 +1473,10 @@ export interface PairedData {
   postParams: PairedFormState['postParams']
   failureParams: PairedFormState['failureParams']
   latencyParams: PairedFormState['latencyParams']
+  /** Optional absolute-time post-search bounds (the draggable
+   *  cursors on the post viewer). ``null`` / undefined = no clip. */
+  postSearchStartS?: number | null
+  postSearchEndS?: number | null
   manualEdits: PairedManualEdits
   perTrial: PairedTrial[]
   perSweepSummary: PairedSweepSummary[]

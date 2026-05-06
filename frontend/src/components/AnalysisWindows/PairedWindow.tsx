@@ -490,14 +490,11 @@ export function PairedWindow({
           options={channelOptions}
         />
         <div style={{ flex: 1 }} />
-        {/* Sweep arrow cluster */}
+        {/* Sweep arrow cluster — back / forward only. The wider AP
+            cluster (first / ±10 / last) made sense for current-clamp
+            recordings with hundreds of sweeps; for paired protocols
+            the user navigates one trial at a time. */}
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-          <button className="btn" style={{ padding: '2px 8px' }}
-            disabled={totalSweeps === 0 || sweep === 0}
-            onClick={() => setSweep(0)} title="First sweep">⟨⟨</button>
-          <button className="btn" style={{ padding: '2px 8px' }}
-            disabled={totalSweeps === 0 || sweep === 0}
-            onClick={() => setSweep(Math.max(0, sweep - 10))} title="−10">⟪</button>
           <button className="btn" style={{ padding: '2px 8px' }}
             disabled={totalSweeps === 0 || sweep === 0}
             onClick={() => setSweep(Math.max(0, sweep - 1))} title="Prev sweep">◀</button>
@@ -509,14 +506,6 @@ export function PairedWindow({
             disabled={totalSweeps === 0 || sweep >= totalSweeps - 1}
             onClick={() => setSweep(Math.min(totalSweeps - 1, sweep + 1))}
             title="Next sweep">▶</button>
-          <button className="btn" style={{ padding: '2px 8px' }}
-            disabled={totalSweeps === 0 || sweep >= totalSweeps - 1}
-            onClick={() => setSweep(Math.min(totalSweeps - 1, sweep + 10))}
-            title="+10">⟫</button>
-          <button className="btn" style={{ padding: '2px 8px' }}
-            disabled={totalSweeps === 0 || sweep >= totalSweeps - 1}
-            onClick={() => setSweep(Math.max(0, totalSweeps - 1))}
-            title="Last sweep">⟩⟩</button>
         </span>
       </div>
 
@@ -1316,6 +1305,13 @@ function OverlayViewer({
         focus: { prox: 30 },
       },
       scales: {
+        // Range callbacks return the user-set ref when present, else
+        // fall through to a 5 %-padded autofit on the data extents.
+        // Crucially we DO NOT stash the autofit into the ref —
+        // otherwise a sweep change would re-apply the previous
+        // sweep's tight bounds to the new sweep's data and look
+        // blank. The ref only ever holds values written by an
+        // explicit user gesture (wheel, drag-pan, Fit Y).
         x: {
           time: false,
           range: (_u, dMin, dMax) => xRangeRef.current ?? [dMin, dMax],
@@ -1325,9 +1321,7 @@ function OverlayViewer({
             if (yPreRangeRef.current) return yPreRangeRef.current
             if (!isFinite(dMin) || !isFinite(dMax) || dMin === dMax) return [0, 1]
             const pad = (dMax - dMin) * 0.05
-            const r: [number, number] = [dMin - pad, dMax + pad]
-            yPreRangeRef.current = r
-            return r
+            return [dMin - pad, dMax + pad]
           },
         },
         y_post: {
@@ -1335,9 +1329,7 @@ function OverlayViewer({
             if (yPostRangeRef.current) return yPostRangeRef.current
             if (!isFinite(dMin) || !isFinite(dMax) || dMin === dMax) return [0, 1]
             const pad = (dMax - dMin) * 0.05
-            const r: [number, number] = [dMin - pad, dMax + pad]
-            yPostRangeRef.current = r
-            return r
+            return [dMin - pad, dMax + pad]
           },
         },
       },
@@ -1796,7 +1788,11 @@ function OverlayViewer({
       if (!isFinite(yLo) || !isFinite(yHi) || yHi <= yLo) continue
       const pad = (yHi - yLo) * 0.05
       const ny: [number, number] = [yLo - pad, yHi + pad]
-      if (s === 'y') yPreRangeRef.current = ny; else yPostRangeRef.current = ny
+      // Clear the ref (rather than write the fitted values into it)
+      // so the next sweep change reverts to autofit-on-data instead
+      // of dragging the previous sweep's bounds along. setScale
+      // applies the freshly-computed range to the current view.
+      if (s === 'y') yPreRangeRef.current = null; else yPostRangeRef.current = null
       u.setScale(s, { min: ny[0], max: ny[1] })
     }
     bump()
@@ -2144,25 +2140,38 @@ function STATab({ data }: { data: PairedData | null }) {
       }
     }
 
-    // Series order: x · +SEM · −SEM · overlays (failures first so
-    // they paint underneath successes) · MEAN on top.
+    // Series order:
+    //   0: x
+    //   1: upper (mean+SEM, transparent stroke — used as band edge)
+    //   2: lower (mean−SEM, transparent stroke — band edge)
+    //   3..3+k-1: per-trial overlays (failures paint first so
+    //             successes draw over them)
+    //   last: mean on top
+    // The translucent ribbon between (1, 2) is drawn via uPlot's
+    // ``bands`` config below.
     const series: uPlot.Series[] = [
       {},
-      { stroke: '#9e9e9e', width: 0.5, label: '+SEM', points: { show: false } },
-      { stroke: '#9e9e9e', width: 0.5, label: '−SEM', points: { show: false } },
+      { stroke: 'rgba(0,0,0,0)', width: 0.0001, label: 'mean+SEM',
+        points: { show: false } },
+      { stroke: 'rgba(0,0,0,0)', width: 0.0001, label: 'mean−SEM',
+        points: { show: false } },
     ]
     const overlayValues: number[][] = []
-    // Sort failures-first so successes paint over them.
     overlayRows.sort((a, b) => Number(a.success) - Number(b.success))
     for (const r of overlayRows) {
       series.push({
-        stroke: r.success ? 'rgba(100,181,246,0.35)' : 'rgba(229,115,115,0.35)',
-        width: 0.5, points: { show: false },
-      })
+        // Solid colours at modest opacity — alpha-rgba was washing
+        // out on dark backgrounds. uPlot draws series in order, so
+        // failures (0.5) paint first and successes (0.6) layer on
+        // top, with the bold mean drawn last.
+        stroke: r.success ? '#64b5f6' : '#e57373',
+        alpha: r.success ? 0.6 : 0.5,
+        width: 1, points: { show: false },
+      } as any)
       overlayValues.push(r.values)
     }
     series.push({
-      stroke: '#64b5f6', width: 1.75,
+      stroke: '#1976d2', width: 2.0,
       label: `Mean (n=${sta.n})`, points: { show: false },
     })
 
@@ -2179,6 +2188,11 @@ function STATab({ data }: { data: PairedData | null }) {
         // ``values`` formatter converts to ms for display.
         x: { time: false },
       },
+      // Translucent ±1 SEM ribbon — uPlot fills the area between
+      // the upper-SEM (series 1, top of band) and lower-SEM
+      // (series 2, bottom of band) curves. Stroke on the boundary
+      // series is fully transparent so only the fill shows.
+      bands: [{ series: [1, 2], fill: 'rgba(100,181,246,0.22)' }],
       axes: [
         { stroke: cssVar('--chart-axis'),
           grid: { stroke: cssVar('--chart-grid'), width: 1 },
@@ -2246,8 +2260,13 @@ function STATab({ data }: { data: PairedData | null }) {
             Both default off so the average is uncluttered on first
             view. */}
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-          title="Overlay each individual trial's post-window aligned to t_pre, in the same colour scheme as the success / failure dots.">
+          title={
+            sta?.traces && sta?.traceSuccess
+              ? "Overlay each individual trial's post-window aligned to t_pre. Successes draw in blue, failures in red."
+              : "Re-run the analysis to populate per-sweep overlays. Older results don't carry the per-trial traces."
+          }>
           <input type="checkbox" checked={showOverlay}
+            disabled={!(sta?.traces && sta?.traceSuccess)}
             onChange={(e) => setShowOverlay(e.target.checked)} />
           Show sweeps
         </label>
@@ -2278,11 +2297,16 @@ function STATab({ data }: { data: PairedData | null }) {
         background: 'var(--bg-secondary)',
         border: '1px solid var(--border)', borderRadius: 4,
       }}>
-        Blue line: per-sample mean across the {seriesPick === 'all' ? 'selected' : seriesPick} trials. Grey lines: ±1 SEM
-        (standard error of the mean), i.e. the per-sample SD divided
-        by √n. They give a confidence band for the average — narrow
-        bands = the trials cluster tightly around the mean, wide bands
-        = the average is dominated by trial-to-trial variability.
+        Bold blue line: per-sample mean across the {seriesPick === 'all'
+          ? 'selected'
+          : seriesPick === 'success' ? 'successful' : 'failed'} trials.
+        Translucent blue band: ±1 SEM (standard error of the mean,
+        i.e. per-sample SD ÷ √n). The band is a confidence ribbon for
+        the average — narrow band = trials cluster tightly around the
+        mean, wide band = the average is dominated by trial-to-trial
+        variability. With "Show sweeps" enabled, faint blue overlays
+        are individual successful trials and faint red overlays are
+        individual failures.
       </div>
     </div>
   )

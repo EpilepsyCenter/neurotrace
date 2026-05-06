@@ -7,6 +7,7 @@ import {
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { sampleTraceYAt } from '../../utils/sampleTraceY'
 
 // ---------------------------------------------------------------------------
 // Types and helpers
@@ -163,7 +164,14 @@ export function PairedWindow({
         const params = new URLSearchParams({
           group: String(group), series: String(series),
           sweep: String(sweep), trace: String(traceIdx),
-          max_points: '4000',
+          // Full resolution — AP / Burst use this for the same
+          // reason: LTTB decimation can drop the actual peak
+          // sample, making the trace's drawn line dip below the
+          // detected peak and the on-trace markers sit "lower"
+          // than the real value. Sweeps in paired protocols are
+          // short enough (typically 1–5 s at 20 kHz) for full
+          // resolution to be fine.
+          max_points: '0',
         })
         if (filter.enabled) {
           params.set('filter_type', filter.type)
@@ -1292,10 +1300,21 @@ function OverlayViewer({
   const bump = useCallback(() => setVer((n) => n + 1), [])
 
   // ── Build / rebuild the plot ───────────────────────────────────
+  // Wrapped in ``requestAnimationFrame`` so the destroy + create
+  // pair runs after the current render's layout has settled (same
+  // pattern as APWindow's sweep viewer). Without this, the new
+  // plot was occasionally being constructed against stale container
+  // dimensions / before scale state from the previous plot had been
+  // fully torn down — which is what caused the "blank viewer after
+  // sweep arrow" issue.
   useEffect(() => {
-    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!containerRef.current) return
-    if (!preData && !postData) return
+    const container = containerRef.current
+    if (!container || (!preData && !postData)) {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+      return
+    }
+    const frame = requestAnimationFrame(() => {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
 
     // Use pre's time grid as the master X array. Interpolate post
     // onto it so uPlot can plot both as parallel series. When pre
@@ -1308,8 +1327,8 @@ function OverlayViewer({
       ? interpolateOnto(postData.time, postData.values, masterT)
       : new Array(masterT.length).fill(null)
 
-    const w = containerRef.current.clientWidth
-    const h = containerRef.current.clientHeight
+    const w = container.clientWidth
+    const h = container.clientHeight
 
     const opts: uPlot.Options = {
       width: Math.max(200, w),
@@ -1401,16 +1420,15 @@ function OverlayViewer({
           scale: 'y_post', points: { show: false } },
       ],
     }
-    plotRef.current = new uPlot(opts, [masterT, preY, postY] as any, containerRef.current)
+    plotRef.current = new uPlot(opts, [masterT, preY, postY] as any, container)
 
     // Defensive autofit. When refs are null (no manual zoom), force
-    // each scale onto the new sweep's data extents explicitly.
-    // The range() callbacks should already do this during
-    // construction, but we've been bitten by edge cases (data of
-    // different LTTB length between sweeps, brief mixed-data state
-    // mid-fetch, etc.) where the plot ended up displaying at a
-    // stale scale and looked blank. Belt-and-braces: refit anything
-    // the user hasn't deliberately set.
+    // each scale onto the new sweep's data extents explicitly. The
+    // range() callbacks above should already do this during
+    // construction; we double-apply here for the same reason AP /
+    // Burst do — there have been edge cases (LTTB length mismatch
+    // between channels, brief mixed-data state mid-fetch) where the
+    // plot ended up at a stale scale and looked blank.
     if (xRangeRef.current === null && masterT.length > 1) {
       plotRef.current.setScale('x', { min: masterT[0], max: masterT[masterT.length - 1] })
     }
@@ -1426,8 +1444,9 @@ function OverlayViewer({
     }
     refit('y', preData)
     refit('y_post', postData)
-
+    })  // end requestAnimationFrame
     return () => {
+      cancelAnimationFrame(frame)
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1482,16 +1501,20 @@ function OverlayViewer({
         ctx.strokeStyle = fill; ctx.lineWidth = 1.5; ctx.stroke()
       }
     }
-    // Detection markers (pre-event peaks) — sample the pre series
-    // at marker time so dots ride the visible trace.
+    // Detection markers (pre-event peaks) — linearly interpolate
+    // the displayed trace at the marker time so the dot rides the
+    // visible line. Same pattern as APWindow's ``toPx`` / FPsp's
+    // overlay drawing. Replaces the old "next sample after t"
+    // bisect logic that put the dot below the actual peak when
+    // LTTB decimation removed the peak sample.
     const markers = detectionRef.current
     if (markers.length > 0 && preData) {
       ctx.save()
       for (const m of markers) {
-        const idx = bisect(preData.time, m.t)
-        if (idx < 0 || idx >= preData.values.length) continue
+        const sampled = sampleTraceYAt(preData.time, preData.values, m.t)
+        if (sampled == null) continue
         const px = u.valToPos(m.t, 'x', true)
-        const py = u.valToPos(preData.values[idx], 'y', true)
+        const py = u.valToPos(sampled, 'y', true)
         dot(px, py, PRE_MARKER_COLOR, m.manual)
       }
       ctx.restore()
@@ -1954,8 +1977,9 @@ function PairedMarkerLegend({ role }: { role: 'pre' | 'post' | 'overlay' }) {
 }
 
 /** Format a number of milliseconds for an axis tick — keeps the
- *  precision short so labels don't overlap. Trailing zeros after the
- *  decimal point are trimmed; integers come out unsuffixed. */
+ *  precision short so labels don't overlap. Trailing zeros AFTER a
+ *  decimal point are trimmed (e.g. "1.50" → "1.5"); integers are
+ *  left untouched (so "100" stays "100", not "1"). */
 function fmtMs(ms: number): string {
   if (!isFinite(ms)) return ''
   const abs = Math.abs(ms)
@@ -1964,6 +1988,7 @@ function fmtMs(ms: number): string {
   // millisecond ticks only show up when the user zooms way in.
   const decimals = abs >= 100 ? 0 : abs >= 10 ? 1 : abs >= 1 ? 2 : 3
   const s = ms.toFixed(decimals)
+  if (!s.includes('.')) return s
   return s.replace(/\.?0+$/, '')
 }
 

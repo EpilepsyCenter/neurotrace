@@ -1400,6 +1400,10 @@ export interface PairedTrial {
   halfWidthMs: number | null
   truncated: boolean
   manual: boolean
+  /** User overrode this trial's classification by right-clicking
+   *  the post marker. Renders distinctly so the user can tell auto-
+   *  vs manual-failures apart. */
+  postManualFailure?: boolean
 }
 
 export interface PairedSeriesSummary {
@@ -1439,11 +1443,33 @@ export interface PairedSta {
   traces?: number[][]
   /** Per-trial success flag in the same order as ``traces``. */
   traceSuccess?: boolean[]
+  /** Monoexponential decay fit on the STA mean. ``fitCurve`` is
+   *  evaluated on the same time array as ``mean`` so the renderer
+   *  can plot it as a parallel series; ``fitCurveMask`` is 1 where
+   *  the fit is defined (peak → end) and 0 where it isn't (pre-
+   *  peak samples are zero-filled). */
+  fit?: {
+    baseline: number
+    amplitude: number
+    peakTS: number
+    peakV: number
+    tauDecayMs: number
+    r2: number
+    fitCurve: number[]
+    fitCurveMask: number[]
+  }
 }
 
 export interface PairedManualEdits {
   added: Record<number, number[]>     // sweep idx → list of pre_t in seconds
   removed: Record<number, number[]>
+  /** Per-sweep list of pre_t values whose corresponding trials the
+   *  user has marked as a "post manual failure" (right-click on the
+   *  post marker → reclick to confirm). The auto-detected post peak
+   *  is preserved for visual feedback (so the user can see what
+   *  they're overruling) but the trial is forced to success=False
+   *  in stats. Re-clicking the same marker clears the override. */
+  postFailed?: Record<number, number[]>
 }
 
 /** Mode-agnostic pre-detection params + post-window + failure +

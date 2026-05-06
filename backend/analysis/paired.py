@@ -197,6 +197,12 @@ class _Trial:
     half_width_ms: Optional[float]
     truncated: bool
     manual: bool = False
+    # User has explicitly marked this trial's POST peak as a failure
+    # (right-click on a post marker confirmed). The auto-detected
+    # post_peak / post_peak_t_s are preserved for visual purposes
+    # (so the user can click again to un-mark) but ``success`` is
+    # forced to False and the trial counts as a failure in stats.
+    post_manual_failure: bool = False
 
 
 def _measure_trial(
@@ -281,6 +287,7 @@ def _measure_trial(
             latency_s=None, rise_ms=None, decay_ms=None,
             decay_tau_ms=None, half_width_ms=None,
             truncated=truncated, manual=manual,
+            post_manual_failure=False,
         )
 
     # Peak: choose extremum side from peak_direction, or auto-pick
@@ -373,6 +380,7 @@ def _measure_trial(
         latency_s=latency_s, rise_ms=rise_ms, decay_ms=decay_ms,
         decay_tau_ms=decay_tau_ms, half_width_ms=half_width_ms,
         truncated=truncated, manual=manual,
+        post_manual_failure=False,
     )
 
 
@@ -530,6 +538,11 @@ def _compute_sta(
         np.where(np.isnan(row), 0.0, row).tolist()
         for row in mat
     ]
+    # Fit a monoexponential decay on the average so the STA tab can
+    # overlay it and report τ. Only attempted when the mean has a
+    # clear peak post-anchor (samples after t=0). Failures fall back
+    # to None and the frontend just hides the fit.
+    fit = _fit_sta_mean(time_axis, mean, pre_samples)
     return {
         "time": time_axis.tolist(),
         "mean": np.where(np.isnan(mean), 0.0, mean).tolist(),
@@ -537,6 +550,88 @@ def _compute_sta(
         "n": int(mat.shape[0]),
         "traces": traces,
         "trace_success": success_flags,
+        "fit": fit,
+    }
+
+
+def _fit_sta_mean(
+    time_axis: np.ndarray,
+    mean: np.ndarray,
+    pre_samples: int,
+) -> Optional[dict]:
+    """Fit ``y = baseline + a · exp(-(t - t_peak)/τ)`` to the decay phase
+    of the STA mean (peak → end of post window). Returns the fit
+    parameters + the evaluated curve sampled on ``time_axis`` so the
+    frontend can plot it as an extra dashed series. Returns None when
+    the fit is degenerate (flat trace, too few samples, scipy doesn't
+    converge).
+    """
+    if mean.size < pre_samples + 4:
+        return None
+    # Baseline = mean of the pre-anchor samples (the part before t=0).
+    pre_seg = mean[:max(1, pre_samples)]
+    baseline = float(np.nanmean(pre_seg)) if pre_seg.size else 0.0
+    post_seg = mean[pre_samples:]
+    if post_seg.size < 4:
+        return None
+    centered = post_seg - baseline
+    # Pick peak as max-magnitude departure from baseline post-anchor.
+    pk_rel = int(np.argmax(np.abs(centered)))
+    if pk_rel >= post_seg.size - 2:
+        return None
+    peak_idx_abs = pre_samples + pk_rel
+    peak_t = float(time_axis[peak_idx_abs])
+    peak_v = float(mean[peak_idx_abs])
+    amp = peak_v - baseline
+    if amp == 0.0 or not np.isfinite(amp):
+        return None
+    # Decay segment: peak → end of trace.
+    dec = mean[peak_idx_abs:]
+    t_dec = time_axis[peak_idx_abs:] - peak_t
+    if dec.size < 4:
+        return None
+    try:
+        from scipy.optimize import curve_fit  # local import keeps cold start cheap
+    except Exception:
+        return None
+    a0 = amp
+    tau0 = max(1e-4, t_dec[-1] / 5.0)
+    def _monoexp(t, a, tau):
+        return baseline + a * np.exp(-t / max(tau, 1e-9))
+    try:
+        popt, _ = curve_fit(
+            _monoexp, t_dec, dec.astype(float),
+            p0=(a0, tau0),
+            bounds=((-np.inf, 1e-5), (np.inf, max(t_dec[-1] * 5.0, 1e-4))),
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError, TypeError):
+        return None
+    a_fit, tau_fit = float(popt[0]), float(popt[1])
+    if not np.isfinite(tau_fit) or tau_fit <= 0:
+        return None
+    # Evaluate the fit on the FULL time axis so the frontend can
+    # render it directly as a parallel series. Samples before peak
+    # get NaN (we only fit the decay).
+    fit_curve = np.full_like(mean, np.nan, dtype=float)
+    for i in range(peak_idx_abs, mean.size):
+        fit_curve[i] = baseline + a_fit * np.exp(
+            -(time_axis[i] - peak_t) / tau_fit
+        )
+    # Goodness of fit (R²) on the decay segment — surfaced in the UI
+    # so users can tell whether the fit is meaningful.
+    ss_res = float(np.nansum((dec - _monoexp(t_dec, a_fit, tau_fit)) ** 2))
+    ss_tot = float(np.nansum((dec - np.nanmean(dec)) ** 2))
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    return {
+        "baseline": baseline,
+        "amplitude": amp,
+        "peak_t_s": peak_t,
+        "peak_v": peak_v,
+        "tau_decay_ms": tau_fit * 1000.0,
+        "r2": float(r2),
+        "fit_curve": np.where(np.isnan(fit_curve), 0.0, fit_curve).tolist(),
+        "fit_curve_mask": (~np.isnan(fit_curve)).astype(int).tolist(),
     }
 
 
@@ -588,11 +683,14 @@ def run_paired(
 
     added_by_sweep: dict[int, list[float]] = {}
     removed_by_sweep: dict[int, list[float]] = {}
+    post_failed_by_sweep: dict[int, list[float]] = {}
     if manual_edits:
         for k, v in (manual_edits.get("added") or {}).items():
             added_by_sweep[int(k)] = [float(t) for t in (v or [])]
         for k, v in (manual_edits.get("removed") or {}).items():
             removed_by_sweep[int(k)] = [float(t) for t in (v or [])]
+        for k, v in (manual_edits.get("post_failed") or {}).items():
+            post_failed_by_sweep[int(k)] = [float(t) for t in (v or [])]
 
     sweep_index_lookup = {sw: i for i, sw in enumerate(sweep_indices)}
 
@@ -653,6 +751,21 @@ def run_paired(
                 post_search_start_s=post_search_start_s,
                 post_search_end_s=post_search_end_s,
             )
+            # Apply post-side manual failure if the user has marked
+            # this trial's pre-event time as a manual failure.
+            # Tolerance matches min_distance_ms in seconds so the
+            # match works against either the snapped peak idx (for
+            # auto detection) or the user's clicked anchor (for
+            # manual additions).
+            post_fail_list = post_failed_by_sweep.get(int(sw_idx), [])
+            post_fail_tol = max(0.001, min_distance_ms / 1000.0)
+            if any(abs(tr.pre_t_s - pf) <= post_fail_tol for pf in post_fail_list):
+                tr.post_manual_failure = True
+                if tr.success:
+                    # Manual override only kicks in when the auto path
+                    # actually classified the trial as a success — the
+                    # user is overruling that classification.
+                    tr.success = False
             sweep_trials.append(tr)
         all_trials.extend(sweep_trials)
 
@@ -716,6 +829,7 @@ def _trial_to_dict(t: _Trial) -> dict:
         "half_width_ms": t.half_width_ms,
         "truncated": bool(t.truncated),
         "manual": bool(t.manual),
+        "post_manual_failure": bool(t.post_manual_failure),
     }
 
 

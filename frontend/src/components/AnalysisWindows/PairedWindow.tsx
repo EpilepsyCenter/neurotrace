@@ -8,6 +8,9 @@ import {
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { sampleTraceYAt } from '../../utils/sampleTraceY'
+import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowCopyMenu } from '../common/RowCopyMenu'
+import { usePlotMenu } from '../common/PlotMenu'
 
 // ---------------------------------------------------------------------------
 // Types and helpers
@@ -1305,6 +1308,15 @@ function OverlayViewer({
   // ``plotRef.current`` null.
   const [plotVer, setPlotVer] = useState(0)
 
+  // Right-click PNG / SVG export menu — shared with the rest of the
+  // app via ``usePlotMenu``. Left-click is already consumed by the
+  // pointer handlers (``button !== 0`` short-circuits them) so
+  // right-click falls through to this menu.
+  const plotMenu = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'paired-overlay',
+  })
+
   // ── Build / rebuild the plot ───────────────────────────────────
   // Wrapped in ``requestAnimationFrame`` so the destroy + create
   // pair runs after the current render's layout has settled (same
@@ -1910,7 +1922,10 @@ function OverlayViewer({
           style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
           title="Reset both Y axes + X to data bounds (also: double-click)">Reset zoom</button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, minHeight: 0, position: 'relative' }} />
+      <div ref={containerRef}
+        onContextMenu={plotMenu.onContextMenu}
+        style={{ flex: 1, minHeight: 0, position: 'relative' }} />
+      {plotMenu.menu}
       <div style={{
         padding: '2px 8px', fontSize: 'var(--font-size-label)',
         color: 'var(--text-muted)', fontStyle: 'italic',
@@ -2035,15 +2050,45 @@ function fmt(n: number | null | undefined, decimals = 2): string {
 }
 
 function TrialsTab({ data }: { data: PairedData | null }) {
-  if (!data) {
-    return <Empty msg="Run analysis to see trials." />
-  }
   const headers = [
     'Sweep', '#', 'pre t (s)', 'amplitude',
     'success', 'latency (ms)', 'rise (ms)', 'decay (ms)',
     'τ_decay (ms)', 'half-width (ms)',
     'baseline σ', 'truncated',
   ]
+  const rows = data?.perTrial ?? []
+  // Hooks must run unconditionally — call them before any early
+  // return so React's hook order stays stable when the data goes
+  // null between renders.
+  const sel = useRowSelection(rows.length)
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const t = rows[i]
+    if (!t) return []
+    return [
+      t.sweep + 1,
+      t.trialIdx + 1 + (t.manual ? ' (manual)' : ''),
+      t.preTS,
+      t.amplitude,
+      t.success ? 'yes' : 'no',
+      t.latencyMs ?? null,
+      t.riseMs ?? null,
+      t.decayMs ?? null,
+      t.decayTauMs ?? null,
+      t.halfWidthMs ?? null,
+      t.baselineSd,
+      t.truncated ? 'yes' : '',
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0
+      ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
+
+  if (!data) {
+    return <Empty msg="Run analysis to see trials." />
+  }
   return (
     <div style={{
       border: '1px solid var(--border)', borderRadius: 4,
@@ -2062,11 +2107,18 @@ function TrialsTab({ data }: { data: PairedData | null }) {
           </tr>
         </thead>
         <tbody>
-          {data.perTrial.map((t, i) => (
+          {rows.map((t, i) => (
             <tr key={i}
+              onClick={(ev) => sel.onRowClick(i, ev)}
+              onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                if (!sel.isSelected(i)) sel.setSelected([i])
+              })}
               style={{
                 borderTop: '1px solid var(--border)',
-                background: t.success ? 'transparent' : 'rgba(229,115,115,0.08)',
+                cursor: 'pointer',
+                background: sel.isSelected(i)
+                  ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                  : t.success ? 'transparent' : 'rgba(229,115,115,0.08)',
               }}>
               <Td>{t.sweep + 1}</Td>
               <Td>{t.trialIdx + 1}{t.manual ? '*' : ''}</Td>
@@ -2086,6 +2138,7 @@ function TrialsTab({ data }: { data: PairedData | null }) {
           ))}
         </tbody>
       </table>
+      {copyMenu.menu}
     </div>
   )
 }
@@ -2197,6 +2250,10 @@ function STATab({ data }: { data: PairedData | null }) {
   const [seriesPick, setSeriesPick] = useState<SeriesPick>('all')
   const [showOverlay, setShowOverlay] = useState(false)
   const [overlayIncludesFailures, setOverlayIncludesFailures] = useState(false)
+  const staMenu = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'paired-sta',
+  })
 
   const sta = data
     ? (seriesPick === 'success' ? data.staSuccess
@@ -2366,11 +2423,14 @@ function STATab({ data }: { data: PairedData | null }) {
           {sta ? `n = ${sta.n}` : 'no trials'}
         </span>
       </div>
-      <div ref={containerRef} style={{
+      <div ref={containerRef}
+        onContextMenu={staMenu.onContextMenu}
+        style={{
         flex: 1, minHeight: 0, marginTop: 6,
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)',
       }} />
+      {staMenu.menu}
       {/* Inline note: explain the two grey lines flanking the mean.
           Spelled out fully because the ribbon convention isn't
           obvious from the picture alone. */}

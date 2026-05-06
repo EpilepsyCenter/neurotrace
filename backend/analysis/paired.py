@@ -46,6 +46,7 @@ import numpy as np
 
 from analysis.ap import _Spike, _detect_spikes_sweep, _apply_manual_edits_to_sweep
 from analysis.bursts import _apply_pre_detection_filter
+from analysis.events import measure_event_kinetics
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +191,10 @@ class _Trial:
     amplitude: float           # signed: post_peak - baseline_mean
     success: bool
     latency_s: Optional[float]
-    rise_ms: Optional[float]   # 10–90 % rise on successes only
-    decay_ms: Optional[float]  # 90–10 % decay on successes only
+    rise_ms: Optional[float]       # 10–90 % rise on successes only
+    decay_ms: Optional[float]      # 90–37 % (1/e) decay on successes only
+    decay_tau_ms: Optional[float]  # monoexp fit τ on successes only
+    half_width_ms: Optional[float]
     truncated: bool
     manual: bool = False
 
@@ -291,10 +294,17 @@ def _measure_trial(
         threshold_abs = failure_k_sd * baseline_sd
     success = abs(amplitude) >= threshold_abs and threshold_abs > 0
 
-    # Latency — only meaningful when the trial is a success.
+    # Latency + kinetics — only meaningful when the trial is a success.
+    # Latency uses our own rule (fraction-of-peak default, onset-d² as
+    # the alternative) so it's anchored to t_pre; rise / decay / τ are
+    # delegated to ``analysis.events.measure_event_kinetics`` (the same
+    # Jonas-1993 foot-intersect + monoexponential fit pipeline the
+    # event-detection module uses).
     latency_s: Optional[float] = None
     rise_ms: Optional[float] = None
     decay_ms: Optional[float] = None
+    decay_tau_ms: Optional[float] = None
+    half_width_ms: Optional[float] = None
     if success and rel_peak > 0:
         target = baseline_mean + latency_fraction * amplitude
         rising = post_segment[:rel_peak + 1]
@@ -316,18 +326,32 @@ def _measure_trial(
             latency_idx = int(idxs[0]) if idxs.size else 0
         latency_s = float((post_a + latency_idx - pre_idx) / sr)
 
-        # 10–90 rise, 90–10 decay on the post window. Compute against
-        # baseline_mean and the peak; clamp to NaN-able when the segment
-        # doesn't contain both crossings.
-        rise_ms = _percent_crossing_ms(
-            rising, baseline_mean, post_peak, sr,
-            low_pct=0.10, high_pct=0.90,
-        )
-        falling = post_segment[rel_peak:]
-        decay_ms = _percent_crossing_ms(
-            falling, post_peak, baseline_mean, sr,
-            low_pct=0.90, high_pct=0.10,   # inverted: from peak back toward baseline
-        )
+        # Rise / decay / τ via measure_event_kinetics. Direction is
+        # inferred from amplitude sign when caller asked for 'auto'.
+        # We pass the FULL post array and the absolute peak index so
+        # the function's own baseline estimation has enough context;
+        # decay_search_ms is sized to the remaining post window so the
+        # fit doesn't run past the truncation guard.
+        ek_dir = ("positive" if amplitude > 0 else "negative") \
+            if peak_direction == "auto" else \
+            ("positive" if peak_direction == "positive" else "negative")
+        decay_search_samples = max(1, post_b - peak_idx_abs)
+        decay_search_ms_eff = float(decay_search_samples / sr * 1000.0)
+        baseline_search_ms_eff = float((pre_idx - bl_a) / sr * 1000.0) if bl_a < pre_idx else 5.0
+        try:
+            ek = measure_event_kinetics(
+                post, sr, peak_idx_abs,
+                direction=ek_dir,
+                baseline_search_ms=max(2.0, baseline_search_ms_eff),
+                decay_search_ms=max(2.0, decay_search_ms_eff),
+            )
+            rise_ms = ek.rise_time_ms
+            decay_ms = ek.decay_time_ms
+            decay_tau_ms = ek.decay_tau_ms
+            half_width_ms = ek.half_width_ms
+        except Exception:
+            # Don't let a single fit failure poison the whole sweep.
+            pass
 
     return _Trial(
         sweep=sweep, trial_idx=trial_idx,
@@ -336,42 +360,9 @@ def _measure_trial(
         post_peak=post_peak, post_peak_t_s=float(peak_idx_abs / sr),
         amplitude=amplitude, success=bool(success),
         latency_s=latency_s, rise_ms=rise_ms, decay_ms=decay_ms,
+        decay_tau_ms=decay_tau_ms, half_width_ms=half_width_ms,
         truncated=truncated, manual=manual,
     )
-
-
-def _percent_crossing_ms(
-    seg: np.ndarray, start_val: float, end_val: float, sr: float,
-    *, low_pct: float, high_pct: float,
-) -> Optional[float]:
-    """Time in ms between two amplitude-fraction crossings.
-
-    Used for both rise (low → high) on the rising edge and decay (high
-    → low) on the falling edge. Returns None when either crossing is
-    missing from the segment.
-    """
-    if seg.size < 2:
-        return None
-    span = end_val - start_val
-    if span == 0:
-        return None
-    # Frame the targets so that lower comes BEFORE upper in the segment
-    # for both rising (start<end) and falling (start>end) cases.
-    t_low = start_val + low_pct * span
-    t_high = start_val + high_pct * span
-    if span > 0:
-        cross_low = np.flatnonzero(seg >= t_low)
-        cross_high = np.flatnonzero(seg >= t_high)
-    else:
-        cross_low = np.flatnonzero(seg <= t_low)
-        cross_high = np.flatnonzero(seg <= t_high)
-    if cross_low.size == 0 or cross_high.size == 0:
-        return None
-    i_low = int(cross_low[0])
-    i_high = int(cross_high[0])
-    if i_high <= i_low:
-        return None
-    return float((i_high - i_low) / sr * 1000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +682,8 @@ def _trial_to_dict(t: _Trial) -> dict:
         "latency_ms": (t.latency_s * 1000.0) if t.latency_s is not None else None,
         "rise_ms": t.rise_ms,
         "decay_ms": t.decay_ms,
+        "decay_tau_ms": t.decay_tau_ms,
+        "half_width_ms": t.half_width_ms,
         "truncated": bool(t.truncated),
         "manual": bool(t.manual),
     }

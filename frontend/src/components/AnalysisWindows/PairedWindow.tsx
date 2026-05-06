@@ -169,6 +169,11 @@ export function PairedWindow({
   const [postBounds, setPostBounds] = useState<{ start: number | null; end: number | null }>(
     { start: null, end: null },
   )
+  // Show/hide checkboxes for the cursor bands on the (now combined)
+  // viewer. Defaults to off — users opt-in. ``showPostBounds`` ties
+  // to whether the bounds are actually applied to detection.
+  const [showPreBounds, setShowPreBounds] = useState(false)
+  const [showPostBounds, setShowPostBounds] = useState(false)
   // Hydrate post-bounds from a stored entry on series change.
   useEffect(() => {
     const stored = pairedAnalyses[`${group}:${series}`]
@@ -272,10 +277,13 @@ export function PairedWindow({
           filter_low: form.postParams.filterLow,
           filter_high: form.postParams.filterHigh,
           filter_order: form.postParams.filterOrder,
-          // Optional absolute-time clip from the post-viewer cursors.
-          // Backend treats null / undefined as "no clip".
-          post_search_start_s: postBounds.start,
-          post_search_end_s: postBounds.end,
+          // Optional absolute-time clip from the post-search cursors.
+          // Only applied when the user has the cursors visible —
+          // unchecking the box treats them as inactive even if the
+          // numeric values are still in state. Backend treats null /
+          // undefined as "no clip".
+          post_search_start_s: showPostBounds ? postBounds.start : null,
+          post_search_end_s:   showPostBounds ? postBounds.end   : null,
         },
         failure_params: {
           rule: form.failureParams.rule,
@@ -324,6 +332,8 @@ export function PairedWindow({
           latencyMs: t.latency_ms,
           riseMs: t.rise_ms,
           decayMs: t.decay_ms,
+          decayTauMs: t.decay_tau_ms,
+          halfWidthMs: t.half_width_ms,
           truncated: t.truncated,
           manual: t.manual,
         })),
@@ -476,8 +486,14 @@ export function PairedWindow({
             display: 'flex', flexDirection: 'column', gap: 8,
             paddingRight: 4,
           }}>
-            <PreSourceCard form={form} onChange={updateForm} />
-            <PostWindowCard form={form} onChange={updateForm} />
+            <PreSourceCard form={form} onChange={updateForm}
+              showBounds={showPreBounds}
+              setShowBounds={setShowPreBounds} />
+            <PostWindowCard form={form} onChange={updateForm}
+              bounds={postBounds}
+              onBoundsChange={setPostBounds}
+              showBounds={showPostBounds}
+              setShowBounds={setShowPostBounds} />
             <FailureThresholdCard form={form} onChange={updateForm} />
             <LatencyCard form={form} onChange={updateForm} />
           </div>
@@ -564,44 +580,48 @@ export function PairedWindow({
 
         {/* Main content */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          {/* Stacked viewers — fixed pixel height driven by the
-              row-resize splitter below. */}
+          {/* Single overlay viewer — pre on left Y axis, post on right
+              Y axis. Fixed pixel height driven by the row-resize
+              splitter below. */}
           <div style={{
             height: topHeight, minHeight: 180, flexShrink: 0,
             display: 'flex', flexDirection: 'column', minWidth: 0,
           }}>
-            <MiniViewer
-              title={`Pre — ${channelOptions.find((c) => c.value === preTrace)?.label ?? `ch ${preTrace}`}`}
-              role="pre"
-              data={preData}
+            <OverlayViewer
+              preData={preData}
+              postData={postData}
+              preColor="#64b5f6"
+              postColor="#81c784"
+              preUnits={channels[preTrace]?.units ?? ''}
+              postUnits={channels[postTrace]?.units ?? ''}
               xRange={xRange}
               onXRangeChange={setXRange}
-              color="#64b5f6"
-              units={channels[preTrace]?.units ?? ''}
               heightSignal={topHeight}
               detectionMarkers={stored && stored.preTrace === preTrace
                 ? stored.perTrial
                     .filter((t) => t.sweep === sweep)
                     .map((t) => ({ t: t.preTS, manual: t.manual }))
                 : []}
-            />
-            <MiniViewer
-              title={`Post — ${channelOptions.find((c) => c.value === postTrace)?.label ?? `ch ${postTrace}`}`}
-              role="post"
-              data={postData}
-              xRange={xRange}
-              onXRangeChange={setXRange}
-              color="#81c784"
-              units={channels[postTrace]?.units ?? ''}
-              heightSignal={topHeight}
-              detectionMarkers={[]}
               postPeakMarkers={stored && stored.postTrace === postTrace
                 ? stored.perTrial.filter((t) => t.sweep === sweep).map((t) => ({
                   t: t.postPeakTS, y: t.postPeak, success: t.success,
                 }))
                 : []}
+              preBounds={{
+                start: Number(form.preParams.bounds_start_s ?? 0),
+                end:   Number(form.preParams.bounds_end_s ?? 0),
+              }}
+              onPreBoundsChange={(next) => updateForm({
+                preParams: {
+                  ...form.preParams,
+                  bounds_start_s: next.start,
+                  bounds_end_s: next.end,
+                },
+              })}
+              showPreBounds={showPreBounds}
               postBounds={postBounds}
               onPostBoundsChange={setPostBounds}
+              showPostBounds={showPostBounds}
             />
           </div>
           {/* Horizontal splitter between viewers and result region. */}
@@ -756,10 +776,12 @@ function SubHeader({ children }: { children: React.ReactNode }) {
 }
 
 function PreSourceCard({
-  form, onChange,
+  form, onChange, showBounds, setShowBounds,
 }: {
   form: PairedFormState
   onChange: (patch: Partial<PairedFormState>) => void
+  showBounds: boolean
+  setShowBounds: (v: boolean) => void
 }) {
   const setPP = (patch: Record<string, unknown>) =>
     onChange({ preParams: { ...form.preParams, ...patch } })
@@ -864,24 +886,41 @@ function PreSourceCard({
       <ParamRow label="Min distance (ms)"
         value={Number(form.preParams.min_distance_ms ?? 5.0)} step={0.5} min={0.1}
         onChange={(v) => setPP({ min_distance_ms: v })} />
-      <ParamRow label="Bounds start (s)"
-        value={Number(form.preParams.bounds_start_s ?? 0)} step={0.05} min={0}
-        onChange={(v) => setPP({ bounds_start_s: Math.max(0, v) })} />
-      <ParamRow label="Bounds end (s, 0=auto)"
-        value={Number(form.preParams.bounds_end_s ?? 0)} step={0.05} min={0}
-        onChange={(v) => setPP({ bounds_end_s: Math.max(0, v) })} />
+      <label style={{
+        gridColumn: '1 / -1',
+        display: 'flex', alignItems: 'center', gap: 6,
+        fontSize: 'var(--font-size-label)',
+      }}
+        title="Show pre-detection analysis bounds on the viewer. Drag the cursors or edit the start/end values below.">
+        <input type="checkbox" checked={showBounds}
+          onChange={(e) => setShowBounds(e.target.checked)} />
+        <span>Show pre-detection cursors</span>
+      </label>
+      <ParamRow label="Start (ms)"
+        value={Number(form.preParams.bounds_start_s ?? 0) * 1000} step={5} min={0}
+        onChange={(v) => setPP({ bounds_start_s: Math.max(0, v / 1000) })} />
+      <ParamRow label="End (ms, 0=auto)"
+        value={Number(form.preParams.bounds_end_s ?? 0) * 1000} step={5} min={0}
+        onChange={(v) => setPP({ bounds_end_s: Math.max(0, v / 1000) })} />
     </ParamGrid>
   )
 }
 
 function PostWindowCard({
   form, onChange,
+  bounds, onBoundsChange, showBounds, setShowBounds,
 }: {
   form: PairedFormState
   onChange: (patch: Partial<PairedFormState>) => void
+  bounds: { start: number | null; end: number | null }
+  onBoundsChange: (next: { start: number | null; end: number | null }) => void
+  showBounds: boolean
+  setShowBounds: (v: boolean) => void
 }) {
   const set = (patch: Partial<PairedFormState['postParams']>) =>
     onChange({ postParams: { ...form.postParams, ...patch } })
+  const startMs = bounds.start != null ? bounds.start * 1000 : 0
+  const endMs   = bounds.end   != null ? bounds.end   * 1000 : 0
   return (
     <ParamGrid>
       <SubHeader>Post window</SubHeader>
@@ -904,6 +943,35 @@ function PostWindowCard({
           </select>
         </Field>
       </div>
+
+      <SubHeader>Search cursors</SubHeader>
+      <label style={{
+        gridColumn: '1 / -1',
+        display: 'flex', alignItems: 'center', gap: 6,
+        fontSize: 'var(--font-size-label)',
+      }}
+        title="When checked, peak detection per trial is clipped to the [start, end] window in absolute sweep time. Drag the cursors on the viewer or edit the values below.">
+        <input type="checkbox" checked={showBounds}
+          onChange={(e) => {
+            const v = e.target.checked
+            setShowBounds(v)
+            if (v && (bounds.start == null || bounds.end == null)) {
+              // Seed default cursors at 100–500 ms — sensible for
+              // typical paired-recording protocols. User adjusts.
+              onBoundsChange({
+                start: bounds.start ?? 0.10,
+                end: bounds.end ?? 0.50,
+              })
+            }
+          }} />
+        <span>Show post-search cursors</span>
+      </label>
+      <ParamRow label="Start (ms)"
+        value={startMs} step={5}
+        onChange={(v) => onBoundsChange({ start: v / 1000, end: bounds.end })} />
+      <ParamRow label="End (ms)"
+        value={endMs} step={5}
+        onChange={(v) => onBoundsChange({ start: bounds.start, end: v / 1000 })} />
     </ParamGrid>
   )
 }
@@ -983,75 +1051,136 @@ const MARKER_RING_RADIUS = 9     // for manually-added markers
 const BAND_EDGE_PX = 6           // grab tolerance on bounds edges
 const DRAG_THRESHOLD_PX = 3      // click-vs-drag
 
-function MiniViewer({
-  title, role, data, xRange, onXRangeChange,
-  color, units, heightSignal,
+/**
+ * Overlay viewer — single uPlot showing pre + post on the same X axis
+ * with two independent Y axes (left = pre, right = post). Replaces
+ * the old stacked-mini-viewer arrangement so the user can read latencies
+ * across both channels without eye-jumping.
+ *
+ * Conventions copied from the main TraceViewer / AP sweep viewer:
+ *
+ * - ``cursor.drag.{x,y}: false`` disables uPlot's native rectangle
+ *   selection. Wheel + pointer-drag are wired by hand on ``.u-over``.
+ * - All zoom / pan goes through ``u.setScale(scale, {min, max})`` so
+ *   the same frame's draw call sees the new range. Plain ``redraw()``
+ *   doesn't re-evaluate ``scales.*.range()`` callbacks.
+ * - X axis values are stored in seconds; the bottom axis displays them
+ *   as milliseconds via the ``values:`` formatter. ``time: false`` on
+ *   the X scale stops uPlot from formatting them as Unix dates.
+ * - Marker dots match AP / Bursts: 5 px radius, 1.2 px white outline;
+ *   manual ones get a 9 px ring. Pre-event dots ride the ``y`` scale,
+ *   post-peak dots ride ``y_post`` so they sit on the right-axis trace.
+ *
+ * Bounds bands (analysis-bounds cursors) are drawn for both pre and
+ * post when their show-flag is true. Both sets of edges + bodies are
+ * drag-targets; pre uses an orange band, post uses blue, so they're
+ * easy to tell apart when they overlap.
+ */
+function OverlayViewer({
+  preData, postData,
+  preColor, postColor,
+  preUnits, postUnits,
+  xRange, onXRangeChange, heightSignal,
   detectionMarkers, postPeakMarkers,
-  postBounds, onPostBoundsChange,
+  preBounds, onPreBoundsChange, showPreBounds,
+  postBounds, onPostBoundsChange, showPostBounds,
 }: {
-  title: string
-  role: 'pre' | 'post'
-  data: { time: number[]; values: number[] } | null
+  preData: { time: number[]; values: number[] } | null
+  postData: { time: number[]; values: number[] } | null
+  preColor: string
+  postColor: string
+  preUnits: string
+  postUnits: string
   xRange: [number, number] | null
   onXRangeChange: (r: [number, number] | null) => void
-  color: string
-  units: string
-  /** Bumped by the parent splitter so the uPlot re-fits after the
-   *  user drags the row-resize handle. Same trick as APWindow. */
   heightSignal?: number
   detectionMarkers: { t: number; manual: boolean }[]
   postPeakMarkers?: { t: number; y: number; success: boolean }[]
-  /** When set on the post viewer, draws the AP-style draggable
-   *  analysis-bounds band that constrains peak search per trial.
-   *  ``null`` end means "open-ended". */
-  postBounds?: { start: number | null; end: number | null }
-  onPostBoundsChange?: (next: { start: number | null; end: number | null }) => void
+  preBounds: { start: number; end: number }
+  onPreBoundsChange: (next: { start: number; end: number }) => void
+  showPreBounds: boolean
+  postBounds: { start: number | null; end: number | null }
+  onPostBoundsChange: (next: { start: number | null; end: number | null }) => void
+  showPostBounds: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  const yRangeRef = useRef<[number, number] | null>(null)
+  // Y ranges per scale (left = pre, right = post). X is shared with
+  // the parent via xRangeRef + onXRangeChange.
+  const yPreRangeRef = useRef<[number, number] | null>(null)
+  const yPostRangeRef = useRef<[number, number] | null>(null)
   const xRangeRef = useRef<[number, number] | null>(xRange)
   xRangeRef.current = xRange
+  // Refs that the draw hook + pointer handlers read so we don't have
+  // to rebuild the plot when these change frame-to-frame.
   const detectionRef = useRef(detectionMarkers)
   detectionRef.current = detectionMarkers
   const postPeakRef = useRef(postPeakMarkers ?? [])
   postPeakRef.current = postPeakMarkers ?? []
+  const preBoundsRef = useRef(preBounds)
+  preBoundsRef.current = preBounds
+  const postBoundsRef = useRef(postBounds)
+  postBoundsRef.current = postBounds
+  const showPreBoundsRef = useRef(showPreBounds)
+  showPreBoundsRef.current = showPreBounds
+  const showPostBoundsRef = useRef(showPostBounds)
+  showPostBoundsRef.current = showPostBounds
   const onXRef = useRef(onXRangeChange)
   onXRef.current = onXRangeChange
-  const postBoundsRef = useRef(postBounds ?? null)
-  postBoundsRef.current = postBounds ?? null
+  const onPreBoundsRef = useRef(onPreBoundsChange)
+  onPreBoundsRef.current = onPreBoundsChange
   const onPostBoundsRef = useRef(onPostBoundsChange)
   onPostBoundsRef.current = onPostBoundsChange
-  // Bump for visual updates that don't go through React state (e.g.
-  // a Reset Zoom while the parent's xRange is already null).
   const [, setVer] = useState(0)
   const bump = useCallback(() => setVer((n) => n + 1), [])
 
-  // Build / rebuild the plot on data changes. Uses AP / Burst axis
-  // conventions: chart-axis / chart-grid / chart-tick CSS vars,
-  // ``font`` / ``labelFont`` as space-separated `${size} ${family}`
-  // strings, ``cursor.drag.{x,y}: false`` to disable the native
-  // rectangle selection (we handle pan ourselves).
+  // ── Build / rebuild the plot ───────────────────────────────────
   useEffect(() => {
     if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
-    if (!data || !containerRef.current) return
+    if (!containerRef.current) return
+    if (!preData && !postData) return
+
+    // Use pre's time grid as the master X array. Interpolate post
+    // onto it so uPlot can plot both as parallel series. When pre
+    // is missing, fall back to post's grid as the X.
+    const masterT = preData?.time ?? postData!.time
+    const preY: (number | null)[] = preData
+      ? preData.values.map((v) => v)
+      : new Array(masterT.length).fill(null)
+    const postY: (number | null)[] = postData
+      ? interpolateOnto(postData.time, postData.values, masterT)
+      : new Array(masterT.length).fill(null)
+
     const w = containerRef.current.clientWidth
     const h = containerRef.current.clientHeight
-    const yLabel = units || (role === 'pre' ? 'Vm' : 'I')
+
     const opts: uPlot.Options = {
       width: Math.max(200, w),
       height: Math.max(80, h),
       legend: { show: false },
       cursor: { drag: { x: false, y: false } },
       scales: {
-        x: { range: (_u, dMin, dMax) => xRangeRef.current ?? [dMin, dMax] },
+        x: {
+          time: false,
+          range: (_u, dMin, dMax) => xRangeRef.current ?? [dMin, dMax],
+        },
         y: {
           range: (_u, dMin, dMax) => {
-            if (yRangeRef.current) return yRangeRef.current
+            if (yPreRangeRef.current) return yPreRangeRef.current
             if (!isFinite(dMin) || !isFinite(dMax) || dMin === dMax) return [0, 1]
             const pad = (dMax - dMin) * 0.05
             const r: [number, number] = [dMin - pad, dMax + pad]
-            yRangeRef.current = r
+            yPreRangeRef.current = r
+            return r
+          },
+        },
+        y_post: {
+          range: (_u, dMin, dMax) => {
+            if (yPostRangeRef.current) return yPostRangeRef.current
+            if (!isFinite(dMin) || !isFinite(dMax) || dMin === dMax) return [0, 1]
+            const pad = (dMax - dMin) * 0.05
+            const r: [number, number] = [dMin - pad, dMax + pad]
+            yPostRangeRef.current = r
             return r
           },
         },
@@ -1060,133 +1189,172 @@ function MiniViewer({
         { stroke: cssVar('--chart-axis'),
           grid: { stroke: cssVar('--chart-grid'), width: 1 },
           ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-          label: 'Time (s)', labelSize: 22,
+          values: (_u, splits) => splits.map((s) => fmtMs(s * 1000)),
+          label: 'Time (ms)', labelSize: 22,
           font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
           labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
-        { stroke: cssVar('--chart-axis'),
+        { stroke: preColor,
           grid: { stroke: cssVar('--chart-grid'), width: 1 },
           ticks: { stroke: cssVar('--chart-tick'), width: 1 },
-          label: yLabel, labelSize: 22,
+          label: `Pre (${preUnits || 'Vm'})`, labelSize: 22,
+          scale: 'y',
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+        { stroke: postColor,
+          grid: { show: false },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: `Post (${postUnits || 'I'})`, labelSize: 22,
+          scale: 'y_post', side: 1,
           font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
           labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
       ],
       hooks: {
-        draw: [(u) => {
-          const ctx = u.ctx
-          const dpr = devicePixelRatio || 1
-          const top = u.bbox.top
-          const bottom = u.bbox.top + u.bbox.height
-
-          // Optional analysis-bounds band — post viewer only.
-          const b = postBoundsRef.current
-          if (b && b.start != null) {
-            const xMin = u.scales.x.min ?? b.start
-            const xMax = u.scales.x.max ?? (b.end ?? xMin)
-            const startVal = b.start
-            const endVal = b.end != null ? b.end : xMax
-            const visStart = Math.max(startVal, xMin)
-            const visEnd = Math.min(endVal, xMax)
-            if (visEnd > visStart) {
-              const px0 = u.valToPos(visStart, 'x', true)
-              const px1 = u.valToPos(visEnd, 'x', true)
-              ctx.save()
-              ctx.globalAlpha = 0.14
-              ctx.fillStyle = BOUND_COLOR
-              ctx.fillRect(Math.min(px0, px1), top, Math.abs(px1 - px0), bottom - top)
-              ctx.globalAlpha = 1
-              ctx.fillStyle = BOUND_COLOR
-              ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
-              ctx.fillText('post-search bounds', Math.min(px0, px1) + 2 * dpr, top + 12 * dpr)
-              ctx.restore()
-            }
-          }
-
-          // Detection markers (pre-event peaks). Sample the displayed
-          // trace at ``t`` so dots ride the visible line. Manual ones
-          // get the ring style from the AP convention.
-          const dot = (px: number, py: number, fill: string, ring: boolean) => {
-            ctx.beginPath()
-            ctx.arc(px, py, MARKER_RADIUS, 0, Math.PI * 2)
-            ctx.fillStyle = fill; ctx.fill()
-            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2; ctx.stroke()
-            if (ring) {
-              ctx.beginPath()
-              ctx.arc(px, py, MARKER_RING_RADIUS, 0, Math.PI * 2)
-              ctx.strokeStyle = fill; ctx.lineWidth = 1.5; ctx.stroke()
-            }
-          }
-          const markers = detectionRef.current
-          if (markers.length > 0 && data) {
-            ctx.save()
-            for (const m of markers) {
-              const idx = bisect(data.time, m.t)
-              if (idx < 0 || idx >= data.values.length) continue
-              const px = u.valToPos(m.t, 'x', true)
-              const py = u.valToPos(data.values[idx], 'y', true)
-              dot(px, py, PRE_MARKER_COLOR, m.manual)
-            }
-            ctx.restore()
-          }
-          // Post-peak markers (success = green, failure = red).
-          const ppm = postPeakRef.current
-          if (ppm.length > 0) {
-            ctx.save()
-            for (const m of ppm) {
-              const px = u.valToPos(m.t, 'x', true)
-              const py = u.valToPos(m.y, 'y', true)
-              dot(px, py, m.success ? SUCCESS_COLOR : FAILURE_COLOR, false)
-            }
-            ctx.restore()
-          }
-        }],
+        draw: [(u) => drawOverlay(u)],
       },
       series: [
         {},
-        { stroke: color, width: 1.25, label: title, points: { show: false } },
+        { stroke: preColor, width: 1.25, label: 'Pre',
+          scale: 'y', points: { show: false } },
+        { stroke: postColor, width: 1.25, label: 'Post',
+          scale: 'y_post', points: { show: false } },
       ],
     }
-    plotRef.current = new uPlot(opts, [data.time, data.values], containerRef.current)
+    plotRef.current = new uPlot(opts, [masterT, preY, postY] as any, containerRef.current)
     return () => {
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, color, title, units, role])
+  }, [preData, postData, preColor, postColor, preUnits, postUnits])
 
-  // Wire wheel + pan + double-click + bounds-edge drag onto uPlot's
-  // ``.u-over`` overlay. Uses ``setScale`` directly so the plot
-  // re-renders on the same frame (range callbacks alone don't get
-  // re-evaluated on plain ``redraw()``).
+  function drawOverlay(u: uPlot) {
+    const ctx = u.ctx
+    const dpr = devicePixelRatio || 1
+    const top = u.bbox.top
+    const bottom = u.bbox.top + u.bbox.height
+
+    // Bounds bands.
+    const drawBand = (x0: number, x1: number, fill: string, label: string) => {
+      const px0 = u.valToPos(x0, 'x', true)
+      const px1 = u.valToPos(x1, 'x', true)
+      ctx.save()
+      ctx.globalAlpha = 0.14
+      ctx.fillStyle = fill
+      ctx.fillRect(Math.min(px0, px1), top, Math.abs(px1 - px0), bottom - top)
+      ctx.globalAlpha = 1
+      ctx.fillStyle = fill
+      ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
+      ctx.fillText(label, Math.min(px0, px1) + 2 * dpr, top + 12 * dpr)
+      ctx.restore()
+    }
+    if (showPreBoundsRef.current) {
+      const b = preBoundsRef.current
+      const xMax = u.scales.x.max ?? b.start
+      const effEnd = b.end > b.start ? b.end : xMax
+      drawBand(b.start, effEnd, '#ffb74d', 'pre bounds')
+    }
+    if (showPostBoundsRef.current) {
+      const b = postBoundsRef.current
+      if (b.start != null) {
+        const xMax = u.scales.x.max ?? b.start
+        const effEnd = b.end != null ? b.end : xMax
+        drawBand(b.start, effEnd, '#64b5f6', 'post-search bounds')
+      }
+    }
+
+    // Marker drawing helper — shared between pre-event dots and
+    // post-peak dots. ``scaleKey`` picks which Y axis the marker's
+    // y value is positioned against.
+    const dot = (px: number, py: number, fill: string, ring: boolean) => {
+      ctx.beginPath()
+      ctx.arc(px, py, MARKER_RADIUS, 0, Math.PI * 2)
+      ctx.fillStyle = fill; ctx.fill()
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2; ctx.stroke()
+      if (ring) {
+        ctx.beginPath()
+        ctx.arc(px, py, MARKER_RING_RADIUS, 0, Math.PI * 2)
+        ctx.strokeStyle = fill; ctx.lineWidth = 1.5; ctx.stroke()
+      }
+    }
+    // Detection markers (pre-event peaks) — sample the pre series
+    // at marker time so dots ride the visible trace.
+    const markers = detectionRef.current
+    if (markers.length > 0 && preData) {
+      ctx.save()
+      for (const m of markers) {
+        const idx = bisect(preData.time, m.t)
+        if (idx < 0 || idx >= preData.values.length) continue
+        const px = u.valToPos(m.t, 'x', true)
+        const py = u.valToPos(preData.values[idx], 'y', true)
+        dot(px, py, PRE_MARKER_COLOR, m.manual)
+      }
+      ctx.restore()
+    }
+    // Post-peak markers (success / failure) — y is in post units, so
+    // route through the y_post scale.
+    const ppm = postPeakRef.current
+    if (ppm.length > 0) {
+      ctx.save()
+      for (const m of ppm) {
+        const px = u.valToPos(m.t, 'x', true)
+        const py = u.valToPos(m.y, 'y_post', true)
+        dot(px, py, m.success ? SUCCESS_COLOR : FAILURE_COLOR, false)
+      }
+      ctx.restore()
+    }
+  }
+
+  // ── Pointer + wheel ───────────────────────────────────────────
   useEffect(() => {
     const cont = containerRef.current
-    if (!cont || !data || !plotRef.current) return
+    if (!cont || !plotRef.current) return
+    if (!preData && !postData) return
     const u = plotRef.current
     const over = cont.querySelector<HTMLDivElement>('.u-over')
     if (!over) return
 
     type Drag =
-      | { kind: 'maybe-pan'; startX: number; startY: number; xMin: number; xMax: number; yMin: number; yMax: number; panning: boolean }
-      | { kind: 'bound-edge'; which: 'start' | 'end' }
-      | { kind: 'bound-band'; startX: number; startStart: number; startEnd: number }
+      | { kind: 'maybe-pan'; startX: number; startY: number; xMin: number; xMax: number; yMin: number; yMax: number; yPostMin: number; yPostMax: number; panning: boolean }
+      | { kind: 'pre-edge'; which: 'start' | 'end' }
+      | { kind: 'pre-band'; startX: number; startStart: number; startEnd: number }
+      | { kind: 'post-edge'; which: 'start' | 'end' }
+      | { kind: 'post-band'; startX: number; startStart: number; startEnd: number }
     let drag: Drag | null = null
-
     const xToPx = (x: number) => u.valToPos(x, 'x', false)
     const pxToX = (px: number) => u.posToVal(px, 'x')
 
-    const findBoundsHit = (pxX: number): Drag | null => {
-      if (!postBoundsRef.current) return null
-      const b = postBoundsRef.current
-      if (b.start == null) return null
-      const startPx = xToPx(b.start)
-      const endVal = b.end != null ? b.end : (u.scales.x.max ?? b.start)
-      const endPx = xToPx(endVal)
-      if (Math.abs(pxX - startPx) <= BAND_EDGE_PX) return { kind: 'bound-edge', which: 'start' }
-      if (b.end != null && Math.abs(pxX - endPx) <= BAND_EDGE_PX) return { kind: 'bound-edge', which: 'end' }
-      if (pxX > Math.min(startPx, endPx) + BAND_EDGE_PX
-          && pxX < Math.max(startPx, endPx) - BAND_EDGE_PX) {
-        return {
-          kind: 'bound-band', startX: pxX,
-          startStart: b.start,
-          startEnd: b.end != null ? b.end : (u.scales.x.max ?? b.start),
+    const findHit = (pxX: number): Drag | null => {
+      // Test post bounds first (drawn on top, more interactive).
+      if (showPostBoundsRef.current) {
+        const b = postBoundsRef.current
+        if (b.start != null) {
+          const startPx = xToPx(b.start)
+          const endVal = b.end != null ? b.end : (u.scales.x.max ?? b.start)
+          const endPx = xToPx(endVal)
+          if (Math.abs(pxX - startPx) <= BAND_EDGE_PX) return { kind: 'post-edge', which: 'start' }
+          if (b.end != null && Math.abs(pxX - endPx) <= BAND_EDGE_PX) return { kind: 'post-edge', which: 'end' }
+          if (pxX > Math.min(startPx, endPx) + BAND_EDGE_PX
+              && pxX < Math.max(startPx, endPx) - BAND_EDGE_PX) {
+            return {
+              kind: 'post-band', startX: pxX,
+              startStart: b.start,
+              startEnd: b.end != null ? b.end : (u.scales.x.max ?? b.start),
+            }
+          }
+        }
+      }
+      if (showPreBoundsRef.current) {
+        const b = preBoundsRef.current
+        const startPx = xToPx(b.start)
+        const endVal = b.end > b.start ? b.end : (u.scales.x.max ?? b.start)
+        const endPx = xToPx(endVal)
+        if (Math.abs(pxX - startPx) <= BAND_EDGE_PX) return { kind: 'pre-edge', which: 'start' }
+        if (b.end > b.start && Math.abs(pxX - endPx) <= BAND_EDGE_PX) return { kind: 'pre-edge', which: 'end' }
+        if (pxX > Math.min(startPx, endPx) + BAND_EDGE_PX
+            && pxX < Math.max(startPx, endPx) - BAND_EDGE_PX) {
+          return {
+            kind: 'pre-band', startX: pxX,
+            startStart: b.start, startEnd: b.end > b.start ? b.end : endVal,
+          }
         }
       }
       return null
@@ -1197,7 +1365,7 @@ function MiniViewer({
       const rect = over.getBoundingClientRect()
       const pxX = ev.clientX - rect.left
       const pxY = ev.clientY - rect.top
-      const hit = findBoundsHit(pxX)
+      const hit = findHit(pxX)
       if (hit) {
         drag = hit
       } else {
@@ -1206,42 +1374,64 @@ function MiniViewer({
           startX: pxX, startY: pxY,
           xMin: u.scales.x.min ?? 0, xMax: u.scales.x.max ?? 1,
           yMin: u.scales.y.min ?? 0, yMax: u.scales.y.max ?? 1,
+          yPostMin: (u.scales as any).y_post?.min ?? 0,
+          yPostMax: (u.scales as any).y_post?.max ?? 1,
           panning: false,
         }
       }
       try { over.setPointerCapture(ev.pointerId) } catch { /* ignore */ }
     }
     const onPointerMove = (ev: PointerEvent) => {
+      const rect = over.getBoundingClientRect()
       if (!drag) {
-        // Hover-based cursor feedback for bounds edges.
-        const rect = over.getBoundingClientRect()
-        const hit = findBoundsHit(ev.clientX - rect.left)
+        const hit = findHit(ev.clientX - rect.left)
         over.style.cursor = hit
-          ? (hit.kind === 'bound-edge' ? 'ew-resize' : 'grab')
+          ? (hit.kind.endsWith('-edge') ? 'ew-resize' : 'grab')
           : ''
         return
       }
-      const rect = over.getBoundingClientRect()
-      if (drag.kind === 'bound-edge') {
+      if (drag.kind === 'pre-edge') {
         const t = pxToX(ev.clientX - rect.left)
-        const cur = postBoundsRef.current ?? { start: null, end: null }
+        const cur = preBoundsRef.current
         const next = { ...cur }
-        if (drag.which === 'start') next.start = t
-        else next.end = t
-        // Keep start ≤ end.
-        if (next.start != null && next.end != null && next.start > next.end) {
+        if (drag.which === 'start') next.start = Math.max(0, t)
+        else next.end = Math.max(0, t)
+        if (next.start > next.end && next.end > 0) {
           [next.start, next.end] = [next.end, next.start]
           drag.which = drag.which === 'start' ? 'end' : 'start'
         }
-        onPostBoundsRef.current?.(next)
+        onPreBoundsRef.current(next)
         u.redraw()
-      } else if (drag.kind === 'bound-band') {
+      } else if (drag.kind === 'pre-band') {
         const dxPx = (ev.clientX - rect.left) - drag.startX
         const xMin = u.scales.x.min ?? 0
         const xMax = u.scales.x.max ?? 1
         const xPerPx = (xMax - xMin) / Math.max(1, u.bbox.width / (devicePixelRatio || 1))
         const dx = dxPx * xPerPx
-        onPostBoundsRef.current?.({
+        onPreBoundsRef.current({
+          start: Math.max(0, drag.startStart + dx),
+          end: Math.max(0, drag.startEnd + dx),
+        })
+        u.redraw()
+      } else if (drag.kind === 'post-edge') {
+        const t = pxToX(ev.clientX - rect.left)
+        const cur = postBoundsRef.current
+        const next = { ...cur }
+        if (drag.which === 'start') next.start = t
+        else next.end = t
+        if (next.start != null && next.end != null && next.start > next.end) {
+          [next.start, next.end] = [next.end, next.start]
+          drag.which = drag.which === 'start' ? 'end' : 'start'
+        }
+        onPostBoundsRef.current(next)
+        u.redraw()
+      } else if (drag.kind === 'post-band') {
+        const dxPx = (ev.clientX - rect.left) - drag.startX
+        const xMin = u.scales.x.min ?? 0
+        const xMax = u.scales.x.max ?? 1
+        const xPerPx = (xMax - xMin) / Math.max(1, u.bbox.width / (devicePixelRatio || 1))
+        const dx = dxPx * xPerPx
+        onPostBoundsRef.current({
           start: drag.startStart + dx,
           end: drag.startEnd + dx,
         })
@@ -1256,21 +1446,22 @@ function MiniViewer({
         }
         const bboxW = u.bbox.width / (devicePixelRatio || 1)
         const bboxH = u.bbox.height / (devicePixelRatio || 1)
-        const dx = -(dxPx / bboxW) * (drag.xMax - drag.xMin)
-        const dy = (dyPx / bboxH) * (drag.yMax - drag.yMin)
-        const nx: [number, number] = [drag.xMin + dx, drag.xMax + dx]
-        const ny: [number, number] = [drag.yMin + dy, drag.yMax + dy]
+        const dxX = -(dxPx / bboxW) * (drag.xMax - drag.xMin)
+        const dyY = (dyPx / bboxH) * (drag.yMax - drag.yMin)
+        const dyYP = (dyPx / bboxH) * (drag.yPostMax - drag.yPostMin)
+        const nx: [number, number] = [drag.xMin + dxX, drag.xMax + dxX]
+        const ny: [number, number] = [drag.yMin + dyY, drag.yMax + dyY]
+        const nyP: [number, number] = [drag.yPostMin + dyYP, drag.yPostMax + dyYP]
         xRangeRef.current = nx
-        yRangeRef.current = ny
+        yPreRangeRef.current = ny
+        yPostRangeRef.current = nyP
         u.setScale('x', { min: nx[0], max: nx[1] })
         u.setScale('y', { min: ny[0], max: ny[1] })
+        u.setScale('y_post', { min: nyP[0], max: nyP[1] })
         onXRef.current(nx)
       }
     }
-    const onPointerUp = () => {
-      drag = null
-      over.style.cursor = ''
-    }
+    const onPointerUp = () => { drag = null; over.style.cursor = '' }
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault()
       const rect = over.getBoundingClientRect()
@@ -1278,13 +1469,18 @@ function MiniViewer({
       const pxY = ev.clientY - rect.top
       const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
       if (ev.altKey) {
-        const yMin = u.scales.y.min, yMax = u.scales.y.max
-        if (yMin == null || yMax == null) return
-        const yAtCur = u.posToVal(pxY, 'y')
-        const newMin = yAtCur - (yAtCur - yMin) * factor
-        const newMax = yAtCur + (yMax - yAtCur) * factor
-        yRangeRef.current = [newMin, newMax]
-        u.setScale('y', { min: newMin, max: newMax })
+        // Y zoom — scales BOTH y axes around the cursor row at the
+        // same rate, so the relative shape stays consistent.
+        for (const key of ['y', 'y_post'] as const) {
+          const sMin = (u.scales as any)[key].min, sMax = (u.scales as any)[key].max
+          if (sMin == null || sMax == null) continue
+          const yAtCur = u.posToVal(pxY, key as any)
+          const newMin = yAtCur - (yAtCur - sMin) * factor
+          const newMax = yAtCur + (sMax - yAtCur) * factor
+          if (key === 'y') yPreRangeRef.current = [newMin, newMax]
+          else yPostRangeRef.current = [newMin, newMax]
+          u.setScale(key as any, { min: newMin, max: newMax })
+        }
       } else {
         const xMin = u.scales.x.min, xMax = u.scales.x.max
         if (xMin == null || xMax == null) return
@@ -1313,30 +1509,28 @@ function MiniViewer({
       over.removeEventListener('dblclick', onDbl)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data])
+  }, [preData, postData])
 
-  // Redraw on detection / post-peak / bounds changes (refs already
-  // hold the latest values; redraw replays the draw hook).
-  useEffect(() => { plotRef.current?.redraw() },
-    [detectionMarkers, postPeakMarkers, postBounds])
-
-  // Apply parent's X range when it changes from outside (e.g. the
-  // sibling viewer wheel-zoomed).
+  // Apply parent-driven X range changes (after a sibling triggers
+  // them — though there's no sibling now, the prop still routes here
+  // for cross-window cursor sync).
   useEffect(() => {
     const u = plotRef.current
     if (!u) return
     if (xRange) {
       u.setScale('x', { min: xRange[0], max: xRange[1] })
     } else {
-      // Reset to data bounds.
-      const arr = data?.time
-      if (arr && arr.length > 1) {
-        u.setScale('x', { min: arr[0], max: arr[arr.length - 1] })
-      }
+      const t = preData?.time ?? postData?.time
+      if (t && t.length > 1) u.setScale('x', { min: t[0], max: t[t.length - 1] })
     }
-  }, [xRange, data])
+  }, [xRange, preData, postData])
 
-  // Resize observer + parent splitter signal both refit the plot.
+  // Redraw on overlay-data changes (refs already hold the values).
+  useEffect(() => { plotRef.current?.redraw() },
+    [detectionMarkers, postPeakMarkers,
+     preBounds, postBounds, showPreBounds, showPostBounds])
+
+  // Resize handling — observer + parent splitter signal.
   useEffect(() => {
     const cont = containerRef.current
     if (!cont) return
@@ -1361,39 +1555,48 @@ function MiniViewer({
     return () => cancelAnimationFrame(raf)
   }, [heightSignal])
 
-  // Compute & apply a Y autofit over the currently-visible X range.
-  // ``preserveX = false`` also resets X to data bounds (= Reset Zoom).
-  const fitY = useCallback((preserveX: boolean) => {
+  // Compute & apply Y autofit. ``scale`` picks which Y axis to act
+  // on; ``preserveX`` controls whether X stays put (Fit Y) or also
+  // resets (Reset zoom).
+  const fitY = useCallback((scale: 'y' | 'y_post' | 'both', preserveX: boolean) => {
     const u = plotRef.current
-    if (!u || !data || data.time.length === 0) return
+    if (!u) return
+    const scales: Array<'y' | 'y_post'> = scale === 'both' ? ['y', 'y_post'] : [scale]
     let xLo: number, xHi: number
+    const masterT = preData?.time ?? postData?.time
+    if (!masterT || masterT.length === 0) return
     if (preserveX) {
-      xLo = u.scales.x.min ?? data.time[0]
-      xHi = u.scales.x.max ?? data.time[data.time.length - 1]
+      xLo = u.scales.x.min ?? masterT[0]
+      xHi = u.scales.x.max ?? masterT[masterT.length - 1]
     } else {
-      xLo = data.time[0]; xHi = data.time[data.time.length - 1]
+      xLo = masterT[0]; xHi = masterT[masterT.length - 1]
       xRangeRef.current = null
       u.setScale('x', { min: xLo, max: xHi })
       onXRef.current(null)
     }
-    let yLo = Infinity, yHi = -Infinity
-    for (let i = 0; i < data.time.length; i++) {
-      const t = data.time[i]
-      if (t < xLo || t > xHi) continue
-      const v = data.values[i]
-      if (v < yLo) yLo = v
-      if (v > yHi) yHi = v
+    for (const s of scales) {
+      const src = s === 'y' ? preData : postData
+      if (!src) continue
+      let yLo = Infinity, yHi = -Infinity
+      for (let i = 0; i < src.time.length; i++) {
+        const t = src.time[i]
+        if (t < xLo || t > xHi) continue
+        const v = src.values[i]
+        if (v < yLo) yLo = v
+        if (v > yHi) yHi = v
+      }
+      if (!isFinite(yLo) || !isFinite(yHi) || yHi <= yLo) continue
+      const pad = (yHi - yLo) * 0.05
+      const ny: [number, number] = [yLo - pad, yHi + pad]
+      if (s === 'y') yPreRangeRef.current = ny; else yPostRangeRef.current = ny
+      u.setScale(s, { min: ny[0], max: ny[1] })
     }
-    if (!isFinite(yLo) || !isFinite(yHi) || yHi <= yLo) return
-    const pad = (yHi - yLo) * 0.05
-    const ny: [number, number] = [yLo - pad, yHi + pad]
-    yRangeRef.current = ny
-    u.setScale('y', { min: ny[0], max: ny[1] })
     bump()
-  }, [data, bump])
+  }, [preData, postData, bump])
 
-  const doResetZoom = useCallback(() => fitY(false), [fitY])
-  const onFitY = useCallback(() => fitY(true), [fitY])
+  const doResetZoom = useCallback(() => fitY('both', false), [fitY])
+  const onFitYPre = useCallback(() => fitY('y', true), [fitY])
+  const onFitYPost = useCallback(() => fitY('y_post', true), [fitY])
   const onResetZoom = doResetZoom
 
   return (
@@ -1402,66 +1605,87 @@ function MiniViewer({
       background: 'var(--bg-primary)', position: 'relative',
       borderBottom: '1px solid var(--border)',
     }}>
-      {/* Header strip — same chrome as the AP / Burst sweep viewer:
-          mono font, muted text, hairline border below; status info on
-          the left + buttons aligned right via marginLeft auto. */}
       <div style={{
         padding: '3px 8px', fontSize: 'var(--font-size-label)',
         color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
         borderBottom: '1px solid var(--border)',
         display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center',
       }}>
-        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{title}</span>
-        <PairedMarkerLegend role={role} />
-        {/* Post-search bounds toggle — only on the post viewer. */}
-        {role === 'post' && onPostBoundsChange && (
-          <button className="btn" onClick={() => {
-            if (postBounds && postBounds.start != null) {
-              onPostBoundsChange({ start: null, end: null })
-            } else {
-              const u = plotRef.current
-              if (!u) return
-              const xMin = u.scales.x.min ?? 0
-              const xMax = u.scales.x.max ?? 1
-              const span = xMax - xMin
-              onPostBoundsChange({
-                start: xMin + span * 0.25,
-                end: xMin + span * 0.75,
-              })
-            }
-          }}
-            style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-            title="Add a draggable analysis-bounds band on the post trace. Peak detection per trial is clipped to this window in absolute time.">
-            {postBounds && postBounds.start != null ? 'Clear bounds' : 'Add bounds'}
-          </button>
-        )}
-        <button className="btn" onClick={onFitY}
+        <ChannelSwatch color={preColor} label="Pre" />
+        <ChannelSwatch color={postColor} label="Post" />
+        <PairedMarkerLegend role="overlay" />
+        <button className="btn" onClick={onFitYPre}
           style={{ marginLeft: 'auto', padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-          title="Fit Y to currently-visible X (preserves X zoom)">Fit Y</button>
+          title="Fit Y on the pre (left) axis to currently-visible X">Fit Y (pre)</button>
+        <button className="btn" onClick={onFitYPost}
+          style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
+          title="Fit Y on the post (right) axis to currently-visible X">Fit Y (post)</button>
         <button className="btn" onClick={onResetZoom}
           style={{ padding: '1px 8px', fontSize: 'var(--font-size-label)' }}
-          title="Reset X+Y to data bounds (also: double-click)">Reset zoom</button>
+          title="Reset both Y axes + X to data bounds (also: double-click)">Reset zoom</button>
       </div>
       <div ref={containerRef} style={{ flex: 1, minHeight: 0, position: 'relative' }} />
-      {/* Gesture-hint footer — identical wording across windows. */}
       <div style={{
         padding: '2px 8px', fontSize: 'var(--font-size-label)',
         color: 'var(--text-muted)', fontStyle: 'italic',
         background: 'var(--bg-secondary)',
         borderTop: '1px solid var(--border)',
       }}>
-        scroll = zoom X · ⌥ scroll = zoom Y · drag = pan · double-click = reset
+        scroll = zoom X · ⌥ scroll = zoom Y · drag = pan · drag bounds edge to resize · double-click = reset
       </div>
     </div>
   )
 }
 
+/** Linear interpolation of (srcT, srcY) onto refT. Both srcT and refT
+ *  must be sorted ascending. Out-of-range refT values get clamped to
+ *  the source endpoints rather than NaN — keeps the line continuous
+ *  when the two channels were LTTB'd to slightly different time
+ *  arrays. */
+function interpolateOnto(srcT: number[], srcY: number[], refT: number[]): number[] {
+  const out: number[] = new Array(refT.length)
+  if (srcT.length === 0) {
+    for (let i = 0; i < refT.length; i++) out[i] = NaN
+    return out
+  }
+  let j = 0
+  for (let i = 0; i < refT.length; i++) {
+    const t = refT[i]
+    if (t <= srcT[0]) { out[i] = srcY[0]; continue }
+    if (t >= srcT[srcT.length - 1]) { out[i] = srcY[srcY.length - 1]; continue }
+    while (j < srcT.length - 1 && srcT[j + 1] < t) j++
+    const t0 = srcT[j], t1 = srcT[j + 1]
+    const y0 = srcY[j], y1 = srcY[j + 1]
+    const f = (t - t0) / Math.max(1e-12, t1 - t0)
+    out[i] = y0 + f * (y1 - y0)
+  }
+  return out
+}
+
+/** Channel colour swatch + label for the overlay viewer's header. */
+function ChannelSwatch({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <span style={{
+        display: 'inline-block', width: 14, height: 3,
+        background: color,
+      }} />
+      <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{label}</span>
+    </span>
+  )
+}
+
 /** Tiny inline legend matching the AP / Events marker convention —
  *  small coloured dots with one-word labels, mono font, muted text. */
-function PairedMarkerLegend({ role }: { role: 'pre' | 'post' }) {
-  const items = role === 'pre'
-    ? [{ color: '#ffb74d', label: 'pre event' }]
+function PairedMarkerLegend({ role }: { role: 'pre' | 'post' | 'overlay' }) {
+  const items =
+    role === 'pre' ? [{ color: '#ffb74d', label: 'pre event' }]
+    : role === 'post' ? [
+      { color: '#66bb6a', label: 'success' },
+      { color: '#e57373', label: 'failure' },
+    ]
     : [
+      { color: '#ffb74d', label: 'pre event' },
       { color: '#66bb6a', label: 'success' },
       { color: '#e57373', label: 'failure' },
     ]
@@ -1478,6 +1702,20 @@ function PairedMarkerLegend({ role }: { role: 'pre' | 'post' }) {
       ))}
     </span>
   )
+}
+
+/** Format a number of milliseconds for an axis tick — keeps the
+ *  precision short so labels don't overlap. Trailing zeros after the
+ *  decimal point are trimmed; integers come out unsuffixed. */
+function fmtMs(ms: number): string {
+  if (!isFinite(ms)) return ''
+  const abs = Math.abs(ms)
+  // Pick decimals based on magnitude — typical uPlot tick spacing on
+  // a sweep window of seconds means ticks are every 50–500 ms; sub-
+  // millisecond ticks only show up when the user zooms way in.
+  const decimals = abs >= 100 ? 0 : abs >= 10 ? 1 : abs >= 1 ? 2 : 3
+  const s = ms.toFixed(decimals)
+  return s.replace(/\.?0+$/, '')
 }
 
 function bisect(arr: number[], t: number): number {
@@ -1505,6 +1743,7 @@ function TrialsTab({ data }: { data: PairedData | null }) {
   const headers = [
     'Sweep', '#', 'pre t (s)', 'amplitude',
     'success', 'latency (ms)', 'rise (ms)', 'decay (ms)',
+    'τ_decay (ms)', 'half-width (ms)',
     'baseline σ', 'truncated',
   ]
   return (
@@ -1541,6 +1780,8 @@ function TrialsTab({ data }: { data: PairedData | null }) {
               <Td>{fmt(t.latencyMs)}</Td>
               <Td>{fmt(t.riseMs)}</Td>
               <Td>{fmt(t.decayMs)}</Td>
+              <Td>{fmt(t.decayTauMs)}</Td>
+              <Td>{fmt(t.halfWidthMs)}</Td>
               <Td>{fmt(t.baselineSd, 3)}</Td>
               <Td>{t.truncated ? 'yes' : ''}</Td>
             </tr>

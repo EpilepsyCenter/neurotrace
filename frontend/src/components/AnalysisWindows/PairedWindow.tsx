@@ -759,6 +759,69 @@ function ParamRow({
   )
 }
 
+/** Pre-detection filter row — used inside both pre and post param
+ *  cards. Reads / writes whatever shape the parent passes in (pre
+ *  uses snake_case keys, post uses camelCase via PostParams), so the
+ *  caller wires this up via getter / setter callbacks. */
+function FilterRow({
+  enabled, type, low, high, order, onChange,
+}: {
+  enabled: boolean
+  type: 'lowpass' | 'highpass' | 'bandpass' | 'notch'
+  low: number
+  high: number
+  order: number
+  onChange: (patch: {
+    enabled?: boolean
+    type?: 'lowpass' | 'highpass' | 'bandpass' | 'notch'
+    low?: number
+    high?: number
+    order?: number
+  }) => void
+}) {
+  return (
+    <>
+      <label style={{
+        gridColumn: '1 / -1',
+        display: 'flex', alignItems: 'center', gap: 6,
+        fontSize: 'var(--font-size-label)',
+      }}>
+        <input type="checkbox" checked={enabled}
+          onChange={(e) => onChange({ enabled: e.target.checked })} />
+        <span>Pre-detection filter</span>
+      </label>
+      {enabled && (
+        <>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <Field label="Type">
+              <select value={type}
+                onChange={(e) => onChange({ type: e.target.value as any })}>
+                <option value="lowpass">Lowpass</option>
+                <option value="highpass">Highpass</option>
+                <option value="bandpass">Bandpass</option>
+                <option value="notch">Notch</option>
+              </select>
+            </Field>
+          </div>
+          {(type === 'highpass' || type === 'bandpass' || type === 'notch') && (
+            <ParamRow label="Low (Hz)"
+              value={low} step={1} min={0}
+              onChange={(v) => onChange({ low: v })} />
+          )}
+          {(type === 'lowpass' || type === 'bandpass' || type === 'notch') && (
+            <ParamRow label="High (Hz)"
+              value={high} step={50} min={1}
+              onChange={(v) => onChange({ high: v })} />
+          )}
+          <ParamRow label="Order"
+            value={order} step={1} min={1} max={8}
+            onChange={(v) => onChange({ order: Math.max(1, Math.min(8, Math.round(v))) })} />
+        </>
+      )}
+    </>
+  )
+}
+
 function SubHeader({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -882,6 +945,22 @@ function PreSourceCard({
         </>
       )}
 
+      <SubHeader>Filter</SubHeader>
+      <FilterRow
+        enabled={Boolean(form.preParams.filter_enabled ?? false)}
+        type={(form.preParams.filter_type as any) ?? 'lowpass'}
+        low={Number(form.preParams.filter_low ?? 1)}
+        high={Number(form.preParams.filter_high ?? 1000)}
+        order={Number(form.preParams.filter_order ?? 1)}
+        onChange={(p) => setPP({
+          ...(p.enabled !== undefined ? { filter_enabled: p.enabled } : {}),
+          ...(p.type !== undefined ? { filter_type: p.type } : {}),
+          ...(p.low !== undefined ? { filter_low: p.low } : {}),
+          ...(p.high !== undefined ? { filter_high: p.high } : {}),
+          ...(p.order !== undefined ? { filter_order: p.order } : {}),
+        })}
+      />
+
       <SubHeader>Spacing & bounds</SubHeader>
       <ParamRow label="Min distance (ms)"
         value={Number(form.preParams.min_distance_ms ?? 5.0)} step={0.5} min={0.1}
@@ -943,6 +1022,22 @@ function PostWindowCard({
           </select>
         </Field>
       </div>
+
+      <SubHeader>Filter</SubHeader>
+      <FilterRow
+        enabled={form.postParams.filterEnabled}
+        type={form.postParams.filterType}
+        low={form.postParams.filterLow}
+        high={form.postParams.filterHigh}
+        order={form.postParams.filterOrder}
+        onChange={(p) => set({
+          ...(p.enabled !== undefined ? { filterEnabled: p.enabled } : {}),
+          ...(p.type !== undefined ? { filterType: p.type } : {}),
+          ...(p.low !== undefined ? { filterLow: p.low } : {}),
+          ...(p.high !== undefined ? { filterHigh: p.high } : {}),
+          ...(p.order !== undefined ? { filterOrder: p.order } : {}),
+        })}
+      />
 
       <SubHeader>Search cursors</SubHeader>
       <label style={{
@@ -1313,7 +1408,7 @@ function OverlayViewer({
     if (!over) return
 
     type Drag =
-      | { kind: 'maybe-pan'; startX: number; startY: number; xMin: number; xMax: number; yMin: number; yMax: number; yPostMin: number; yPostMax: number; panning: boolean }
+      | { kind: 'maybe-pan'; startX: number; startY: number; xMin: number; xMax: number; yKey: 'y' | 'y_post'; yMin: number; yMax: number; panning: boolean }
       | { kind: 'pre-edge'; which: 'start' | 'end' }
       | { kind: 'pre-band'; startX: number; startStart: number; startEnd: number }
       | { kind: 'post-edge'; which: 'start' | 'end' }
@@ -1321,6 +1416,39 @@ function OverlayViewer({
     let drag: Drag | null = null
     const xToPx = (x: number) => u.valToPos(x, 'x', false)
     const pxToX = (px: number) => u.posToVal(px, 'x')
+
+    // Pick the Y axis the cursor is currently nearest to — same
+    // approach as the main TraceViewer's ``pickYScale``: at the
+    // cursor's X, locate each series's sample point and pick
+    // whichever sits closer in canvas pixels to the cursor's Y.
+    const pickYScale = (cssX: number, cssY: number): 'y' | 'y_post' => {
+      const xs = u.data[0] as number[] | undefined
+      if (!xs || xs.length === 0) return 'y'
+      const xVal = u.posToVal(cssX, 'x')
+      if (!isFinite(xVal)) return 'y'
+      let lo = 0, hi = xs.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (xs[mid] < xVal) lo = mid + 1
+        else hi = mid
+      }
+      const sampleIdx = lo
+      let bestKey: 'y' | 'y_post' = 'y'
+      let bestDist = Infinity
+      for (let i = 1; i < u.series.length; i++) {
+        const s = u.series[i]
+        const sk = (s.scale ?? 'y') as string
+        if (sk !== 'y' && sk !== 'y_post') continue
+        const arr = u.data[i] as (number | null)[] | undefined
+        if (!arr) continue
+        const v = arr[sampleIdx]
+        if (v == null || !isFinite(v)) continue
+        const py = u.valToPos(v, sk as any, false)
+        const d = Math.abs(py - cssY)
+        if (d < bestDist) { bestDist = d; bestKey = sk as 'y' | 'y_post' }
+      }
+      return bestKey
+    }
 
     const findHit = (pxX: number): Drag | null => {
       // Test post bounds first (drawn on top, more interactive).
@@ -1369,13 +1497,17 @@ function OverlayViewer({
       if (hit) {
         drag = hit
       } else {
+        // Pick the Y axis to pan based on cursor proximity at
+        // mousedown — sticky for the whole drag so panning across
+        // the other trace doesn't switch axes mid-drag.
+        const yKey = pickYScale(pxX, pxY)
+        const ys = (u.scales as any)[yKey]
         drag = {
           kind: 'maybe-pan',
           startX: pxX, startY: pxY,
           xMin: u.scales.x.min ?? 0, xMax: u.scales.x.max ?? 1,
-          yMin: u.scales.y.min ?? 0, yMax: u.scales.y.max ?? 1,
-          yPostMin: (u.scales as any).y_post?.min ?? 0,
-          yPostMax: (u.scales as any).y_post?.max ?? 1,
+          yKey,
+          yMin: ys?.min ?? 0, yMax: ys?.max ?? 1,
           panning: false,
         }
       }
@@ -1446,18 +1578,18 @@ function OverlayViewer({
         }
         const bboxW = u.bbox.width / (devicePixelRatio || 1)
         const bboxH = u.bbox.height / (devicePixelRatio || 1)
+        // X is shared between traces — pan affects both. The Y pan
+        // sticks to the axis picked at mousedown, so the user can
+        // shift one trace vertically without dragging the other.
         const dxX = -(dxPx / bboxW) * (drag.xMax - drag.xMin)
         const dyY = (dyPx / bboxH) * (drag.yMax - drag.yMin)
-        const dyYP = (dyPx / bboxH) * (drag.yPostMax - drag.yPostMin)
         const nx: [number, number] = [drag.xMin + dxX, drag.xMax + dxX]
         const ny: [number, number] = [drag.yMin + dyY, drag.yMax + dyY]
-        const nyP: [number, number] = [drag.yPostMin + dyYP, drag.yPostMax + dyYP]
         xRangeRef.current = nx
-        yPreRangeRef.current = ny
-        yPostRangeRef.current = nyP
+        if (drag.yKey === 'y') yPreRangeRef.current = ny
+        else yPostRangeRef.current = ny
         u.setScale('x', { min: nx[0], max: nx[1] })
-        u.setScale('y', { min: ny[0], max: ny[1] })
-        u.setScale('y_post', { min: nyP[0], max: nyP[1] })
+        u.setScale(drag.yKey, { min: ny[0], max: ny[1] })
         onXRef.current(nx)
       }
     }
@@ -1469,18 +1601,19 @@ function OverlayViewer({
       const pxY = ev.clientY - rect.top
       const factor = ev.deltaY > 0 ? 1.2 : 1 / 1.2
       if (ev.altKey) {
-        // Y zoom — scales BOTH y axes around the cursor row at the
-        // same rate, so the relative shape stays consistent.
-        for (const key of ['y', 'y_post'] as const) {
-          const sMin = (u.scales as any)[key].min, sMax = (u.scales as any)[key].max
-          if (sMin == null || sMax == null) continue
-          const yAtCur = u.posToVal(pxY, key as any)
-          const newMin = yAtCur - (yAtCur - sMin) * factor
-          const newMax = yAtCur + (sMax - yAtCur) * factor
-          if (key === 'y') yPreRangeRef.current = [newMin, newMax]
-          else yPostRangeRef.current = [newMin, newMax]
-          u.setScale(key as any, { min: newMin, max: newMax })
-        }
+        // Y zoom — picks whichever axis the cursor is closest to so
+        // the user can zoom each trace independently. Hover the
+        // trace you want, ⌥-scroll. Same pattern as the main
+        // TraceViewer's pickYScale-driven wheel.
+        const key = pickYScale(pxX, pxY)
+        const sMin = (u.scales as any)[key].min, sMax = (u.scales as any)[key].max
+        if (sMin == null || sMax == null) return
+        const yAtCur = u.posToVal(pxY, key as any)
+        const newMin = yAtCur - (yAtCur - sMin) * factor
+        const newMax = yAtCur + (sMax - yAtCur) * factor
+        if (key === 'y') yPreRangeRef.current = [newMin, newMax]
+        else yPostRangeRef.current = [newMin, newMax]
+        u.setScale(key as any, { min: newMin, max: newMax })
       } else {
         const xMin = u.scales.x.min, xMax = u.scales.x.max
         if (xMin == null || xMax == null) return
@@ -1631,7 +1764,7 @@ function OverlayViewer({
         background: 'var(--bg-secondary)',
         borderTop: '1px solid var(--border)',
       }}>
-        scroll = zoom X · ⌥ scroll = zoom Y · drag = pan · drag bounds edge to resize · double-click = reset
+        scroll = zoom X · ⌥ scroll = zoom Y (nearest trace) · drag = pan X + nearest Y · drag bounds edge to resize · double-click = reset
       </div>
     </div>
   )

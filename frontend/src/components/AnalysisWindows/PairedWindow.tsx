@@ -410,9 +410,9 @@ export function PairedWindow({
             n: p.n, ratio: p.ratio, nSweeps: p.n_sweeps,
           })),
         },
-        staAll: d.sta_all,
-        staSuccess: d.sta_success,
-        staFailure: d.sta_failure,
+        staAll: mapSta(d.sta_all),
+        staSuccess: mapSta(d.sta_success),
+        staFailure: mapSta(d.sta_failure),
         selectedTrialIdx: null,
         postSearchStartS: postBounds.start,
         postSearchEndS: postBounds.end,
@@ -1926,6 +1926,16 @@ function fmtMs(ms: number): string {
   return s.replace(/\.?0+$/, '')
 }
 
+/** Convert a backend STA payload into the camelCase ``PairedSta``
+ *  shape stored in the frontend. Returns null for null inputs. */
+function mapSta(s: any): import('../../stores/appStore').PairedSta | null {
+  if (!s) return null
+  return {
+    time: s.time, mean: s.mean, sem: s.sem, n: s.n,
+    traces: s.traces, traceSuccess: s.trace_success,
+  }
+}
+
 function bisect(arr: number[], t: number): number {
   let lo = 0, hi = arr.length - 1
   while (lo < hi) {
@@ -2103,8 +2113,10 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
 function STATab({ data }: { data: PairedData | null }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
-  type Series = 'all' | 'success' | 'failure'
-  const [seriesPick, setSeriesPick] = useState<Series>('all')
+  type SeriesPick = 'all' | 'success' | 'failure'
+  const [seriesPick, setSeriesPick] = useState<SeriesPick>('all')
+  const [showOverlay, setShowOverlay] = useState(false)
+  const [overlayIncludesFailures, setOverlayIncludesFailures] = useState(false)
 
   const sta = data
     ? (seriesPick === 'success' ? data.staSuccess
@@ -2115,45 +2127,82 @@ function STATab({ data }: { data: PairedData | null }) {
   useEffect(() => {
     if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     if (!sta || !containerRef.current) return
-    const muted = cssVar('--text-muted')
-    const border = cssVar('--border')
     const w = containerRef.current.clientWidth
     const h = containerRef.current.clientHeight
     const upper = sta.mean.map((m, i) => m + sta.sem[i])
     const lower = sta.mean.map((m, i) => m - sta.sem[i])
+
+    // Optional individual-sweep overlay. Each row of ``traces`` becomes
+    // its own faint series; failure rows are filtered out unless the
+    // user opted in.
+    const overlayRows: { values: number[]; success: boolean }[] = []
+    if (showOverlay && sta.traces && sta.traceSuccess) {
+      for (let i = 0; i < sta.traces.length; i++) {
+        const ok = sta.traceSuccess[i]
+        if (!overlayIncludesFailures && !ok) continue
+        overlayRows.push({ values: sta.traces[i], success: ok })
+      }
+    }
+
+    // Series order: x · +SEM · −SEM · overlays (failures first so
+    // they paint underneath successes) · MEAN on top.
+    const series: uPlot.Series[] = [
+      {},
+      { stroke: '#9e9e9e', width: 0.5, label: '+SEM', points: { show: false } },
+      { stroke: '#9e9e9e', width: 0.5, label: '−SEM', points: { show: false } },
+    ]
+    const overlayValues: number[][] = []
+    // Sort failures-first so successes paint over them.
+    overlayRows.sort((a, b) => Number(a.success) - Number(b.success))
+    for (const r of overlayRows) {
+      series.push({
+        stroke: r.success ? 'rgba(100,181,246,0.35)' : 'rgba(229,115,115,0.35)',
+        width: 0.5, points: { show: false },
+      })
+      overlayValues.push(r.values)
+    }
+    series.push({
+      stroke: '#64b5f6', width: 1.75,
+      label: `Mean (n=${sta.n})`, points: { show: false },
+    })
+
     const opts: uPlot.Options = {
       width: Math.max(200, w),
       height: Math.max(80, h),
-      cursor: { drag: { setScale: false } },
+      cursor: { drag: { x: false, y: false }, focus: { prox: 30 } },
       legend: { show: false },
+      scales: {
+        // ``time: false`` — same fix as the OverlayViewer; without it
+        // uPlot interprets the X numbers as Unix timestamps and
+        // shows dates on the axis. Underlying values stay in seconds
+        // (relative to t_pre, so they're already small) and the
+        // ``values`` formatter converts to ms for display.
+        x: { time: false },
+      },
       axes: [
-        { stroke: muted, grid: { stroke: border, width: 0.5 },
-          label: 'Time relative to t_pre (s)',
-          labelSize: 24, labelGap: 4,
-          labelFont: '11px var(--font-ui, sans-serif)',
-          font: '10px var(--font-mono, monospace)',
-        },
-        { stroke: muted, grid: { stroke: border, width: 0.5 },
-          label: 'Post amplitude',
-          labelSize: 28, labelGap: 6,
-          labelFont: '11px var(--font-ui, sans-serif)',
-          font: '10px var(--font-mono, monospace)',
-        },
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          values: (_u, splits) => splits.map((s) => fmtMs(s * 1000)),
+          label: 'Time relative to pre-event (ms)', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: 'Post amplitude', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
       ],
-      series: [
-        {},
-        { stroke: '#9e9e9e', width: 0.5, label: '+SEM', points: { show: false } },
-        { stroke: '#9e9e9e', width: 0.5, label: '−SEM', points: { show: false } },
-        { stroke: '#64b5f6', width: 1.5, label: `STA (n=${sta.n})`, points: { show: false } },
-      ],
+      series,
     }
     plotRef.current = new uPlot(opts, [
-      sta.time, upper, lower, sta.mean,
-    ], containerRef.current)
+      sta.time, upper, lower, ...overlayValues, sta.mean,
+    ] as any, containerRef.current)
     return () => {
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     }
-  }, [sta])
+  }, [sta, showOverlay, overlayIncludesFailures])
 
   if (!data) return <Empty msg="Run analysis to see the spike-triggered average." />
   return (
@@ -2161,8 +2210,11 @@ function STATab({ data }: { data: PairedData | null }) {
       padding: 8, display: 'flex', flexDirection: 'column',
       height: '100%', boxSizing: 'border-box',
     }}>
+      {/* Header strip — segmented picker + overlay toggles, mono
+          font, hairline border, same chrome as the viewer header. */}
       <div style={{
         flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
+        flexWrap: 'wrap',
         padding: '3px 8px',
         fontSize: 'var(--font-size-label)',
         fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
@@ -2170,8 +2222,8 @@ function STATab({ data }: { data: PairedData | null }) {
         border: '1px solid var(--border)', borderRadius: 4,
       }}>
         <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>STA / Average</span>
-        <span style={{ display: 'inline-flex', gap: 2, marginLeft: 8 }}>
-          {(['all', 'success', 'failure'] as Series[]).map((k) => {
+        <span style={{ display: 'inline-flex', gap: 2 }}>
+          {(['all', 'success', 'failure'] as SeriesPick[]).map((k) => {
             const active = seriesPick === k
             const label = k === 'all' ? 'All trials'
               : k === 'success' ? 'Successes only' : 'Failures only'
@@ -2188,6 +2240,25 @@ function STATab({ data }: { data: PairedData | null }) {
             )
           })}
         </span>
+        {/* Overlay toggles. ``Show sweeps`` superimposes every aligned
+            trial as a faint trace; ``include failures`` decides
+            whether 0-amplitude / sub-threshold trials appear in red.
+            Both default off so the average is uncluttered on first
+            view. */}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          title="Overlay each individual trial's post-window aligned to t_pre, in the same colour scheme as the success / failure dots.">
+          <input type="checkbox" checked={showOverlay}
+            onChange={(e) => setShowOverlay(e.target.checked)} />
+          Show sweeps
+        </label>
+        {showOverlay && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            title="When unchecked, only successful trials are overlaid. Failures usually sit near baseline and clutter the picture.">
+            <input type="checkbox" checked={overlayIncludesFailures}
+              onChange={(e) => setOverlayIncludesFailures(e.target.checked)} />
+            Include failures
+          </label>
+        )}
         <span style={{ marginLeft: 'auto' }}>
           {sta ? `n = ${sta.n}` : 'no trials'}
         </span>
@@ -2197,6 +2268,22 @@ function STATab({ data }: { data: PairedData | null }) {
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)',
       }} />
+      {/* Inline note: explain the two grey lines flanking the mean.
+          Spelled out fully because the ribbon convention isn't
+          obvious from the picture alone. */}
+      <div style={{
+        flexShrink: 0, marginTop: 4,
+        padding: '3px 8px', fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        background: 'var(--bg-secondary)',
+        border: '1px solid var(--border)', borderRadius: 4,
+      }}>
+        Blue line: per-sample mean across the {seriesPick === 'all' ? 'selected' : seriesPick} trials. Grey lines: ±1 SEM
+        (standard error of the mean), i.e. the per-sample SD divided
+        by √n. They give a confidence band for the average — narrow
+        bands = the trials cluster tightly around the mean, wide bands
+        = the average is dominated by trial-to-trial variability.
+      </div>
     </div>
   )
 }

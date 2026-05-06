@@ -1430,6 +1430,15 @@ export interface PairedSta {
   mean: number[]
   sem: number[]
   n: number
+  /** Per-trial aligned post-window traces (one per row), shape
+   *  ``[n][len(time)]``. Used by the STA tab's "show individual
+   *  sweeps" overlay so the user can see how tightly the trials
+   *  cluster around the average. NaN-padded samples come back as
+   *  zeros to keep the JSON small; the renderer treats them like
+   *  any other point. */
+  traces?: number[][]
+  /** Per-trial success flag in the same order as ``traces``. */
+  traceSuccess?: boolean[]
 }
 
 export interface PairedManualEdits {

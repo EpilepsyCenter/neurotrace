@@ -214,6 +214,13 @@ def _measure_trial(
     sweep: int,
     trial_idx: int,
     manual: bool,
+    # Optional absolute-time clip on the peak-search window. When
+    # both are >0 and post_search_end_s > post_search_start_s, the
+    # per-trial post window is intersected with [a, b], so peaks
+    # outside the user's drag-cursors aren't considered. ``None`` /
+    # zero means "no clip" — fall back to ``post_ms`` only.
+    post_search_start_s: Optional[float] = None,
+    post_search_end_s: Optional[float] = None,
 ) -> _Trial:
     """Measure one trial on the post channel."""
     n = post.size
@@ -225,6 +232,14 @@ def _measure_trial(
     bl_b = max(bl_a + 1, pre_idx - pre_samples)
     post_a = max(0, pre_idx)
     post_b = min(n, pre_idx + post_samples)
+
+    # Apply absolute-time post-search clip when set.
+    if (post_search_start_s is not None and post_search_end_s is not None
+            and post_search_end_s > post_search_start_s):
+        clip_a = int(round(post_search_start_s * sr))
+        clip_b = int(round(post_search_end_s * sr))
+        post_a = max(post_a, clip_a)
+        post_b = min(post_b, clip_b)
 
     truncated = False
     if next_pre_idx is not None and next_pre_idx > pre_idx:
@@ -532,6 +547,12 @@ def run_paired(
     post_ms = float(post_params.get("post_ms", 30.0))
     baseline_ms = float(post_params.get("baseline_ms", 2.0))
     peak_direction = str(post_params.get("peak_direction", "auto"))
+    post_search_start_s = post_params.get("post_search_start_s")
+    post_search_end_s = post_params.get("post_search_end_s")
+    if post_search_start_s is not None:
+        post_search_start_s = float(post_search_start_s)
+    if post_search_end_s is not None:
+        post_search_end_s = float(post_search_end_s)
 
     failure_rule = str(failure_params.get("rule", "k_sd"))
     failure_k_sd = float(failure_params.get("k_sd", 3.0))
@@ -608,6 +629,8 @@ def run_paired(
                 sweep=int(sw_idx),
                 trial_idx=trial_idx,
                 manual=is_manual,
+                post_search_start_s=post_search_start_s,
+                post_search_end_s=post_search_end_s,
             )
             sweep_trials.append(tr)
         all_trials.extend(sweep_trials)

@@ -1298,6 +1298,12 @@ function OverlayViewer({
   onPostBoundsRef.current = onPostBoundsChange
   const [, setVer] = useState(0)
   const bump = useCallback(() => setVer((n) => n + 1), [])
+  // Bumped from inside the rebuild RAF callback once the new uPlot
+  // has been constructed, so the pointer/wheel useEffect can re-run
+  // and attach its handlers to the fresh ``.u-over`` element. Without
+  // this, the pointer effect would fire before RAF and find
+  // ``plotRef.current`` null.
+  const [plotVer, setPlotVer] = useState(0)
 
   // ── Build / rebuild the plot ───────────────────────────────────
   // Wrapped in ``requestAnimationFrame`` so the destroy + create
@@ -1444,6 +1450,10 @@ function OverlayViewer({
     }
     refit('y', preData)
     refit('y_post', postData)
+    // Tell the pointer/wheel effect (and any other downstream
+    // effects keyed on this counter) that a fresh plot now exists
+    // so they can attach handlers to its ``.u-over`` element.
+    setPlotVer((n) => n + 1)
     })  // end requestAnimationFrame
     return () => {
       cancelAnimationFrame(frame)
@@ -1776,8 +1786,12 @@ function OverlayViewer({
       over.removeEventListener('wheel', onWheel)
       over.removeEventListener('dblclick', onDbl)
     }
+    // ``plotVer`` is the rebuild counter set inside the rebuild
+    // effect's RAF callback. Including it here makes this effect
+    // re-run AFTER each new uPlot is built, so the pointer/wheel
+    // handlers attach to the fresh ``.u-over``.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preData, postData])
+  }, [preData, postData, plotVer])
 
   // Apply parent-driven X range changes (after a sibling triggers
   // them — though there's no sibling now, the prop still routes here

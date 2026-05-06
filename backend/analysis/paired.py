@@ -236,9 +236,14 @@ def _measure_trial(
     post_a = max(0, pre_idx)
     post_b = min(n, pre_idx + post_samples)
 
-    # Apply absolute-time post-search clip when set.
+    # Apply absolute-time post-search clip when set. ``user_bounded``
+    # tracks whether the cursors were active for THIS trial — used
+    # below to skip the truncation fallback that would otherwise
+    # silently expand a bounds-collapsed window back into noise.
+    user_bounded = False
     if (post_search_start_s is not None and post_search_end_s is not None
             and post_search_end_s > post_search_start_s):
+        user_bounded = True
         clip_a = int(round(post_search_start_s * sr))
         clip_b = int(round(post_search_end_s * sr))
         post_a = max(post_a, clip_a)
@@ -248,7 +253,12 @@ def _measure_trial(
     if next_pre_idx is not None and next_pre_idx > pre_idx:
         guard = max(1, int(round(0.0002 * sr)))   # 0.2 ms guard
         post_b = min(post_b, next_pre_idx - guard)
-        if post_b <= post_a + 1:
+        if post_b <= post_a + 1 and not user_bounded:
+            # Only fall back to a tiny 2-sample window when the user
+            # didn't pin the search range. With cursor bounds active,
+            # an empty window means "this trial sits outside the
+            # user's region of interest" and should be reported as
+            # such (post_segment.size == 0 → success=False below).
             post_b = min(n, post_a + 2)
         truncated = post_b < min(n, pre_idx + post_samples)
 
@@ -269,6 +279,7 @@ def _measure_trial(
             post_peak=float("nan"), post_peak_t_s=float("nan"),
             amplitude=float("nan"), success=False,
             latency_s=None, rise_ms=None, decay_ms=None,
+            decay_tau_ms=None, half_width_ms=None,
             truncated=truncated, manual=manual,
         )
 
@@ -492,6 +503,15 @@ def _compute_sta(
         else:
             seg = post[a:b].astype(float, copy=False)
         stack.append(seg)
+    # Track which selected trials are successes so the frontend can
+    # tint the overlay traces accordingly without re-fetching.
+    success_flags: list[bool] = []
+    for t in trials:
+        if successes_only and not t.success: continue
+        if failures_only and t.success: continue
+        sp = sweep_index_lookup.get(t.sweep)
+        if sp is None or sp >= len(sweeps_post): continue
+        success_flags.append(bool(t.success))
     if not stack:
         return None
     mat = np.vstack(stack)
@@ -502,11 +522,21 @@ def _compute_sta(
     with np.errstate(divide="ignore", invalid="ignore"):
         sem = np.where(n_per_sample > 1, sd / np.sqrt(n_per_sample), 0.0)
     time_axis = (np.arange(n_total, dtype=float) - pre_samples) / sr
+    # Per-trial traces aligned to t_pre — kept alongside the average
+    # so the frontend can render an "overlay all sweeps" view without
+    # a second backend round-trip. NaN-pad samples remain NaN; the
+    # frontend's plot will skip them.
+    traces = [
+        np.where(np.isnan(row), 0.0, row).tolist()
+        for row in mat
+    ]
     return {
         "time": time_axis.tolist(),
         "mean": np.where(np.isnan(mean), 0.0, mean).tolist(),
         "sem": np.where(np.isnan(sem), 0.0, sem).tolist(),
         "n": int(mat.shape[0]),
+        "traces": traces,
+        "trace_success": success_flags,
     }
 
 

@@ -236,7 +236,7 @@ function _migrateEventsAnalyses(
 // Shape of the payload is flat, slice-keyed, and intentionally stable —
 // future schema changes bump ``version`` and add a migration block here.
 
-const SIDECAR_VERSION = 3
+const SIDECAR_VERSION = 4
 const SIDECAR_DEBOUNCE_MS = 1000
 
 /** Slice values to apply when the active recording is closed —
@@ -258,6 +258,7 @@ export function fileCloseResetSlices(): Record<string, unknown> {
     fieldBursts: {}, burstFormParams: {},
     ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
     apAnalyses: {}, eventsAnalyses: {},
+    pairedAnalyses: {}, pairedForm: defaultPairedForm(),
     excludedSweeps: {}, selectedSweeps: {}, averagedSweeps: {},
     currentAveragedSweep: null,
     resistanceResult: null, resistanceResults: {},
@@ -352,6 +353,7 @@ type SidecarPayload = {
   meta?: SidecarMeta
   analyses?: {
     events?: Record<string, EventsData>
+    paired?: Record<string, PairedData>
     bursts?: Record<string, FieldBurstsData>
     ap?: Record<string, APData>
     iv_curves?: Record<string, IVCurveData>
@@ -369,6 +371,7 @@ type SidecarPayload = {
    *  plug in without reshaping the schema. */
   forms?: {
     resistance?: ResistanceFormState
+    paired?: PairedFormState
   }
   burst_form_params?: Record<string, FieldBurstsParams>
   excluded_sweeps?: Record<string, number[]>
@@ -409,6 +412,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
     meta: state.recordingMeta ?? undefined,
     analyses: {
       events: state.eventsAnalyses,
+      paired: state.pairedAnalyses,
       bursts: state.fieldBursts,
       ap: state.apAnalyses,
       iv_curves: state.ivCurves,
@@ -418,6 +422,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
     },
     forms: {
       resistance: state.resistanceForm,
+      paired: state.pairedForm,
     },
     burst_form_params: state.burstFormParams,
     excluded_sweeps: state.excludedSweeps,
@@ -471,6 +476,17 @@ function _broadcastEvents(eventsAnalyses: Record<string, EventsData>) {
   try {
     const ch = new BroadcastChannel('neurotrace-sync')
     ch.postMessage({ type: 'events-update', eventsAnalyses })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
+function _broadcastPaired(
+  pairedAnalyses: Record<string, PairedData>,
+  pairedForm: PairedFormState,
+) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'paired-update', pairedAnalyses, pairedForm })
     ch.close()
   } catch { /* ignore */ }
 }
@@ -1360,6 +1376,154 @@ export interface CursorAnalysisData {
   traceUnit: string
 }
 
+// Paired-recording analysis — pre/post synaptic trial extraction.
+// One entry per ``${group}:${series}`` carries the full computed state
+// for that pair; a separate ``pairedForm`` slot holds last-used params
+// so a fresh series gets sensible defaults instead of empty inputs.
+export interface PairedTrial {
+  sweep: number
+  trialIdx: number
+  preTS: number
+  preAmp: number
+  baselineMean: number
+  baselineSd: number
+  postPeak: number
+  postPeakTS: number
+  amplitude: number
+  success: boolean
+  latencyMs: number | null
+  riseMs: number | null
+  decayMs: number | null
+  truncated: boolean
+  manual: boolean
+}
+
+export interface PairedSeriesSummary {
+  nTrials: number
+  nSuccess: number
+  nFailures: number
+  failureRate: number | null
+  meanAmplitude: number | null
+  meanAmplitudeZeroed: number | null
+  potency: number | null
+  cvSuccess: number | null
+  invCv2: number | null
+  latencyMeanMs: number | null
+  latencySdMs: number | null
+  pprN1: { n: number; ratio: number; nSweeps: number }[]
+}
+
+export interface PairedSweepSummary {
+  sweep: number
+  nTrials: number
+  nSuccess: number
+  nFailures: number
+  ppr21: number | null
+}
+
+export interface PairedSta {
+  time: number[]
+  mean: number[]
+  sem: number[]
+  n: number
+}
+
+export interface PairedManualEdits {
+  added: Record<number, number[]>     // sweep idx → list of pre_t in seconds
+  removed: Record<number, number[]>
+}
+
+/** Mode-agnostic pre-detection params + post-window + failure +
+ *  latency settings. Stored as one flat blob so the form can drop it
+ *  into one ``setPairedForm`` call without parameter spread. */
+export interface PairedFormState {
+  preMode: 'ap' | 'stim' | 'ttl' | 'manual'
+  preParams: Record<string, unknown>
+  postParams: {
+    preMs: number
+    postMs: number
+    baselineMs: number
+    peakDirection: 'auto' | 'positive' | 'negative'
+    filterEnabled: boolean
+    filterType: 'lowpass' | 'highpass' | 'bandpass' | 'notch'
+    filterLow: number
+    filterHigh: number
+    filterOrder: number
+  }
+  failureParams: {
+    rule: 'k_sd' | 'absolute'
+    kSd: number
+    absolute: number
+  }
+  latencyParams: {
+    rule: 'fraction' | 'onset_d2'
+    fraction: number
+  }
+}
+
+export interface PairedData {
+  group: number
+  series: number
+  preTrace: number
+  postTrace: number
+  sweeps: number[]
+  samplingRate: number
+  preMode: PairedFormState['preMode']
+  preParams: Record<string, unknown>
+  postParams: PairedFormState['postParams']
+  failureParams: PairedFormState['failureParams']
+  latencyParams: PairedFormState['latencyParams']
+  manualEdits: PairedManualEdits
+  perTrial: PairedTrial[]
+  perSweepSummary: PairedSweepSummary[]
+  seriesSummary: PairedSeriesSummary
+  staAll: PairedSta | null
+  staSuccess: PairedSta | null
+  staFailure: PairedSta | null
+  selectedTrialIdx: number | null
+}
+
+export function defaultPairedForm(): PairedFormState {
+  return {
+    preMode: 'ap',
+    preParams: {
+      ap_method: 'auto_rec',
+      ap_min_amplitude_mv: 50,
+      ap_pos_dvdt_mv_ms: 10,
+      ap_neg_dvdt_mv_ms: -10,
+      ap_width_ms: 5,
+      ap_manual_threshold_mv: -10,
+      stim_dvdt_threshold: 1.0e3,
+      ttl_level_threshold: null,
+      ttl_edge: 'rising',
+      ttl_min_pulse_ms: 1.0,
+      min_distance_ms: 5.0,
+      bounds_start_s: 0.0,
+      bounds_end_s: 0.0,
+    },
+    postParams: {
+      preMs: 1.0,
+      postMs: 30.0,
+      baselineMs: 2.0,
+      peakDirection: 'auto',
+      filterEnabled: false,
+      filterType: 'lowpass',
+      filterLow: 1.0,
+      filterHigh: 1000.0,
+      filterOrder: 2,
+    },
+    failureParams: {
+      rule: 'k_sd',
+      kSd: 3.0,
+      absolute: 0.0,
+    },
+    latencyParams: {
+      rule: 'fraction',
+      fraction: 0.20,
+    },
+  }
+}
+
 export interface CursorWindowUI {
   plotHeight: number
   leftPanelWidth: number                  // left params column width, 200–500 px
@@ -1549,6 +1713,17 @@ interface AppState {
   // Event-detection analyses — keyed by `${group}:${series}` like AP.
   // Contains the last run's params + detected events + manual edits.
   eventsAnalyses: Record<string, EventsData>
+
+  // Paired-recording analyses — keyed by `${group}:${series}`. Each
+  // entry carries the request shape (channels + params + manual edits)
+  // alongside per-trial / per-sweep / series / STA outputs from the
+  // backend. ``pairedForm`` holds the global form defaults so a fresh
+  // series picks up the user's last-used settings.
+  pairedAnalyses: Record<string, PairedData>
+  pairedForm: PairedFormState
+  setPairedAnalysis: (group: number, series: number, data: PairedData) => void
+  clearPairedAnalysis: (group: number, series: number) => void
+  setPairedForm: (form: PairedFormState) => void
 
   /** Global biexponential template library for event detection.
    *  Persisted per-user (not per-file) so templates fit on one
@@ -2111,6 +2286,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   cursorAnalyses: {},
   apAnalyses: {},
   eventsAnalyses: {},
+  pairedAnalyses: {},
+  pairedForm: defaultPairedForm(),
   eventsTemplates: (() => {
     // Default templates — one EPSC, one IPSC — seeded from Jonas 1993
     // defaults (τ_rise 0.5 ms, τ_decay 5 ms). `selectedId` points at
@@ -2178,6 +2355,24 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleZoomMode: () => set((s) => ({ zoomMode: !s.zoomMode })),
   toggleCursors: () => set((s) => ({ showCursors: !s.showCursors })),
+
+  setPairedAnalysis: (group, series, data) => {
+    const key = `${group}:${series}`
+    set((s) => ({ pairedAnalyses: { ...s.pairedAnalyses, [key]: data } }))
+    _broadcastPaired(get().pairedAnalyses, get().pairedForm)
+  },
+  clearPairedAnalysis: (group, series) => {
+    const key = `${group}:${series}`
+    set((s) => {
+      const { [key]: _dropped, ...rest } = s.pairedAnalyses
+      return { pairedAnalyses: rest }
+    })
+    _broadcastPaired(get().pairedAnalyses, get().pairedForm)
+  },
+  setPairedForm: (form) => {
+    set({ pairedForm: form })
+    _broadcastPaired(get().pairedAnalyses, get().pairedForm)
+  },
   toggleBurstMarkers: () => set((s) => ({ showBurstMarkers: !s.showBurstMarkers })),
   toggleEventMarkers: () => set((s) => ({ showEventMarkers: !s.showEventMarkers })),
   toggleCoordinates: () => set((s) => ({ showCoordinates: !s.showCoordinates })),
@@ -2605,6 +2800,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       cursorAnalyses: {},
       apAnalyses: {},
       eventsAnalyses: {},
+      pairedAnalyses: {},
+      pairedForm: defaultPairedForm(),
       excludedSweeps: {},
       selectedSweeps: {},
       averagedSweeps: {},
@@ -2770,6 +2967,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
           if (sidecar.forms?.resistance) {
             patch.resistanceForm = { ...get().resistanceForm, ...sidecar.forms.resistance }
+          }
+          if ((a as any).paired && Object.keys((a as any).paired).length > 0) {
+            patch.pairedAnalyses = (a as any).paired
+            post({
+              type: 'paired-update',
+              pairedAnalyses: (a as any).paired,
+              pairedForm: sidecar.forms?.paired ?? get().pairedForm,
+            })
+          }
+          if (sidecar.forms?.paired) {
+            patch.pairedForm = { ...get().pairedForm, ...sidecar.forms.paired }
           }
           // Apply scaling overrides to the backend BEFORE the first
           // selectSweep fetches data, so the trace returned already

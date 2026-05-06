@@ -55,6 +55,7 @@ const ANALYSIS_TYPES = [
   { type: 'resistance', label: 'Rs / Rin / Cm' },
   { type: 'iv', label: 'I-V Curve' },
   { type: 'action_potential', label: 'Action Potentials' },
+  { type: 'paired', label: 'Paired Recording' },
   { type: 'events', label: 'Event Detection' },
   { type: 'bursts', label: 'Burst Detection' },
   { type: 'field_potential', label: 'Field Potential' },

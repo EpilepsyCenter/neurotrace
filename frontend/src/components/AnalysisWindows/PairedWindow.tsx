@@ -2341,13 +2341,15 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
   ]
   return (
     <div style={{
-      padding: 8, display: 'flex', gap: 8, flexWrap: 'wrap',
-      height: '100%', boxSizing: 'border-box',
+      padding: 8, display: 'grid', gap: 8,
+      gridTemplateColumns: 'minmax(280px, 1fr) minmax(280px, 1fr)',
+      gridTemplateRows: 'minmax(180px, auto) minmax(180px, auto) minmax(180px, auto)',
+      height: '100%', boxSizing: 'border-box', overflow: 'auto',
     }}>
       <div style={{
-        flex: '1 1 320px', minWidth: 320,
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)', overflow: 'auto',
+        minWidth: 0, minHeight: 0,
       }}>
         <div style={{
           padding: '4px 10px', fontSize: 'var(--font-size-label)',
@@ -2374,9 +2376,9 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
         </table>
       </div>
       <div style={{
-        flex: '1 1 260px', minWidth: 260,
         border: '1px solid var(--border)', borderRadius: 4,
         background: 'var(--bg-primary)', overflow: 'auto',
+        minWidth: 0, minHeight: 0,
       }}>
         <div style={{
           padding: '4px 10px', fontSize: 'var(--font-size-label)',
@@ -2417,8 +2419,286 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
           </table>
         )}
       </div>
+      {/* Amplitude histogram — successes vs failures stacked, with
+          a vertical line at the failure threshold (median k·SD,
+          since per-trial baseline σ varies). Spans the full row. */}
+      <div style={{
+        gridColumn: '1 / -1',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+        minHeight: 200, display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{
+          padding: '4px 10px', fontSize: 'var(--font-size-label)',
+          fontWeight: 600, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: 0.4,
+          borderBottom: '1px solid var(--border)',
+          background: 'var(--bg-secondary)',
+        }}>Amplitude histogram</div>
+        <AmplitudeHistogram trials={data.perTrial} failureK={data.failureParams.kSd} />
+      </div>
+      {/* Trial-sequence plot — amplitude vs trial index across all
+          sweeps, success vs failure coloured. Useful for spotting
+          rundown / wash-in trends. */}
+      <div style={{
+        gridColumn: '1 / -1',
+        border: '1px solid var(--border)', borderRadius: 4,
+        background: 'var(--bg-primary)',
+        minHeight: 200, display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{
+          padding: '4px 10px', fontSize: 'var(--font-size-label)',
+          fontWeight: 600, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: 0.4,
+          borderBottom: '1px solid var(--border)',
+          background: 'var(--bg-secondary)',
+        }}>Trial sequence</div>
+        <TrialSequencePlot trials={data.perTrial} />
+      </div>
     </div>
   )
+}
+
+/** Stacked-bar amplitude histogram. Successes paint blue, failures
+ *  red (translucent), with a black dashed line at the median per-
+ *  trial threshold (k·SD of baseline, the value the run actually
+ *  used to classify each trial). */
+function AmplitudeHistogram({
+  trials, failureK,
+}: {
+  trials: PairedTrial[]
+  failureK: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const menu = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'paired-amplitude-histogram',
+  })
+
+  useEffect(() => {
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!containerRef.current) return
+    if (trials.length === 0) return
+    const amps = trials.map((t) => t.amplitude).filter((v) => isFinite(v))
+    if (amps.length < 2) return
+    let lo = Math.min(...amps), hi = Math.max(...amps)
+    if (hi <= lo) { hi = lo + 1 }
+    const span = hi - lo
+    // Bin count tuned by Freedman-Diaconis-ish defaults — clamp so
+    // we don't get one-bin-per-trial on small N or 100s on very wide
+    // ranges. ~25 bins is a good default for typical paired stats.
+    const nBins = Math.max(8, Math.min(40, Math.round(Math.sqrt(amps.length) * 2)))
+    const bw = span / nBins
+    const binCenters: number[] = []
+    const successCounts: number[] = new Array(nBins).fill(0)
+    const failureCounts: number[] = new Array(nBins).fill(0)
+    for (let i = 0; i < nBins; i++) binCenters.push(lo + (i + 0.5) * bw)
+    for (const t of trials) {
+      if (!isFinite(t.amplitude)) continue
+      const idx = Math.min(nBins - 1, Math.max(0, Math.floor((t.amplitude - lo) / bw)))
+      if (t.success) successCounts[idx]++
+      else failureCounts[idx]++
+    }
+    // Median per-trial threshold magnitude (baseline_sd × k) so we
+    // can draw the typical decision line. Trial-by-trial it varies;
+    // showing the median is the cleanest summary.
+    const sds = trials
+      .map((t) => t.baselineSd)
+      .filter((v) => isFinite(v) && v > 0)
+      .sort((a, b) => a - b)
+    const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : 0
+    const thrMag = medSd * (failureK || 0)
+
+    const w = containerRef.current.clientWidth
+    const h = containerRef.current.clientHeight
+    const opts: uPlot.Options = {
+      width: Math.max(200, w),
+      height: Math.max(80, h),
+      legend: { show: false },
+      cursor: { drag: { x: false, y: false } },
+      scales: { x: { time: false } },
+      axes: [
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: 'Amplitude', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: 'count', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+      ],
+      series: [
+        {},
+        { stroke: '#64b5f6', width: 1.5, label: 'successes',
+          paths: barPaths(bw), points: { show: false } },
+        { stroke: '#e57373', width: 1.5, label: 'failures',
+          paths: barPaths(bw), points: { show: false } },
+      ],
+      hooks: {
+        // Draw two thin dashed verticals at ±median threshold so the
+        // user can see where the success/failure cutoff typically
+        // sits on this run. Failure rule = absolute draws a single
+        // line; k·SD draws ± since amplitudes can be either sign.
+        draw: [(u) => {
+          if (thrMag <= 0) return
+          const yTop = u.bbox.top
+          const yBot = u.bbox.top + u.bbox.height
+          const ctx = u.ctx
+          ctx.save()
+          ctx.setLineDash([4, 3])
+          ctx.strokeStyle = cssVar('--text-muted') || '#999'
+          ctx.lineWidth = 1
+          for (const v of [-thrMag, thrMag]) {
+            if (v < (u.scales.x.min ?? -Infinity) || v > (u.scales.x.max ?? Infinity)) continue
+            const px = u.valToPos(v, 'x', true)
+            ctx.beginPath()
+            ctx.moveTo(px, yTop); ctx.lineTo(px, yBot); ctx.stroke()
+          }
+          ctx.restore()
+        }],
+      },
+    }
+    plotRef.current = new uPlot(opts, [
+      binCenters, successCounts, failureCounts,
+    ] as any, containerRef.current)
+    return () => {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    }
+  }, [trials, failureK])
+
+  // Refit on container resize.
+  useEffect(() => {
+    const cont = containerRef.current
+    if (!cont) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (!u) return
+      const w = cont.clientWidth, h = cont.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
+    })
+    ro.observe(cont)
+    return () => ro.disconnect()
+  }, [])
+
+  return (
+    <div ref={containerRef}
+      onContextMenu={menu.onContextMenu}
+      style={{ flex: 1, minHeight: 0 }}>
+      {menu.menu}
+    </div>
+  )
+}
+
+/** Trial-sequence plot — amplitude vs trial index across the whole
+ *  series. Two scatter series (successes blue, failures red) drawn
+ *  as points only. Reveals rundown / wash-in / drug effects. */
+function TrialSequencePlot({ trials }: { trials: PairedTrial[] }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const plotRef = useRef<uPlot | null>(null)
+  const menu = usePlotMenu({
+    getCanvas: () => plotRef.current?.ctx?.canvas ?? null,
+    defaultName: 'paired-trial-sequence',
+  })
+
+  useEffect(() => {
+    if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    if (!containerRef.current) return
+    if (trials.length === 0) return
+    const xs: number[] = []
+    const ySucc: (number | null)[] = []
+    const yFail: (number | null)[] = []
+    for (let i = 0; i < trials.length; i++) {
+      const t = trials[i]
+      xs.push(i + 1)
+      if (t.success) { ySucc.push(t.amplitude); yFail.push(null) }
+      else           { ySucc.push(null); yFail.push(t.amplitude) }
+    }
+    const w = containerRef.current.clientWidth
+    const h = containerRef.current.clientHeight
+    const opts: uPlot.Options = {
+      width: Math.max(200, w),
+      height: Math.max(80, h),
+      legend: { show: false },
+      cursor: { drag: { x: false, y: false } },
+      scales: { x: { time: false } },
+      axes: [
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: 'Trial #', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+        { stroke: cssVar('--chart-axis'),
+          grid: { stroke: cssVar('--chart-grid'), width: 1 },
+          ticks: { stroke: cssVar('--chart-tick'), width: 1 },
+          label: 'amplitude', labelSize: 22,
+          font: `${cssVar('--font-size-label')} ${cssVar('--font-mono')}`,
+          labelFont: `${cssVar('--font-size-sm')} ${cssVar('--font-ui')}` },
+      ],
+      series: [
+        {},
+        { stroke: '#64b5f6', width: 0, label: 'successes',
+          points: { show: true, size: 5, stroke: '#64b5f6', fill: '#64b5f6' } },
+        { stroke: '#e57373', width: 0, label: 'failures',
+          points: { show: true, size: 5, stroke: '#e57373', fill: '#e57373' } },
+      ],
+    }
+    plotRef.current = new uPlot(opts, [xs, ySucc, yFail] as any, containerRef.current)
+    return () => {
+      if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
+    }
+  }, [trials])
+
+  useEffect(() => {
+    const cont = containerRef.current
+    if (!cont) return
+    const ro = new ResizeObserver(() => {
+      const u = plotRef.current
+      if (!u) return
+      const w = cont.clientWidth, h = cont.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
+    })
+    ro.observe(cont)
+    return () => ro.disconnect()
+  }, [])
+
+  return (
+    <div ref={containerRef}
+      onContextMenu={menu.onContextMenu}
+      style={{ flex: 1, minHeight: 0 }}>
+      {menu.menu}
+    </div>
+  )
+}
+
+/** uPlot ``paths`` factory that draws each y-series sample as a
+ *  filled rectangular bar centered on its x value with the given
+ *  pixel width fraction of the data spacing. Used by the amplitude
+ *  histogram so each bin paints as a real bar (uPlot's default
+ *  paths drawer connects points with a line, which is wrong here). */
+function barPaths(bw: number): uPlot.Series.PathBuilder {
+  return (u: uPlot, seriesIdx: number) => {
+    const path = new Path2D()
+    const xData = u.data[0] as number[]
+    const yData = u.data[seriesIdx] as (number | null)[]
+    const halfW = bw / 2
+    const yZeroPx = u.valToPos(0, 'y', true)
+    for (let i = 0; i < xData.length; i++) {
+      const v = yData[i]
+      if (v == null || !isFinite(v) || v === 0) continue
+      const left = u.valToPos(xData[i] - halfW, 'x', true)
+      const right = u.valToPos(xData[i] + halfW, 'x', true)
+      const top = u.valToPos(v, 'y', true)
+      path.rect(Math.min(left, right), Math.min(top, yZeroPx),
+        Math.abs(right - left), Math.abs(yZeroPx - top))
+    }
+    return { fill: path, stroke: path }
+  }
 }
 
 function STATab({ data }: { data: PairedData | null }) {

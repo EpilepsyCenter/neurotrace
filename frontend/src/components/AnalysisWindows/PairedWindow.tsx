@@ -129,14 +129,49 @@ export function PairedWindow({
   const [tab, setTab] = useState<Tab>('trials')
 
   // ---- Sweep data (pre + post) ----
+  // Each fetch carries its channel's pre-detection filter params
+  // (when enabled) so the displayed trace matches what detection
+  // sees. Re-fetches when any filter knob changes, so the user sees
+  // the effect of toggling the filter live.
   const [preData, setPreData] = useState<{ time: number[]; values: number[] } | null>(null)
   const [postData, setPostData] = useState<{ time: number[]; values: number[] } | null>(null)
+
+  // Pre filter params live snake_case'd inside ``preParams``; post
+  // is camelCase via the typed PostParams. Pull both into a stable
+  // signature for the effect's dependency list so the fetch only
+  // re-runs when something actually changed.
+  const preFilterEnabled = Boolean(form.preParams.filter_enabled ?? false)
+  const preFilterType = String(form.preParams.filter_type ?? 'lowpass')
+  const preFilterLow = Number(form.preParams.filter_low ?? 0)
+  const preFilterHigh = Number(form.preParams.filter_high ?? 0)
+  const preFilterOrder = Number(form.preParams.filter_order ?? 4)
+
   useEffect(() => {
     let cancelled = false
-    const fetchOne = async (traceIdx: number, setter: (v: { time: number[]; values: number[] } | null) => void) => {
+    const fetchOne = async (
+      traceIdx: number,
+      filter: {
+        enabled: boolean
+        type: string
+        low: number
+        high: number
+        order: number
+      },
+      setter: (v: { time: number[]; values: number[] } | null) => void,
+    ) => {
       try {
-        const url = `${backendUrl}/api/traces/data?group=${group}&series=${series}&sweep=${sweep}&trace=${traceIdx}&max_points=4000`
-        const r = await fetch(url)
+        const params = new URLSearchParams({
+          group: String(group), series: String(series),
+          sweep: String(sweep), trace: String(traceIdx),
+          max_points: '4000',
+        })
+        if (filter.enabled) {
+          params.set('filter_type', filter.type)
+          params.set('filter_low', String(filter.low))
+          params.set('filter_high', String(filter.high))
+          params.set('filter_order', String(filter.order))
+        }
+        const r = await fetch(`${backendUrl}/api/traces/data?${params}`)
         if (!r.ok) { setter(null); return }
         const d = await r.json()
         if (cancelled) return
@@ -146,12 +181,30 @@ export function PairedWindow({
       }
     }
     if (totalSweeps > 0 && channels.length > 0) {
-      fetchOne(preTrace, setPreData)
-      if (preTrace !== postTrace) fetchOne(postTrace, setPostData)
-      else setPostData(null)
+      fetchOne(preTrace, {
+        enabled: preFilterEnabled, type: preFilterType,
+        low: preFilterLow, high: preFilterHigh, order: preFilterOrder,
+      }, setPreData)
+      if (preTrace !== postTrace) {
+        fetchOne(postTrace, {
+          enabled: form.postParams.filterEnabled,
+          type: form.postParams.filterType,
+          low: form.postParams.filterLow,
+          high: form.postParams.filterHigh,
+          order: form.postParams.filterOrder,
+        }, setPostData)
+      } else {
+        setPostData(null)
+      }
     }
     return () => { cancelled = true }
-  }, [backendUrl, group, series, sweep, preTrace, postTrace, totalSweeps, channels.length])
+  }, [
+    backendUrl, group, series, sweep, preTrace, postTrace,
+    totalSweeps, channels.length,
+    preFilterEnabled, preFilterType, preFilterLow, preFilterHigh, preFilterOrder,
+    form.postParams.filterEnabled, form.postParams.filterType,
+    form.postParams.filterLow, form.postParams.filterHigh, form.postParams.filterOrder,
+  ])
 
   // ---- Shared X axis ----
   // Parent owns the single source of truth for the X range. Both
@@ -1253,7 +1306,15 @@ function OverlayViewer({
       width: Math.max(200, w),
       height: Math.max(80, h),
       legend: { show: false },
-      cursor: { drag: { x: false, y: false } },
+      // ``cursor.focus.prox`` is uPlot's series-focus mechanism: when
+      // the cursor sits within ``prox`` pixels of a series sample,
+      // that series becomes "focused" and the others get drawn at
+      // ``series[i].alpha`` (kept in our ``setSeries`` hook below).
+      // Same UX as the main TraceViewer.
+      cursor: {
+        drag: { x: false, y: false },
+        focus: { prox: 30 },
+      },
       scales: {
         x: {
           time: false,
@@ -1305,6 +1366,20 @@ function OverlayViewer({
       ],
       hooks: {
         draw: [(u) => drawOverlay(u)],
+        // Series-focus dim: when uPlot picks a focused series via
+        // ``cursor.focus.prox``, drop the other trace's stroke alpha
+        // so the hovered one stands out. Reset on unfocus so both
+        // come back to full opacity. Triggers a redraw via
+        // ``u.redraw()`` so the canvas re-renders with the new alpha.
+        setSeries: [
+          (u, focusedIdx) => {
+            for (let i = 1; i < u.series.length; i++) {
+              const dimmed = focusedIdx != null && i !== focusedIdx
+              ;(u.series[i] as any).alpha = dimmed ? 0.25 : 1
+            }
+            u.redraw()
+          },
+        ],
       },
       series: [
         {},

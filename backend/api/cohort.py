@@ -143,12 +143,23 @@ def run_stats(req: RunStatsRequest) -> dict:
 
     Pingouin lives behind this endpoint — heavy import, slow first
     call after the backend boots. Subsequent calls are cheap.
+
+    All exceptions (including pingouin's internal ``assert`` failures
+    on degenerate inputs) are caught here and returned as a 400 with
+    a structured ``detail`` so the cohort UI can surface a useful
+    message rather than swallowing a generic "Failed to fetch".
     """
-    payload = cohort_stats.run_test(
-        groups=[g.model_dump() for g in req.groups],
-        design_kind=req.design_kind,
-        test_override=req.test_override,
-    )
+    try:
+        payload = cohort_stats.run_test(
+            groups=[g.model_dump() for g in req.groups],
+            design_kind=req.design_kind,
+            test_override=req.test_override,
+        )
+    except (AssertionError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
     if req.metric is not None:
         payload['metric'] = req.metric
     return payload

@@ -1780,6 +1780,25 @@ interface AppState {
   setPairedAnalysis: (group: number, series: number, data: PairedData) => void
   clearPairedAnalysis: (group: number, series: number) => void
   setPairedForm: (form: PairedFormState) => void
+  /** Batch-friendly runner that POSTs to ``/api/paired/run`` and stores
+   *  the response via ``setPairedAnalysis``. Same wire shape the
+   *  Paired window's onRun uses; lets the Batch module reuse the
+   *  store action without rebuilding the request body. */
+  runPaired: (
+    group: number, series: number,
+    preTrace: number, postTrace: number,
+    params: {
+      preMode: PairedFormState['preMode']
+      preParams: Record<string, unknown>
+      postParams: PairedFormState['postParams']
+      failureParams: PairedFormState['failureParams']
+      latencyParams: PairedFormState['latencyParams']
+      postSearchStartS?: number | null
+      postSearchEndS?: number | null
+      manualEdits?: PairedManualEdits | null
+      sweeps?: number[] | null
+    },
+  ) => Promise<void>
 
   /** Global biexponential template library for event detection.
    *  Persisted per-user (not per-file) so templates fit on one
@@ -2428,6 +2447,124 @@ export const useAppStore = create<AppState>((set, get) => ({
   setPairedForm: (form) => {
     set({ pairedForm: form })
     _broadcastPaired(get().pairedAnalyses, get().pairedForm)
+  },
+  runPaired: async (group, series, preTrace, postTrace, params) => {
+    const url = `${get().backendUrl}/api/paired/run`
+    const body: any = {
+      group, series,
+      pre_trace: preTrace, post_trace: postTrace,
+      sweeps: params.sweeps ?? null,
+      pre_mode: params.preMode,
+      pre_params: params.preParams,
+      post_params: {
+        pre_ms: params.postParams.preMs,
+        post_ms: params.postParams.postMs,
+        baseline_ms: params.postParams.baselineMs,
+        peak_direction: params.postParams.peakDirection,
+        filter_enabled: params.postParams.filterEnabled,
+        filter_type: params.postParams.filterType,
+        filter_low: params.postParams.filterLow,
+        filter_high: params.postParams.filterHigh,
+        filter_order: params.postParams.filterOrder,
+        post_search_start_s: params.postSearchStartS ?? null,
+        post_search_end_s: params.postSearchEndS ?? null,
+      },
+      failure_params: {
+        rule: params.failureParams.rule,
+        k_sd: params.failureParams.kSd,
+        absolute: params.failureParams.absolute,
+      },
+      latency_params: {
+        rule: params.latencyParams.rule,
+        fraction: params.latencyParams.fraction,
+      },
+      manual_edits: params.manualEdits ? {
+        added: params.manualEdits.added,
+        removed: params.manualEdits.removed,
+        post_failed: params.manualEdits.postFailed ?? {},
+      } : null,
+    }
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText)
+      throw new Error(`paired run failed: ${resp.status} ${text}`)
+    }
+    const d = await resp.json()
+    const mapStaIn = (s: any): PairedSta | null => {
+      if (!s) return null
+      return {
+        time: s.time, mean: s.mean, sem: s.sem, n: s.n,
+        traces: s.traces, traceSuccess: s.trace_success,
+        fit: s.fit ? {
+          baseline: s.fit.baseline, amplitude: s.fit.amplitude,
+          peakTS: s.fit.peak_t_s, peakV: s.fit.peak_v,
+          tauDecayMs: s.fit.tau_decay_ms, r2: s.fit.r2,
+          fitCurve: s.fit.fit_curve, fitCurveMask: s.fit.fit_curve_mask,
+        } : undefined,
+      }
+    }
+    const data: PairedData = {
+      group, series, preTrace, postTrace,
+      sweeps: Array.isArray(body.sweeps) ? body.sweeps : [],
+      samplingRate: d.sampling_rate,
+      preMode: params.preMode,
+      preParams: params.preParams,
+      postParams: params.postParams,
+      failureParams: params.failureParams,
+      latencyParams: params.latencyParams,
+      manualEdits: params.manualEdits ?? { added: {}, removed: {} },
+      perTrial: (d.per_trial as any[]).map((t: any): PairedTrial => ({
+        sweep: t.sweep,
+        trialIdx: t.trial_idx,
+        preTS: t.pre_t_s,
+        preAmp: t.pre_amp,
+        baselineMean: t.baseline_mean,
+        baselineSd: t.baseline_sd,
+        postPeak: t.post_peak,
+        postPeakTS: t.post_peak_t_s,
+        amplitude: t.amplitude,
+        success: t.success,
+        latencyMs: t.latency_ms,
+        riseMs: t.rise_ms,
+        decayMs: t.decay_ms,
+        decayTauMs: t.decay_tau_ms,
+        halfWidthMs: t.half_width_ms,
+        truncated: t.truncated,
+        manual: t.manual,
+        postManualFailure: t.post_manual_failure,
+      })),
+      perSweepSummary: (d.per_sweep_summary as any[]).map((s: any) => ({
+        sweep: s.sweep, nTrials: s.n_trials, nSuccess: s.n_success,
+        nFailures: s.n_failures, ppr21: s.ppr_2_1,
+      })),
+      seriesSummary: {
+        nTrials: d.series_summary.n_trials,
+        nSuccess: d.series_summary.n_success,
+        nFailures: d.series_summary.n_failures,
+        failureRate: d.series_summary.failure_rate,
+        meanAmplitude: d.series_summary.mean_amplitude,
+        meanAmplitudeZeroed: d.series_summary.mean_amplitude_zeroed,
+        potency: d.series_summary.potency,
+        cvSuccess: d.series_summary.cv_success,
+        invCv2: d.series_summary.inv_cv2,
+        latencyMeanMs: d.series_summary.latency_mean_ms,
+        latencySdMs: d.series_summary.latency_sd_ms,
+        pprN1: (d.series_summary.ppr_n1 as any[]).map((p) => ({
+          n: p.n, ratio: p.ratio, nSweeps: p.n_sweeps,
+        })),
+      },
+      staAll: mapStaIn(d.sta_all),
+      staSuccess: mapStaIn(d.sta_success),
+      staFailure: mapStaIn(d.sta_failure),
+      selectedTrialIdx: null,
+      postSearchStartS: params.postSearchStartS ?? null,
+      postSearchEndS: params.postSearchEndS ?? null,
+    }
+    get().setPairedAnalysis(group, series, data)
   },
   toggleBurstMarkers: () => set((s) => ({ showBurstMarkers: !s.showBurstMarkers })),
   toggleEventMarkers: () => set((s) => ({ showEventMarkers: !s.showEventMarkers })),

@@ -428,6 +428,11 @@ export function PairedWindow({
     backendUrl, group, series, preTrace, postTrace, totalSweeps,
     runMode, sweepFrom, sweepTo, sweepOne, form, pairedAnalyses,
     formKey, setPairedAnalysis, setPairedForm,
+    // postBounds / showPostBounds are read inside the body — must
+    // be in deps or the button click will use a stale closure
+    // captured from the last render where some OTHER dep changed,
+    // sending stale bounds (or no bounds) to the backend.
+    postBounds, showPostBounds,
   ])
 
   const stored = pairedAnalyses[formKey] ?? null
@@ -510,7 +515,16 @@ export function PairedWindow({
       </div>
 
       {/* ───── Body: left sidebar + main ───── */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, gap: 0, padding: 8 }}>
+      {/* ``overflow: hidden`` + ``minWidth: 0`` are both needed: the
+          first stops the body from growing beyond its parent when
+          the user shrinks the window (so buttons don't render off-
+          screen); the second lets the flex children below ignore
+          their intrinsic content width and actually shrink. */}
+      <div style={{
+        flex: 1, display: 'flex', minHeight: 0, minWidth: 0,
+        overflow: 'hidden',
+        gap: 0, padding: 8,
+      }}>
         {/* Left sidebar — same shell shape as APWindow's left panel:
             bg-secondary tone, padded, bordered, with a scrollable param
             region above a pinned Run-controls card. */}
@@ -620,8 +634,14 @@ export function PairedWindow({
           marginLeft: 4, marginRight: 4,
         }} />
 
-        {/* Main content */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {/* Main content — ``minWidth: 0`` lets the column shrink
+            below the intrinsic width of the viewer header (which
+            otherwise stretches to fit its buttons and shoves the
+            Reset zoom button off-screen on narrow windows). */}
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          minHeight: 0, minWidth: 0,
+        }}>
           {/* Single overlay viewer — pre on left Y axis, post on right
               Y axis. Fixed pixel height driven by the row-resize
               splitter below. */}
@@ -1382,6 +1402,31 @@ function OverlayViewer({
       ],
     }
     plotRef.current = new uPlot(opts, [masterT, preY, postY] as any, containerRef.current)
+
+    // Defensive autofit. When refs are null (no manual zoom), force
+    // each scale onto the new sweep's data extents explicitly.
+    // The range() callbacks should already do this during
+    // construction, but we've been bitten by edge cases (data of
+    // different LTTB length between sweeps, brief mixed-data state
+    // mid-fetch, etc.) where the plot ended up displaying at a
+    // stale scale and looked blank. Belt-and-braces: refit anything
+    // the user hasn't deliberately set.
+    if (xRangeRef.current === null && masterT.length > 1) {
+      plotRef.current.setScale('x', { min: masterT[0], max: masterT[masterT.length - 1] })
+    }
+    const refit = (key: 'y' | 'y_post', src: { time: number[]; values: number[] } | null) => {
+      if (!src || src.time.length === 0) return
+      const ref = key === 'y' ? yPreRangeRef : yPostRangeRef
+      if (ref.current !== null) return
+      let lo = Infinity, hi = -Infinity
+      for (const v of src.values) { if (v < lo) lo = v; if (v > hi) hi = v }
+      if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return
+      const pad = (hi - lo) * 0.05
+      plotRef.current?.setScale(key, { min: lo - pad, max: hi + pad })
+    }
+    refit('y', preData)
+    refit('y_post', postData)
+
     return () => {
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null }
     }

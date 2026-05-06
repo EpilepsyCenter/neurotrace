@@ -247,6 +247,8 @@ export function CursorPanel() {
             cursorAnalyses: state.cursorAnalyses,
             apAnalyses: state.apAnalyses,
             eventsAnalyses: state.eventsAnalyses,
+            pairedAnalyses: state.pairedAnalyses,
+            pairedForm: state.pairedForm,
             eventsTemplates: state.eventsTemplates,
             excludedSweeps: state.excludedSweeps,
             averagedSweeps: state.averagedSweeps,
@@ -297,6 +299,16 @@ export function CursorPanel() {
         // disk persistence).
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
+        }
+        // Paired-recording analyses pushed from the analysis window —
+        // adopt so the main store's sidecar auto-save persists them.
+        if (ev.data?.type === 'paired-update') {
+          const patch: Partial<typeof useAppStore extends { getState: () => infer S } ? S : never> = {}
+          if (ev.data.pairedAnalyses) (patch as any).pairedAnalyses = ev.data.pairedAnalyses
+          if (ev.data.pairedForm) (patch as any).pairedForm = ev.data.pairedForm
+          if (Object.keys(patch).length > 0) {
+            useAppStore.setState(patch as any)
+          }
         }
         // Per-series resistance results from the ResistanceWindow.
         // Drives the TreeNavigator R badge + the cohort extractor's

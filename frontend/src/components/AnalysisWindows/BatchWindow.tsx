@@ -45,6 +45,7 @@ const ANALYSIS_TYPES = [
   'fpsp_curves',
   'cursor_analyses',
   'resistance',
+  'paired',
 ] as const
 type AnalysisType = (typeof ANALYSIS_TYPES)[number]
 
@@ -64,6 +65,7 @@ interface SidecarShape {
     fpsp_curves?: Record<string, AnyBlob>
     cursor_analyses?: Record<string, AnyBlob>
     resistance?: Record<string, AnyBlob[]>
+    paired?: Record<string, AnyBlob>
   }
   forms?: Record<string, AnyBlob>
   cursors?: {
@@ -201,6 +203,12 @@ function pickChannel(blob: AnyBlob): number | null {
   if (typeof c === 'number') return c
   const t = (blob as any).trace
   if (typeof t === 'number') return t
+  // Paired stores channels as ``preTrace`` / ``postTrace``. Surface
+  // the pre channel here so the recipe table's "channel" column shows
+  // a sensible value; the runner reads both channels off ``params``
+  // (see runPairedRecipe).
+  const pre = (blob as any).preTrace
+  if (typeof pre === 'number') return pre
   return null
 }
 
@@ -364,6 +372,7 @@ export function BatchWindow({ backendUrl }: Props) {
       probe('events', a.events); probe('bursts', a.bursts); probe('ap', a.ap)
       probe('iv_curves', a.iv_curves); probe('fpsp_curves', a.fpsp_curves)
       probe('cursor_analyses', a.cursor_analyses); probe('resistance', a.resistance)
+      probe('paired', a.paired)
       setDiagAnalyses(found)
       setRecipes(recipes)
       setWarnings(warnings)
@@ -608,6 +617,7 @@ export function BatchWindow({ backendUrl }: Props) {
   const appRunFPsp = useAppStore((s) => s.runFPsp)
   const appRunResistanceOnSweep = useAppStore((s) => s.runResistanceOnSweep)
   const appRunResistanceOnAverage = useAppStore((s) => s.runResistanceOnAverage)
+  const appRunPaired = useAppStore((s) => s.runPaired)
   const eventsTemplates = useAppStore((s) => s.eventsTemplates)
 
   /** Plan the run — flatten the selection map into a list of work
@@ -795,6 +805,41 @@ export function BatchWindow({ backendUrl }: Props) {
       await appRunBursts(g, s, channel, params)
     })
   }, [forEachMatch, appRunBursts])
+
+  /** Paired recording: needs BOTH a pre and a post channel, plus
+   *  the four param sub-blobs (pre / post / failure / latency). The
+   *  template stashes preTrace / postTrace inline on the analysis
+   *  blob (no separate ``channel`` field), so we read them off
+   *  ``recipe.params`` rather than ``recipe.channel``. Manual edits
+   *  are NOT carried — batch detects fresh, same as the other
+   *  analyses. */
+  const runPairedRecipe = useCallback(async (
+    item: RunPlanItem, fileFraction: (frac: number) => void,
+  ) => {
+    const p = item.recipe.params as any
+    const preTrace = typeof p.preTrace === 'number'
+      ? p.preTrace
+      : (item.recipe.channel ?? 0)
+    const postTrace = typeof p.postTrace === 'number'
+      ? p.postTrace
+      : (preTrace === 0 ? 1 : 0)
+    await forEachMatch(item, fileFraction, async (g, s) => {
+      await appRunPaired(g, s, preTrace, postTrace, {
+        preMode: p.preMode,
+        preParams: p.preParams ?? {},
+        postParams: p.postParams ?? {},
+        failureParams: p.failureParams ?? {},
+        latencyParams: p.latencyParams ?? {},
+        postSearchStartS: p.postSearchStartS ?? null,
+        postSearchEndS: p.postSearchEndS ?? null,
+        // Manual edits: clear per-target file. Batch's whole point
+        // is fresh detection — carrying the template's per-trial
+        // overrides to a different recording would be nonsense.
+        manualEdits: { added: {}, removed: {}, postFailed: {} },
+        sweeps: null,
+      })
+    })
+  }, [forEachMatch, appRunPaired])
 
   /** FPsp / LTP / IO / PPR. Mode is on the recipe subtype; LTP also
    *  needs a target-file series mapped to ``seriesB`` via the
@@ -1084,6 +1129,9 @@ export function BatchWindow({ backendUrl }: Props) {
             case 'cursor_analyses':
               // eslint-disable-next-line no-await-in-loop
               await runCursorRecipe(item, slice); break
+            case 'paired':
+              // eslint-disable-next-line no-await-in-loop
+              await runPairedRecipe(item, slice); break
             default:
               didRun = false
               log.push({
@@ -1129,7 +1177,7 @@ export function BatchWindow({ backendUrl }: Props) {
   }, [buildPlan, appOpenFile,
       runEventsRecipe, runAPRecipe, runIVRecipe,
       runBurstsRecipe, runFPspRecipe,
-      runResistanceRecipe, runCursorRecipe])
+      runResistanceRecipe, runCursorRecipe, runPairedRecipe])
 
   const cancelRun = useCallback(() => {
     cancelRef.current = true
@@ -1309,6 +1357,7 @@ const ANALYSIS_LABELS: Record<string, string> = {
   fpsp_curves: 'Field PSP',
   cursor_analyses: 'Cursor measurements',
   resistance: 'Resistance',
+  paired: 'Paired recording',
 }
 
 /** Map a secondary-series role key to a human label per analysis +

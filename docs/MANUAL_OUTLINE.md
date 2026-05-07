@@ -22,11 +22,13 @@ launchers, wrong response metrics, missing timecourse plot, etc.)
   large UI refresh landed after this drafting** — see "Design
   refresh — to incorporate" below for the full diff list.
 - **Part II (analysis modules):** chapters 9 (Cursor Measurements),
-  10 (Resistance), 11 (I-V Curve) are drafted.
-- **Next chapter to write: 12 — Action Potentials** (largest
-  chapter in Part II — three tabs, eight threshold-detection
-  variants, manual spike editing, phase plot, F–I curve).
-- **Also planned: chapter 20 — Manual Viewer & Help** (the new
+  10 (Resistance), 11 (I-V Curve) are drafted. Chapter 16 (Paired
+  Recording) is outlined here but prose is not yet written.
+- **Chapter 12 — Action Potentials** drafted; eight threshold-
+  detection variants, two-tab layout (phase plot is the right
+  pane of Kinetics, not a separate tab — outline was wrong).
+- **Next chapter to write: 13 — Event Detection.**
+- **Also planned: chapter 21 — Manual Viewer & Help** (the new
   in-app manual + `?` modal + ⌘K palette — see refresh notes).
 
 ### Functional additions — to document (added 2026-05-04)
@@ -258,6 +260,12 @@ All paths relative to `docs/`:
 - `screenshots/resistance-window-fit-overlay.png`
 - `screenshots/iv-window-full-layout.png`
 - `screenshots/iv-window-curve-tab.png`
+- `screenshots/ap-window-counting-tab.png`
+- `screenshots/ap-window-kinetics-tab.png`
+- `screenshots/paired-window-overview.png`
+- `screenshots/paired-overlay-viewer.png`
+- `screenshots/paired-statistics-tab.png`
+- `screenshots/paired-sta-tab.png`
 
 The user is creating a `docs/screenshots/` directory and will fill
 it in as we go. Don't gate prose on screenshots being present —
@@ -307,17 +315,21 @@ Left-to-right.
   - Reset trace colors
 
 ### Analyses dropdown (opens dedicated child windows)
+Order in the actual menu (`Toolbar.tsx:98–108`):
 - Cursor Measurements
 - Rs / Rin / Cm
 - I-V Curve
 - Action Potentials
+- **Paired Recording**
 - Event Detection
 - Burst Detection
 - Field Potential (LTP / I-O / PPR)
+- Spectral Analysis
 - Metadata
 - Trace Export
 - Batch
 - Cohort
+_(Spectral is in the dropdown but its window is minimal — flag this when writing chapter 2 prose. Metadata, Trace Export, Batch, Cohort are reached from elsewhere on the toolbar — verify exact placement when drafting.)_
 
 ### Sweep navigation (only visible when a file is open)
 - Prev / Next buttons (`←` / `→`)
@@ -352,7 +364,7 @@ Left-to-right.
 - Series level
   - Type badge (VC / CC / FP), color-coded; guessed from label / protocol / holding voltage
   - Sweep count badge
-  - Analysis-presence pills: E (Events), AP, B (Bursts), IV, C (Cursors), FP, R (Resistance)
+  - Analysis-presence pills: E (Events), AP, B (Bursts), IV, C (Cursors), FP, R (Resistance), P (Paired)
   - Tag chip (first tag from Metadata window, hover to see all)
 - Sweep level
   - Excluded indicator (strikethrough / greyed)
@@ -470,7 +482,7 @@ Three rows (Baseline, Peak, Fit), each with:
 - Analysis windows can broadcast `auto-place-cursors` to suggest positions; the user can always edit the inputs manually
 
 ### BroadcastChannel listeners
-- `auto-place-cursors`, `iv-update`, `fpsp-update`, `cursor-analyses-update`, `ap-update`, `bursts-update`, `excluded-update`, `averaged-update`, `file-close`, `state-request` / `state-update`
+- `auto-place-cursors`, `iv-update`, `fpsp-update`, `cursor-analyses-update`, `ap-update`, `bursts-update`, `paired-update`, `excluded-update`, `averaged-update`, `file-close`, `state-request` / `state-update`
 
 ---
 
@@ -506,6 +518,7 @@ Three rows (Baseline, Peak, Fit), each with:
 - `layout` — `leftCollapsed`, `rightCollapsed`, `focusMode`, `leftWidth`, `rightWidth`
 - `theme` — see chapter 6
 - `cursorWindowUI` — `visibleColumns`, `topHeight` (splitter position)
+- `pairedWindowUI` — `topHeight` (results splitter), `leftPanelWidth` (sidebar splitter)
 - Per-file slots, all keyed by `filePath`:
   - `savedFieldBursts`, `savedBurstFormParams`
   - `savedIVCurves`
@@ -530,7 +543,11 @@ Created on first analysis run. Top-level shape:
     "fpsp":       {"<group>:<series>:<mode>": { ... }},
     "bursts":     {"<group>:<series>": { ... }},
     "ap":         {"<group>:<series>": { ... }},
-    "events":     {"<group>:<series>": { ... }}
+    "events":     {"<group>:<series>": { ... }},
+    "paired":     {"<group>:<series>": { ... }}
+  },
+  "forms": {
+    "paired":     { ... last-used Paired form state, single-shot ... }
   },
   "ui_state": {
     "excluded_sweeps":  {"<g>:<s>": [..]},
@@ -544,7 +561,7 @@ Created on first analysis run. Top-level shape:
 
 ### Cross-window sync (`BroadcastChannel('neurotrace-sync')`)
 - `state-request` / `state-update`, `cursor-update`, `sweep-update`, `selection-update`,
-  `bursts-update`, `iv-update`, `fpsp-update`, `cursor-analyses-update`,
+  `bursts-update`, `iv-update`, `fpsp-update`, `cursor-analyses-update`, `paired-update`,
   `excluded-update`, `averaged-update`, `burst-form-params-update`, `detection-filter`,
   `auto-place-cursors`, `file-close`
 
@@ -958,7 +975,134 @@ Backend: `analysis/field_potential.py`.
 
 ---
 
-## 16. Metadata
+## 16. Paired Recording
+
+Backend: `analysis/paired.py` (1075 lines), `api/paired.py` (222 lines).
+Frontend: `components/AnalysisWindows/PairedWindow.tsx` (~2880 lines).
+
+### What it does
+Per-trial pre→post measurements on dual-channel sweeps. The user picks one channel as the "pre" trigger (action potential, electrical stim artefact, TTL pulse, or manually placed events) and a second channel as the "post" response. For each detected pre event the window measures amplitude / latency / kinetics on the post trace, classifies success vs failure, and aggregates across the series into release statistics (failure rate, potency, CV, 1/CV², paired-pulse ratio) and a spike-triggered average.
+
+### Layout
+- **Top bar:** Group, Series, Pre-channel, Post-channel selectors; sweep-mode picker (All / Range / Single); Run / Clear buttons; manual-edits clear button.
+- **Left sidebar (resizable; width persisted in `pairedWindowUI.leftPanelWidth`):** parameter cards — Pre detection, Post window, Failure rule, Latency rule, Pre filter, Post filter.
+- **Right top — overlay viewer:** single uPlot showing pre trace (left axis, primary colour) and post trace (right axis, secondary colour) on shared X. Pre-event markers and post-peak markers drawn on top. Two draggable cursor pairs delimit the post-search bounds.
+- **Right bottom — results tabs (height persisted in `pairedWindowUI.topHeight`):**
+  - Trials — per-trial table
+  - Statistics — summary grid + PPR table + trial-sequence scatter
+  - STA — spike-triggered average plot
+
+### Selectors / channel pickers
+- Group dropdown
+- Series dropdown
+- Pre trace index — must differ from Post; equal sampling rate enforced
+- Post trace index — same
+- Validation errors surface in a red banner under the Run button (e.g. "Pre and post channels must differ.", "Sampling rates differ.")
+
+### Cursors / markers (overlay viewer)
+- **Pre-event markers** — one dot per detected anchor on the pre trace (left axis). Click to prime, reclick to remove the trial.
+- **Post-peak markers** — one dot per trial on the post trace (right axis). Green = success, pink = failure. Prime + reclick toggles a manual-failure flag (forces success = false).
+- **Post-search bounds** — two band edges drawn when `showPostBounds = true`. Drag to set `postSearchStartS` / `postSearchEndS`; clips per-trial peak search.
+
+### Parameters
+
+Pre detection mode (`ap` | `stim` | `ttl` | `manual`):
+- **AP** — reuses `_detect_spikes_sweep` from chapter 12. Params: method (`auto_spike` | `auto_rec`), `min_amplitude_mv`, `pos_dvdt_mv_ms`, `neg_dvdt_mv_ms`, `width_ms`, `manual_threshold_mv`.
+- **Stim artefact** — `dvdt_threshold` (signal units / s) on `|d/dt|`, `min_distance_ms` debounce.
+- **TTL** — `level_threshold` (auto = midpoint of trace if null), `edge` (rising / falling / both), `min_pulse_ms`.
+- **Manual** — anchors come only from `manualEdits.added[sweep]`.
+- Common: `min_distance_ms` (post-detection debounce), `bounds_start_s` / `bounds_end_s` (window within sweep where anchors are kept).
+
+Pre filter (applied to pre trace before detection): `filter_enabled`, `filter_type` (lowpass / highpass / bandpass / notch), `filter_low`, `filter_high`, `filter_order`.
+
+Post window:
+- `preMs` — pre-anchor lookback before the baseline window (default 1.0)
+- `baselineMs` — width of the per-trial baseline window (default 2.0); window = `[t_pre − preMs − baselineMs, t_pre − preMs]`
+- `postMs` — post-anchor peak-search horizon (default 30); clipped by next anchor (with 0.2 ms guard) and by `postSearchStart/End`
+- `peakDirection` — `auto` | `positive` | `negative`
+
+Post filter (applied to post trace before measurement): same shape as Pre filter; default lowpass 1 kHz order 1.
+
+Failure rule (`k_sd` | `absolute`):
+- `kSd` — multiple of per-trial baseline σ; success when `|amp| ≥ k · σ` (default 3.0)
+- `absolute` — absolute threshold in post units (default 0.0)
+
+Latency rule (`fraction` | `onset_d2`):
+- `fraction` — first time `|signal − baseline|` crosses `fraction · |peak|` (default 0.20 = 20 %)
+- `onset_d2` — `argmax(d²/dt²)` of post over the search window
+
+### Algorithms (one line each)
+- **Anchor detection** — mode-dispatched (see above)
+- **Pre amplitude per trial** — AP / manual: Vm at peak; stim: local `|d/dt|`; TTL: peak − min over preceding 1 ms
+- **Per-trial baseline** — mean over `[t_pre − preMs − baselineMs, t_pre − preMs]`; baseline σ also computed here
+- **Per-trial peak** — extremum (per `peakDirection`) over `[t_pre, t_pre + postMs]`, clipped by next anchor and by post-search bounds
+- **Success** — `|peak − baseline| ≥ k · σ` (or ≥ absolute), unless manual-failure flag set
+- **Latency** — fraction-crossing or `argmax(d²V/dt²)`, in ms relative to `t_pre`
+- **Per-trial kinetics** — `measure_event_kinetics` on successes only (rise %, decay %, decay τ via monoexp, half-width)
+- **Series summary** — n_trials, n_success, n_failures, failure_rate, mean_amplitude, mean_amplitude_zeroed (failures = 0), potency (mean of successes), CV, 1/CV², latency_mean_ms / latency_sd_ms
+- **PPR** — `pulse_n / pulse_1` for each pulse n ≥ 2 within a sweep; only sweeps where pulse 1 is a success contribute
+- **STA** — stack post windows aligned to `t_pre = 0`, NaN-padded for partial windows; mean + SEM; computed for `all`, `success`, `failure` subsets independently
+- **STA decay fit** — monoexp `y = baseline + a·exp(−(t − t_peak)/τ)` on the decay phase (peak → end); reports τ (ms), R², fit curve
+
+### Run modes
+- **All** — runs every sweep in the series (default)
+- **Range** — `sweepFrom` / `sweepTo` 1-indexed spinners
+- **Single** — `sweepOne` spinner
+- **Click-to-add manual events** — left-click on the pre trace adds a `manualEdits.added[sweep]` anchor at the click time; prime + reclick on a pre marker removes a trial; prime + reclick on a post marker sets `manualEdits.postFailed[sweep]`. Manual edits are replayed on every Run so they survive parameter changes (same pattern as AP / Events / Bursts windows).
+
+### Results — tabs
+
+**Trials** — per-trial table:
+Sweep · # (trial index within sweep) · pre t (s) · amplitude · success (yes/no) · latency (ms) · rise (ms) · decay (ms) · τ_decay (ms) · half-width (ms) · baseline σ · truncated.
+Failures shown with faint red row tint; manual-edited trials marked with `*`. Right-click → Copy row as TSV; Cmd+C copies multi-selected rows.
+
+**Statistics** — three-panel grid:
+- Series summary card — counts, failure_rate, mean_amp, mean_amp_zeroed, potency, CV, 1/CV², latency mean/SD
+- PPR table — pulse n vs pulse 1, ratio, n contributing sweeps
+- Trial-sequence scatter — X = trial index 1…N, Y = amplitude; blue dots = successes, red = failures
+
+**STA** — spike-triggered average:
+- Header — series picker (`all` / `success` / `failure`); checkboxes (overlay individual trials, include failures in overlay, show fit)
+- Plot — X = time relative to `t_pre` (ms), Y = post amplitude. Bold mean curve + ±1 SEM ribbon; optional faint per-trial overlays; optional dashed monoexp fit line with τ label.
+- Right-click → Copy/Save PNG/SVG (same `PlotMenu` as elsewhere).
+
+### Endpoints
+- `POST /api/paired/run` — body: `{group, series, pre_trace, post_trace, sweeps?: int[], pre_mode, pre_params, post_params, failure_params, latency_params, manual_edits?}`. Returns `{per_trial[], per_sweep_summary[], series_summary{}, sta_all{}, sta_success{}, sta_failure{}, request, sampling_rate}`. 400 on validation errors.
+- `GET /api/paired/trial_window` — query: `group, series, sweep, pre_trace, post_trace, t_pre_s, pre_ms (default 2.0), post_ms (default 30.0), max_points (default 2000)`. Returns LTTB-decimated pre/post windows for any time point — used by the overlay viewer when zooming into a single trial.
+
+### Persistence
+- **Sidecar** — `analyses.paired[group:series]` (results) and `forms.paired` (single-shot last-used form state — not per-series, unlike most other modules)
+- **Electron prefs** — `pairedWindowUI = {topHeight, leftPanelWidth}`; saved on splitter `mouseup`
+- **Store slice** — `pairedAnalyses` (`Record<"group:series", PairedData>`) + `pairedForm` (PairedFormState)
+
+### Cross-window sync
+- Emits `paired-update` carrying `{pairedAnalyses, pairedForm}` on every successful run, form change, or manual edit
+- `CursorPanel.tsx` and `AnalysisWindow.tsx` adopt the slice in their `state-update` reply / receive handlers
+
+### Keyboard
+- No window-local key bindings beyond the global ones (Esc closes window). _NOT IN CODE_: ←/→ sweep nav, [/] trial nav. Worth flagging when prose lands.
+
+### Status / UI states
+- `running` — Run button label "Running…", form disabled
+- `runError` — red banner under Run button (`"Pre and post channels must differ."`, etc.)
+- Empty state — "No trials detected." in Trials tab when result is empty after a run
+
+### Wiring status (verified 2026-05-07)
+- ✅ Toolbar Analyses dropdown — label `Paired Recording`, position between Action Potentials and Event Detection
+- ✅ TreeNavigator pill — letter **P**, colour `#7e57c2` (purple), shows when `pairedAnalyses` has any entry for that series
+- ✅ Batch window — supports Paired recipes (`runPairedRecipe`)
+- ✅ **Cohort export** — `extract_paired` registered in `EXTRACTORS` at `cohort.py:1155` with default metrics at `cohort.py:1248–1249` (failure rate, potency, CV, 1/CV², PPR). Flows through the generic export pipeline (Excel, Prism `.pzfx`).
+- ✅ Sidecar — `analyses.paired` + `forms.paired` keys
+
+### Suggested screenshots
+- `screenshots/paired-window-overview.png` — full window, AP-mode detection, mid-run results
+- `screenshots/paired-overlay-viewer.png` — pre/post overlay with markers, post-search bounds visible
+- `screenshots/paired-statistics-tab.png` — series summary + PPR table + trial-sequence scatter
+- `screenshots/paired-sta-tab.png` — STA mean ± SEM ribbon with fit overlay
+
+---
+
+## 17. Metadata
 
 ### Features
 - Series-level tags (e.g. "baseline", "drug-washed", "post-tetanus")
@@ -971,7 +1115,7 @@ Backend: `analysis/field_potential.py`.
 
 ---
 
-## 17. Trace Export
+## 18. Trace Export
 
 ### Features
 - Sweep selector (multi-select grid)
@@ -985,7 +1129,7 @@ Backend: `analysis/field_potential.py`.
 
 ---
 
-## 18. Batch
+## 19. Batch
 
 ### Features
 - Apply a single analysis to multiple files (folder / file-list pickers)
@@ -995,7 +1139,7 @@ Backend: `analysis/field_potential.py`.
 
 ---
 
-## 19. Cohort
+## 20. Cohort
 
 ### Features
 - Aggregate analysis results across multiple files
@@ -1008,4 +1152,5 @@ Backend: `analysis/field_potential.py`.
 # Notes
 
 - Cursor Measurements fit-function set: enumerate from `GET /api/cursors/fit_functions` when writing prose
-- Spectral Analysis module: `backend/analysis/spectral.py` exists but is not surfaced in the toolbar Analyses dropdown — out of scope for this manual until exposed in the UI
+- Spectral Analysis module: `backend/analysis/spectral.py` IS now surfaced in the toolbar Analyses dropdown (`Toolbar.tsx:107`), but the Spectral window is minimal. Decide when prose is written: document it briefly or mark "preview" / out of scope.
+- Paired Recording: integrated with Cohort export via `extract_paired` (release stats: failure rate, potency, CV, 1/CV², PPR). No prose-side gap.

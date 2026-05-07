@@ -1,4 +1,23 @@
 import { create } from 'zustand'
+import type { TrainParams } from '../utils/trains'
+import { computeBurstTrainIds } from '../utils/burstTrains'
+
+/** Modules that can group their detected events into trains. Bursts =
+ *  the FieldBurstWindow's epileptiform burst detection; events = the
+ *  Event Detection window; ap = the Action Potentials window. The
+ *  algorithm is shared (frontend/src/utils/trains.ts ↔ backend/
+ *  analysis/trains.py); only the timestamp source differs. */
+export type TrainModule = 'bursts' | 'events' | 'ap'
+
+/** All train-detection form state for one recording, keyed first by
+ *  module then by `${group}:${series}`. Persisted in the .neurotrace
+ *  sidecar; results are NOT stored — they are recomputed on demand
+ *  from the existing event/burst/spike timestamps. */
+export type TrainParamsBundle = Record<TrainModule, Record<string, TrainParams>>
+
+export function defaultTrainParamsBundle(): TrainParamsBundle {
+  return { bursts: {}, events: {}, ap: {} }
+}
 
 export interface TraceData {
   time: Float64Array
@@ -256,6 +275,7 @@ export function fileCloseResetSlices(): Record<string, unknown> {
     additionalTraces: {},
     visibleTraces: {},
     fieldBursts: {}, burstFormParams: {},
+    trainParams: defaultTrainParamsBundle(),
     ivCurves: {}, fpspCurves: {}, cursorAnalyses: {},
     apAnalyses: {}, eventsAnalyses: {},
     pairedAnalyses: {}, pairedForm: defaultPairedForm(),
@@ -374,6 +394,10 @@ type SidecarPayload = {
     paired?: PairedFormState
   }
   burst_form_params?: Record<string, FieldBurstsParams>
+  /** Per-module train-grouping form state. Results are not stored —
+   *  computed on demand from each module's existing event timestamps
+   *  via the shared algorithm in `utils/trains.ts`. */
+  train_params?: TrainParamsBundle
   excluded_sweeps?: Record<string, number[]>
   averaged_sweeps?: Record<string, AveragedSweep[]>
   cursors?: CursorPositions
@@ -425,6 +449,7 @@ function _sidecarPayloadFromState(state: AppState): SidecarPayload {
       paired: state.pairedForm,
     },
     burst_form_params: state.burstFormParams,
+    train_params: state.trainParams,
     excluded_sweeps: state.excludedSweeps,
     averaged_sweeps: state.averagedSweeps,
     cursors: state.cursors,
@@ -645,6 +670,18 @@ function _broadcastBurstFormParams(
     ch.close()
   } catch { /* ignore */ }
 }
+
+/** Broadcast the full train-params bundle (all modules + all series).
+ *  Cheap — the bundle is small and only changes when the user toggles
+ *  or edits the train sidepanel in one of the three windows. */
+function _broadcastTrainParams(trainParams: TrainParamsBundle) {
+  try {
+    const ch = new BroadcastChannel('neurotrace-sync')
+    ch.postMessage({ type: 'train-params-update', trainParams })
+    ch.close()
+  } catch { /* ignore */ }
+}
+
 
 export interface MeasurementResult {
   sweepIndex: number
@@ -1749,6 +1786,12 @@ interface AppState {
    *  persisted per-recording in the .neurotrace sidecar. */
   burstFormParams: Record<string, FieldBurstsParams>
 
+  /** Train-grouping form state for the Burst, Event, and AP windows.
+   *  Only the parameters live here — train results are derived on the
+   *  fly from each module's detected timestamps via
+   *  `frontend/src/utils/trains.ts`. Persisted per-recording. */
+  trainParams: TrainParamsBundle
+
   // I-V curves, keyed by `${group}:${series}` — persists across navigation
   // and is saved per-recording in Electron preferences.
   ivCurves: Record<string, IVCurveData>
@@ -1999,8 +2042,15 @@ interface AppState {
   clearFieldBursts: (group?: number, series?: number) => void
   /** Set the currently-selected burst within a series (for mini-viewer). */
   selectFieldBurst: (group: number, series: number, idx: number | null) => void
-  /** Dump the union of all detected bursts across all series to CSV. */
+  /** Dump the union of all detected bursts across all series to CSV.
+   *  Includes a ``train_id`` column derived live from the current
+   *  ``trainParams.bursts`` settings (empty when grouping is off for
+   *  that series or the burst doesn't belong to a qualifying train). */
   exportFieldBurstsCSV: () => Promise<void>
+  /** Dump the per-train summary across all series to CSV — one row
+   *  per train, with start/end/duration/n_bursts/mean IEI/intra
+   *  freq. Only runs for series with grouping enabled. */
+  exportFieldBurstTrainsCSV: () => Promise<void>
   /** Append a manually-measured burst (from a left-click in the sweep
    *  viewer). The burst is pre-populated by the backend; we just
    *  splice it into the current list, sort, and broadcast. */
@@ -2012,6 +2062,16 @@ interface AppState {
   /** Store the burst-detection form state for a given series so the
    *  window can restore it after close/reopen. Broadcast + persisted. */
   setBurstFormParams: (group: number, series: number, params: FieldBurstsParams) => void
+
+  /** Train-grouping form state for one of the three modules that can
+   *  cluster their detected events into trains. Broadcast + persisted
+   *  in the sidecar; results are not stored, only the params. */
+  setTrainParams: (
+    module: TrainModule,
+    group: number,
+    series: number,
+    params: TrainParams,
+  ) => void
 
   // Field PSP actions
   runFPsp: (
@@ -2365,6 +2425,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   recordingMetaReady: false,
   fieldBursts: {},
   burstFormParams: {},
+  trainParams: defaultTrainParamsBundle(),
   ivCurves: {},
   fpspCurves: {},
   cursorAnalyses: {},
@@ -2997,6 +3058,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       visibleTraces: {},
       fieldBursts: {},
       burstFormParams: {},
+      trainParams: defaultTrainParamsBundle(),
       ivCurves: {},
       fpspCurves: {},
       cursorAnalyses: {},
@@ -3073,7 +3135,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const sidecarPopulated = {
         events: false, bursts: false, ap: false, iv: false,
         fpsp: false, cursor_analyses: false, resistance: false,
-        burst_form: false, excluded: false, averaged: false,
+        burst_form: false, train_params: false,
+        excluded: false, averaged: false,
       }
       if (recording?.filePath) {
         const sidecar = await _loadSidecar(recording.filePath)
@@ -3128,6 +3191,18 @@ export const useAppStore = create<AppState>((set, get) => ({
             patch.burstFormParams = sidecar.burst_form_params
             post({ type: 'burst-form-params-update', burstFormParams: sidecar.burst_form_params })
             sidecarPopulated.burst_form = true
+          }
+          if (sidecar.train_params && typeof sidecar.train_params === 'object') {
+            // Forward-compatible: sidecar may pre-date one or more
+            // modules. Spread the default empty bundle underneath so
+            // every key exists.
+            const merged: TrainParamsBundle = {
+              ...defaultTrainParamsBundle(),
+              ...(sidecar.train_params as Partial<TrainParamsBundle>),
+            }
+            patch.trainParams = merged
+            post({ type: 'train-params-update', trainParams: merged })
+            sidecarPopulated.train_params = true
           }
           if (sidecar.excluded_sweeps && Object.keys(sidecar.excluded_sweeps).length > 0) {
             patch.excludedSweeps = sidecar.excluded_sweeps
@@ -4136,8 +4211,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     _broadcastBurstFormParams(get().burstFormParams)
   },
 
+  setTrainParams: (module, group, series, params) => {
+    const key = `${group}:${series}`
+    set((s) => ({
+      trainParams: {
+        ...s.trainParams,
+        [module]: { ...s.trainParams[module], [key]: params },
+      },
+    }))
+    _broadcastTrainParams(get().trainParams)
+  },
+
   exportFieldBurstsCSV: async () => {
-    const { fieldBursts, recording, backendUrl } = get()
+    const { fieldBursts, recording, backendUrl, trainParams } = get()
     const keys = Object.keys(fieldBursts)
     if (keys.length === 0) return
     // `recording` is only populated in the main window's store; analysis
@@ -4159,12 +4245,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       'mean_frequency_hz', 'n_spikes',
       'method', 'baseline_mode', 'baseline_value',
       'threshold_high', 'threshold_low',
+      'train_id',
     ]
     const rows: string[] = [header.join(',')]
     for (const key of keys) {
       const [g, s] = key.split(':').map(Number)
       const entry = fieldBursts[key]
+      const trainCfg = trainParams.bursts[key] as
+        | (TrainParams & { enabled?: boolean })
+        | undefined
+      const trainIdByIdx = trainCfg?.enabled
+        ? computeBurstTrainIds(entry.bursts, trainCfg).idByGlobalIdx
+        : null
       entry.bursts.forEach((b, i) => {
+        const tid = trainIdByIdx?.[i]
         rows.push([
           JSON.stringify(fileName),
           g, s, b.sweepIndex, i,
@@ -4181,6 +4275,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           entry.baselineValue.toFixed(4),
           entry.thresholdHigh != null ? entry.thresholdHigh.toFixed(4) : '',
           entry.thresholdLow != null ? entry.thresholdLow.toFixed(4) : '',
+          tid != null ? tid + 1 : '',
         ].join(','))
       })
     }
@@ -4188,6 +4283,66 @@ export const useAppStore = create<AppState>((set, get) => ({
     const defaultName = (fileName || 'recording').replace(/\.[^.]+$/, '') + '_bursts.csv'
     // Browser-style download works in Electron too and handles the Save dialog
     // via the renderer's built-in download handler.
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = defaultName
+    a.click()
+    URL.revokeObjectURL(url)
+  },
+
+  exportFieldBurstTrainsCSV: async () => {
+    const { fieldBursts, recording, backendUrl, trainParams } = get()
+    const keys = Object.keys(fieldBursts)
+    if (keys.length === 0) return
+    let fileName: string = recording?.fileName ?? ''
+    if (!fileName && backendUrl) {
+      try {
+        const info = await fetch(`${backendUrl}/api/files/info`).then((r) => r.ok ? r.json() : null)
+        if (info?.fileName) fileName = info.fileName
+      } catch { /* ignore */ }
+    }
+    const header = [
+      'file', 'group', 'series', 'sweep_index', 'train_id',
+      'start_s', 'end_s', 'duration_ms', 'n_bursts',
+      'mean_iei_ms', 'intra_freq_hz',
+      'metric', 'max_iei_ms', 'min_count',
+      'min_duration_ms', 'min_inter_train_ms',
+      'first_burst_idx', 'last_burst_idx',
+    ]
+    const rows: string[] = [header.join(',')]
+    let total = 0
+    for (const key of keys) {
+      const [g, s] = key.split(':').map(Number)
+      const entry = fieldBursts[key]
+      const trainCfg = trainParams.bursts[key] as
+        | (TrainParams & { enabled?: boolean })
+        | undefined
+      if (!trainCfg?.enabled) continue
+      const { flatSummaries } = computeBurstTrainIds(entry.bursts, trainCfg)
+      for (const t of flatSummaries) {
+        rows.push([
+          JSON.stringify(fileName),
+          g, s, t.sweep, t.id + 1,
+          t.startS.toFixed(6), t.endS.toFixed(6), t.durationMs.toFixed(3),
+          t.nEvents,
+          t.meanIeiMs != null ? t.meanIeiMs.toFixed(3) : '',
+          t.intraFreqHz != null ? t.intraFreqHz.toFixed(4) : '',
+          String(trainCfg.metric),
+          trainCfg.maxIeiMs,
+          trainCfg.minCount,
+          trainCfg.minDurationMs ?? 0,
+          trainCfg.minInterTrainMs ?? 0,
+          t.memberIndices[0],
+          t.memberIndices[t.memberIndices.length - 1],
+        ].join(','))
+        total++
+      }
+    }
+    if (total === 0) return
+    const csv = rows.join('\n')
+    const defaultName = (fileName || 'recording').replace(/\.[^.]+$/, '') + '_burst_trains.csv'
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -5750,6 +5905,7 @@ let _sidecarRefs = {
   cursorAnalyses: null as any,
   resistanceResults: null as any,
   burstFormParams: null as any,
+  trainParams: null as any,
   excluded: null as any,
   averaged: null as any,
   cursors: null as any,
@@ -5774,6 +5930,7 @@ useAppStore.subscribe((state) => {
     cursorAnalyses: state.cursorAnalyses,
     resistanceResults: state.resistanceResults,
     burstFormParams: state.burstFormParams,
+    trainParams: state.trainParams,
     excluded: state.excludedSweeps,
     averaged: state.averagedSweeps,
     cursors: state.cursors,

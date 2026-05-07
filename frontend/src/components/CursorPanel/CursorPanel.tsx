@@ -242,6 +242,7 @@ export function CursorPanel() {
             trace: state.currentTrace,
             fieldBursts: state.fieldBursts,
             burstFormParams: state.burstFormParams,
+            trainParams: state.trainParams,
             ivCurves: state.ivCurves,
             fpspCurves: state.fpspCurves,
             cursorAnalyses: state.cursorAnalyses,
@@ -276,6 +277,13 @@ export function CursorPanel() {
         // `recording.filePath` set for the persistence subscribe.
         if (ev.data?.type === 'burst-form-params-update' && ev.data.burstFormParams) {
           useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
+        }
+        // Train-detection params (Burst / Event / AP windows). Adopted
+        // here so the sidecar auto-save subscribe block writes them to
+        // disk — analysis windows have no `recording.filePath` and so
+        // can't persist on their own.
+        if (ev.data?.type === 'train-params-update' && ev.data.trainParams) {
+          useAppStore.setState({ trainParams: ev.data.trainParams })
         }
         // I-V curves pushed from an analysis window → adopt here so the main
         // window's store has them for persistence.

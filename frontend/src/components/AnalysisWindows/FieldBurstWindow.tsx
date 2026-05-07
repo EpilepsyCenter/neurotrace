@@ -4,6 +4,9 @@ import 'uplot/dist/uPlot.min.css'
 import { useAppStore, BurstRecord, FieldBurstsData, FieldBurstsParams } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
+import { TrainOptions, defaultTrainParamsFor } from './TrainOptions'
+import { TrainSummary, TrainParams } from '../../utils/trains'
+import { computeBurstTrainIds } from '../../utils/burstTrains'
 import { usePlotMenu } from '../common/PlotMenu'
 import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
@@ -116,8 +119,10 @@ export function FieldBurstWindow({
   const {
     fieldBursts,
     burstFormParams, setBurstFormParams,
+    trainParams,
     runFieldBurstsOnSweep, runFieldBurstsOnSeries,
     clearFieldBursts, selectFieldBurst, exportFieldBurstsCSV,
+    exportFieldBurstTrainsCSV,
     addManualBurst, removeBurstAt,
     loading, error, setError,
   } = useAppStore()
@@ -322,6 +327,27 @@ export function FieldBurstWindow({
 
   const key = `${group}:${series}`
   const entry = fieldBursts[key]
+
+  // Train-grouping (Easy-Electrophysiology-style cluster of closely
+  // spaced bursts). Pure derivation: read params from the store, walk
+  // bursts per-sweep (never cross sweep boundaries — different trials),
+  // compute clusters, hand both the per-burst train_id and the per-
+  // sweep summary list back to the overlay + tables. Manual edits to
+  // ``entry.bursts`` invalidate the memo automatically.
+  const storedTrainParams = trainParams.bursts[key] as
+    | (TrainParams & { enabled?: boolean })
+    | undefined
+  const effectiveTrainParams = storedTrainParams ?? defaultTrainParamsFor('bursts')
+  const trainsEnabled = effectiveTrainParams.enabled === true
+  const trainData = useMemo(
+    () => computeBurstTrainIds(
+      entry?.bursts ?? [],
+      { ...effectiveTrainParams, enabled: trainsEnabled },
+    ),
+    [entry?.bursts, trainsEnabled, effectiveTrainParams.metric,
+      effectiveTrainParams.maxIeiMs, effectiveTrainParams.minCount,
+      effectiveTrainParams.minDurationMs, effectiveTrainParams.minInterTrainMs],
+  )
 
   // ---- Sweep preview + viewport state for the new central viewer ----
   const totalSweeps: number = fileInfo?.groups?.[group]?.series?.[series]?.sweepCount ?? 0
@@ -530,6 +556,21 @@ export function FieldBurstWindow({
               onChange={onParamChange}
               onChangeRaw={onParamChangeRaw}
             />
+
+            {/* Post-detection: optional grouping of closely-spaced
+                bursts into trains. Off by default; results derive
+                live from the bursts list, so manual add/remove
+                rebuilds train assignments without re-running
+                detection. ``min_gap_ms`` from the detection params
+                drives the warning floor: any IEI smaller than that
+                is meaningless because adjacent bursts under that
+                threshold were already merged upstream. */}
+            <TrainOptions
+              module="bursts"
+              group={group}
+              series={series}
+              hostMergeFloorMs={typeof params.min_gap_ms === 'number' ? params.min_gap_ms : undefined}
+            />
           </div>
 
           {/* Pinned footer: Run + Sweeps dropdown (all/one), then
@@ -569,7 +610,10 @@ export function FieldBurstWindow({
                 <span style={{ marginLeft: 'auto' }}>/ {totalSweeps || '—'}</span>
               </div>
             )}
-            {/* Secondary actions — smaller, visually subordinate. */}
+            {/* Secondary actions — smaller, visually subordinate.
+                "Export trains" lives next to its summary table (right
+                pane) instead of here so the sidebar buttons don't get
+                crammed. */}
             <div style={{
               display: 'flex', gap: 6, marginTop: 2,
               borderTop: '1px solid var(--border)', paddingTop: 6,
@@ -645,6 +689,7 @@ export function FieldBurstWindow({
               onZeroOffsetChange={setZeroOffset}
               theme={theme}
               fontSize={fontSize}
+              trainsForSweep={trainData.summariesBySweep.get(previewSweep) ?? []}
             />
           </div>
 
@@ -711,6 +756,43 @@ export function FieldBurstWindow({
             </div>
           )}
 
+          {/* Trains summary — only renders when train-grouping is on
+              AND at least one cluster qualifies. Sits above the burst
+              table so the higher-level grouping is the first thing the
+              user sees after the trace. Header strip carries the
+              count + Export CSV action so the sidebar isn't cramped
+              by a third button. */}
+          {trainsEnabled && trainData.flatSummaries.length > 0 && (
+            <div style={{
+              flexShrink: 0, marginTop: 6,
+              display: 'flex', flexDirection: 'column', gap: 4,
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                fontSize: 'var(--font-size-label)',
+                color: 'var(--text-muted)',
+                padding: '0 2px',
+              }}>
+                <span>
+                  <strong style={{ color: 'var(--text-primary)' }}>
+                    {trainData.flatSummaries.length}
+                  </strong> trains
+                </span>
+                <button className="btn"
+                  onClick={() => exportFieldBurstTrainsCSV()}
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: 'var(--font-size-label)',
+                    padding: '2px 10px',
+                  }}
+                  title="Export per-train summary to CSV">
+                  Export trains CSV
+                </button>
+              </div>
+              <TrainSummaryTable trains={trainData.flatSummaries} />
+            </div>
+          )}
+
           {/* Burst table. */}
           <div style={{
             flex: 1, overflow: 'auto', minHeight: 0,
@@ -721,6 +803,7 @@ export function FieldBurstWindow({
               bursts={entry?.bursts ?? []}
               selectedIdx={entry?.selectedIdx ?? null}
               onSelect={onSelectRow}
+              trainIdByIdx={trainsEnabled ? trainData.idByGlobalIdx : null}
             />
           </div>
         </div>{/* close RIGHT panel */}
@@ -1009,6 +1092,7 @@ function BurstSweepViewer({
   onAddBurst, onRemoveBurst,
   zeroOffset, onZeroOffsetChange,
   theme, fontSize,
+  trainsForSweep,
 }: {
   backendUrl: string
   entry: FieldBurstsData | undefined
@@ -1031,6 +1115,11 @@ function BurstSweepViewer({
   onZeroOffsetChange: (v: boolean) => void
   theme: string
   fontSize: number
+  /** Trains computed for the currently previewed sweep. Drawn as
+   *  translucent shaded spans behind the burst markers; empty array
+   *  when train-grouping is disabled or there are no qualifying
+   *  clusters in this sweep. */
+  trainsForSweep: TrainSummary[]
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -1150,6 +1239,7 @@ function BurstSweepViewer({
           plotRef.current, overlayRef.current, entry, sweepBursts,
           data.zeroOffsetApplied,
           primedRemoveIdxRef.current,
+          trainsForSweep,
         )],
       },
     }
@@ -1161,6 +1251,7 @@ function BurstSweepViewer({
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data.zeroOffsetApplied,
       primedRemoveIdxRef.current,
+      trainsForSweep,
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
@@ -1172,8 +1263,9 @@ function BurstSweepViewer({
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data?.zeroOffsetApplied ?? 0,
       primedRemoveIdxRef.current,
+      trainsForSweep,
     )
-  }, [entry, sweepBursts, theme, fontSize, data])
+  }, [entry, sweepBursts, trainsForSweep, theme, fontSize, data])
 
   // Imperative redraw after a click toggles the primed index. Avoids
   // adding the ref to a useEffect dep list (refs aren't reactive).
@@ -1182,8 +1274,9 @@ function BurstSweepViewer({
       plotRef.current, overlayRef.current, entry, sweepBursts,
       data?.zeroOffsetApplied ?? 0,
       primedRemoveIdxRef.current,
+      trainsForSweep,
     )
-  }, [entry, sweepBursts, data])
+  }, [entry, sweepBursts, trainsForSweep, data])
 
   // Keep uPlot sized to its container — ResizeObserver + parent
   // heightSignal (splitter drag) + window resize.
@@ -1589,6 +1682,10 @@ function drawBurstOverlay(
    *  removal — drawn with a blue confirmation ring outside the dot.
    *  ``null`` = no prime. Mirrors the AP / Events flow. */
   primedIdx: number | null = null,
+  /** Train spans for THIS sweep, drawn as translucent shaded boxes
+   *  behind the per-burst markers. Empty when train-grouping is off
+   *  or no clusters qualify. */
+  trains: TrainSummary[] = [],
 ) {
   if (!u || !canvas) return
   const ctx = canvas.getContext('2d')
@@ -1619,6 +1716,35 @@ function drawBurstOverlay(
       u.valToPos(x, 'x', true) / dpr,
       u.valToPos(yUse, 'y', true) / dpr,
     ]
+  }
+
+  // Train spans (drawn first so threshold lines + per-burst markers
+  // sit on top). Each train gets a faint amber band spanning its
+  // [startS, endS] range plus a small "T#" label at the upper-left
+  // corner — same colour family as the manual-burst orange ring so
+  // the user reads "this is a higher-level grouping of the bursts
+  // below."
+  if (trains.length > 0) {
+    const trainColor = 'rgba(255,167,38,0.13)'
+    const edgeColor = 'rgba(255,167,38,0.45)'
+    const labelColor = 'rgba(255,167,38,0.95)'
+    ctx.font = `${cssVar('--font-size-xs')} ${cssVar('--font-mono')}`
+    for (const t of trains) {
+      const px0 = u.valToPos(t.startS, 'x', true) / dpr
+      const px1 = u.valToPos(t.endS, 'x', true) / dpr
+      if (!isFinite(px0) || !isFinite(px1)) continue
+      const w = Math.max(1, px1 - px0)
+      ctx.fillStyle = trainColor
+      ctx.fillRect(px0, 0, w, cssH)
+      ctx.strokeStyle = edgeColor
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(px0, 0); ctx.lineTo(px0, cssH)
+      ctx.moveTo(px1, 0); ctx.lineTo(px1, cssH)
+      ctx.stroke()
+      ctx.fillStyle = labelColor
+      ctx.fillText(`T${t.id + 1}`, px0 + 3, 11)
+    }
   }
 
   // Dashed horizontal lines: detection thresholds (once per view, not
@@ -1716,19 +1842,26 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 }
 
 function BurstTable({
-  bursts, selectedIdx, onSelect,
+  bursts, selectedIdx, onSelect, trainIdByIdx,
 }: {
   bursts: BurstRecord[]
   selectedIdx: number | null
   onSelect: (idx: number) => void
+  /** Per-burst train assignment (same length + order as ``bursts``).
+   *  ``null`` = isolated; integer = global train id. When omitted the
+   *  Train column is hidden so users without train grouping enabled
+   *  don't see an empty extra column. */
+  trainIdByIdx?: (number | null)[] | null
 }) {
   const sel = useRowSelection(bursts.length)
-  const headers = ['#', 'Sweep', 't_start (s)', 'Dur (ms)', 'Pre-baseline',
+  const showTrainCol = !!trainIdByIdx && trainIdByIdx.some((v) => v != null)
+  const baseHeaders = ['#', 'Sweep', 't_start (s)', 'Dur (ms)', 'Pre-baseline',
     'Peak (Δ)', 'Rise 10-90 (ms)', 'Decay t₅₀ (ms)', 'Integral (·s)',
     'Freq (Hz)', 'Peak t (s)']
+  const headers = showTrainCol ? [...baseHeaders, 'Train'] : baseHeaders
   const rowToCells = (i: number): Array<string | number | null> => {
     const b = bursts[i]
-    return [
+    const base: Array<string | number | null> = [
       `${i + 1}${b.manual ? '*' : ''}`,
       b.sweepIndex + 1,
       b.startS.toFixed(3),
@@ -1741,6 +1874,11 @@ function BurstTable({
       b.meanFrequencyHz ?? null,
       b.peakTimeS.toFixed(3),
     ]
+    if (showTrainCol) {
+      const tid = trainIdByIdx?.[i]
+      base.push(tid != null ? `T${tid + 1}` : '')
+    }
+    return base
   }
   const copyMenu = useRowCopyMenu({
     selectionCount: sel.selectedIndexes.length,
@@ -1789,6 +1927,7 @@ function BurstTable({
             <Th>Integral (·s)</Th>
             <Th>Freq (Hz)</Th>
             <Th>Peak t (s)</Th>
+            {showTrainCol && <Th>Train</Th>}
           </tr>
         </thead>
         <tbody>
@@ -1829,6 +1968,100 @@ function BurstTable({
               <Td>{b.integral.toFixed(4)}</Td>
               <Td>{b.meanFrequencyHz != null ? b.meanFrequencyHz.toFixed(1) : '—'}</Td>
               <Td>{b.peakTimeS.toFixed(3)}</Td>
+              {showTrainCol && (
+                <Td>
+                  {trainIdByIdx?.[i] != null
+                    ? <span style={{ color: 'rgba(255,167,38,0.95)' }}>T{(trainIdByIdx![i] as number) + 1}</span>
+                    : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                </Td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {copyMenu.menu}
+    </div>
+  )
+}
+
+/** Compact summary table for detected trains. Shown below the bursts
+ *  table when train-grouping is on. Mirrors the burst table's styling
+ *  (mono font, sticky thead, copy menu) but only renders if there are
+ *  any trains — empty data hides the whole block. */
+function TrainSummaryTable({ trains }: {
+  trains: Array<TrainSummary & { sweep: number }>
+}) {
+  const sel = useRowSelection(trains.length)
+  const headers = ['Train', 'Sweep', 'Start (s)', 'End (s)', 'Dur (ms)',
+    'n bursts', 'Mean IEI (ms)', 'Intra freq (Hz)']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const t = trains[i]
+    return [
+      `T${t.id + 1}`,
+      t.sweep + 1,
+      t.startS.toFixed(3),
+      t.endS.toFixed(3),
+      t.durationMs.toFixed(1),
+      t.nEvents,
+      t.meanIeiMs != null ? t.meanIeiMs.toFixed(1) : null,
+      t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : null,
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
+  if (trains.length === 0) return null
+  return (
+    <div style={{
+      border: '1px solid var(--border)',
+      borderRadius: 4,
+      overflow: 'auto',
+      maxHeight: 200,
+    }}>
+      <table style={{
+        width: '100%',
+        borderCollapse: 'collapse',
+        fontSize: 'var(--font-size-label)',
+        fontFamily: 'var(--font-mono)',
+      }}>
+        <thead>
+          <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left', position: 'sticky', top: 0 }}>
+            <Th>Train</Th>
+            <Th>Sweep</Th>
+            <Th>Start (s)</Th>
+            <Th>End (s)</Th>
+            <Th>Dur (ms)</Th>
+            <Th>n bursts</Th>
+            <Th>Mean IEI (ms)</Th>
+            <Th>Intra freq (Hz)</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {trains.map((t, i) => (
+            <tr
+              key={i}
+              onClick={(ev) => sel.onRowClick(i, ev)}
+              onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                if (!sel.isSelected(i)) sel.setSelected([i])
+              })}
+              style={{
+                background: sel.isSelected(i)
+                  ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                  : 'transparent',
+                cursor: 'pointer',
+                borderTop: '1px solid var(--border)',
+              }}
+            >
+              <Td><span style={{ color: 'rgba(255,167,38,0.95)' }}>T{t.id + 1}</span></Td>
+              <Td>{t.sweep + 1}</Td>
+              <Td>{t.startS.toFixed(3)}</Td>
+              <Td>{t.endS.toFixed(3)}</Td>
+              <Td>{t.durationMs.toFixed(1)}</Td>
+              <Td>{t.nEvents}</Td>
+              <Td>{t.meanIeiMs != null ? t.meanIeiMs.toFixed(1) : '—'}</Td>
+              <Td>{t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : '—'}</Td>
             </tr>
           ))}
         </tbody>

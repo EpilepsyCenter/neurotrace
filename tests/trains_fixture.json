@@ -1,0 +1,79 @@
+[
+  {
+    "name": "two_clusters_point_events",
+    "events": [
+      {"t": 0.000},
+      {"t": 0.010},
+      {"t": 0.020},
+      {"t": 1.000},
+      {"t": 1.010},
+      {"t": 1.020}
+    ],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 20.0, "min_count": 2}
+  },
+  {
+    "name": "below_min_count_filtered",
+    "events": [
+      {"t": 0.000},
+      {"t": 0.010},
+      {"t": 1.000},
+      {"t": 1.010},
+      {"t": 1.020}
+    ],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 20.0, "min_count": 3}
+  },
+  {
+    "name": "gap_metric_extended_events",
+    "events": [
+      {"t": 0.05, "t_start": 0.00, "t_end": 0.10},
+      {"t": 0.30, "t_start": 0.20, "t_end": 0.40},
+      {"t": 0.65, "t_start": 0.55, "t_end": 0.75},
+      {"t": 5.05, "t_start": 5.00, "t_end": 5.10}
+    ],
+    "params": {"metric": "gap", "max_iei_ms": 200.0, "min_count": 2}
+  },
+  {
+    "name": "min_duration_filter",
+    "events": [
+      {"t": 0.000},
+      {"t": 0.005},
+      {"t": 1.000},
+      {"t": 1.010},
+      {"t": 1.020},
+      {"t": 1.030}
+    ],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 15.0, "min_count": 2, "min_duration_ms": 20.0}
+  },
+  {
+    "name": "merge_close_trains",
+    "events": [
+      {"t": 0.000},
+      {"t": 0.005},
+      {"t": 0.010},
+      {"t": 0.040},
+      {"t": 0.045},
+      {"t": 0.050}
+    ],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 10.0, "min_count": 2, "min_inter_train_ms": 50.0}
+  },
+  {
+    "name": "all_isolated",
+    "events": [
+      {"t": 0.0},
+      {"t": 1.0},
+      {"t": 2.0},
+      {"t": 3.0}
+    ],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 50.0, "min_count": 2}
+  },
+  {
+    "name": "single_event",
+    "events": [{"t": 0.5}],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 50.0, "min_count": 2}
+  },
+  {
+    "name": "empty",
+    "events": [],
+    "params": {"metric": "peak_to_peak", "max_iei_ms": 50.0, "min_count": 2}
+  }
+]

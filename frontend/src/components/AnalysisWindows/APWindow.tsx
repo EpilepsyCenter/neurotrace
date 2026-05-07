@@ -17,6 +17,9 @@ import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { attachHoverCoords } from '../../utils/hoverCoords'
 import { sampleTraceYAt } from '../../utils/sampleTraceY'
+import { TrainOptions, defaultTrainParamsFor } from './TrainOptions'
+import type { TrainParams, TrainSummary } from '../../utils/trains'
+import { computeApTrainIds } from '../../utils/apTrains'
 
 /**
  * Action Potentials analysis window.
@@ -104,6 +107,7 @@ export function APWindow({
   const {
     apAnalyses, runAP, clearAP, selectAPSpike,
     addManualAPSpike, removeManualAPSpikeAt,
+    trainParams,
     loading, error, setError,
   } = useAppStore()
   const theme = useThemeStore((s) => s.theme)
@@ -450,6 +454,28 @@ export function APWindow({
   // ---- Lookup + rehydrate ----
   const key = `${group}:${series}`
   const entry: APData | undefined = apAnalyses[key]
+
+  // Train-grouping (post-detection cluster of closely spaced spikes —
+  // useful for adapting / non-adapting cell classification, or for
+  // splitting "high-frequency" bursts within depolarising current
+  // pulses). Pure derivation: walk perSpike per-sweep, run the
+  // shared algorithm, hand back the global per-spike train_id and
+  // per-sweep summaries. Manual edits to ``perSpike`` invalidate the
+  // memo automatically.
+  const storedTrainParams = trainParams.ap[key] as
+    | (TrainParams & { enabled?: boolean })
+    | undefined
+  const effectiveTrainParams = storedTrainParams ?? defaultTrainParamsFor('ap')
+  const trainsEnabled = effectiveTrainParams.enabled === true
+  const trainData = useMemo(
+    () => computeApTrainIds(
+      entry?.perSpike ?? [],
+      { ...effectiveTrainParams, enabled: trainsEnabled },
+    ),
+    [entry?.perSpike, trainsEnabled, effectiveTrainParams.metric,
+      effectiveTrainParams.maxIeiMs, effectiveTrainParams.minCount,
+      effectiveTrainParams.minDurationMs, effectiveTrainParams.minInterTrainMs],
+  )
   const rehydratedKeyRef = useRef<string | null>(null)
   useEffect(() => {
     if (!entry) return
@@ -762,6 +788,17 @@ export function APWindow({
             {tab === 'kinetics' && (
               <APKineticsPanel kinetics={kinetics} setKinetics={setKinetics} />
             )}
+            {/* Post-detection: optional grouping of closely-spaced
+                spikes into trains. Off by default; useful for picking
+                out high-frequency bursts inside long current-clamp
+                steps. Train data is derived live from ``perSpike``,
+                so manual add/remove updates the assignments without
+                a re-run. */}
+            <TrainOptions
+              module="ap"
+              group={group}
+              series={series}
+            />
           </div>
           {/* Pinned footer: Run controls + error banner.
               Primary: Run. Secondary (smaller): Clear, Clear edits.
@@ -932,6 +969,7 @@ export function APWindow({
                   onAddSpike={(t) => addManualAPSpike(group, series, previewSweep, t)}
                   onRemoveSpikeAt={(t) => removeManualAPSpikeAt(group, series, previewSweep, t)}
                   showBounds={showBounds}
+                  trainsForSweep={trainData.summariesBySweep.get(previewSweep) ?? []}
                 />
               </div>
               {/* Overlay subplots — one per selected overlay channel.
@@ -1042,6 +1080,14 @@ export function APWindow({
               previewSweep={previewSweep}
               setPreviewSweep={setPreviewSweep}
               heightSignal={topHeight}
+              trainsEnabled={trainsEnabled}
+              trains={trainData.flatSummaries}
+              onExportTrains={() => exportApTrainsCSV(
+                trainData.flatSummaries,
+                effectiveTrainParams,
+                fileInfo?.fileName ?? 'recording',
+                group, series,
+              )}
             />
           </div>
           <div style={{
@@ -1062,6 +1108,7 @@ export function APWindow({
               }}
               selectedSpikeSet={selectedSpikeSet}
               onToggleSpike={toggleSpikeSelected}
+              trainIdByIdx={trainsEnabled ? trainData.idByGlobalIdx : null}
             />
           </div>
         </div>
@@ -1419,6 +1466,7 @@ function APRheobasePanel({
 
 function APCountingPanel({
   entry, previewSweep, setPreviewSweep, heightSignal,
+  trainsEnabled, trains, onExportTrains,
 }: {
   entry: APData | undefined
   previewSweep: number
@@ -1427,7 +1475,30 @@ function APCountingPanel({
    *  drag (flexbox layout updates don't always trigger uPlot's
    *  internal ResizeObserver predictably). */
   heightSignal?: number
+  /** Train-grouping form state from the parent — drives whether the
+   *  Trains sub-tab on the right column has anything to show. */
+  trainsEnabled: boolean
+  /** Per-train summaries computed in the parent. Always passed (the
+   *  Trains sub-tab handles the disabled / empty cases inline). */
+  trains: Array<TrainSummary & { sweep: number }>
+  onExportTrains: () => void
 }) {
+  // Sub-tab inside the LEFT column (the results table): per-sweep
+  // counting (default) or per-train summary. Auto-switches to Trains
+  // on the rising edge of "grouping enabled AND produced clusters"
+  // so flipping the sidebar checkbox drops you right into the
+  // result; bounces back to per-sweep when grouping is turned off.
+  const [resultTab, setResultTab] = useState<'sweeps' | 'trains'>('sweeps')
+  const trainsAvailable = trainsEnabled && trains.length > 0
+  const lastTrainsAvailRef = useRef(false)
+  useEffect(() => {
+    if (trainsAvailable && !lastTrainsAvailRef.current) setResultTab('trains')
+    lastTrainsAvailRef.current = trainsAvailable
+  }, [trainsAvailable])
+  useEffect(() => {
+    if (!trainsEnabled && resultTab === 'trains') setResultTab('sweeps')
+  }, [trainsEnabled, resultTab])
+
   if (!entry || entry.perSweep.length === 0) {
     return (
       <div style={{
@@ -1441,9 +1512,47 @@ function APCountingPanel({
   }
   return (
     <div style={{ flex: 1, display: 'flex', gap: 6, minHeight: 0 }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <APPerSweepTable entry={entry} previewSweep={previewSweep}
-          onSelectSweep={setPreviewSweep} />
+      <div style={{
+        flex: 1, minWidth: 0,
+        display: 'flex', flexDirection: 'column', gap: 4, minHeight: 0,
+      }}>
+        {/* Sub-tab strip — Per sweep (default) or Trains. */}
+        <div style={{
+          display: 'flex', gap: 2,
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}>
+          {(['sweeps', 'trains'] as const).map((k) => (
+            <button key={k} className="btn"
+              onClick={() => setResultTab(k)}
+              style={{
+                padding: '3px 12px',
+                fontSize: 'var(--font-size-label)',
+                background: resultTab === k
+                  ? 'var(--bg-primary)' : 'transparent',
+                borderBottom: resultTab === k
+                  ? '2px solid var(--accent, #64b5f6)' : '2px solid transparent',
+                borderRadius: '3px 3px 0 0',
+                fontWeight: resultTab === k ? 600 : 400,
+              }}>
+              {k === 'sweeps' ? 'Per sweep'
+                : `Trains${trainsAvailable ? ` (${trains.length})` : ''}`}
+            </button>
+          ))}
+        </div>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          {resultTab === 'sweeps' && (
+            <APPerSweepTable entry={entry} previewSweep={previewSweep}
+              onSelectSweep={setPreviewSweep} />
+          )}
+          {resultTab === 'trains' && (
+            <APTrainsPanel
+              trains={trains}
+              enabled={trainsEnabled}
+              onExport={onExportTrains}
+            />
+          )}
+        </div>
       </div>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
         <APRheobaseBadge entry={entry} />
@@ -1454,6 +1563,177 @@ function APCountingPanel({
       </div>
     </div>
   )
+}
+
+/** Trains tab — full per-train results panel + Export CSV. Mirrors
+ *  the Events window's trains tab. The shaded train bands stay on
+ *  the upper APSweepViewer (shared with the Counting tab) so users
+ *  can flip back and forth between this table and the trace. */
+function APTrainsPanel({
+  trains, enabled, onExport,
+}: {
+  trains: Array<TrainSummary & { sweep: number }>
+  enabled: boolean
+  onExport: () => void
+}) {
+  const sel = useRowSelection(trains.length)
+  const headers = ['Train', 'Sweep', 'Start (s)', 'End (s)', 'Dur (ms)',
+    'n spikes', 'Mean ISI (ms)', 'Intra freq (Hz)']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const t = trains[i]
+    return [
+      `T${t.id + 1}`,
+      t.sweep + 1,
+      t.startS.toFixed(4),
+      t.endS.toFixed(4),
+      t.durationMs.toFixed(2),
+      t.nEvents,
+      t.meanIeiMs != null ? t.meanIeiMs.toFixed(2) : null,
+      t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : null,
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
+  if (!enabled) {
+    return (
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        Train grouping is off. Enable it in the sidebar's "Group into trains"
+        section to cluster closely-spaced spikes.
+      </div>
+    )
+  }
+  if (trains.length === 0) {
+    return (
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        No trains found with the current parameters. Try widening the
+        "Max IEI" or lowering the "Min events / train" threshold.
+      </div>
+    )
+  }
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', gap: 4, minHeight: 0,
+    }}>
+      <div style={{
+        flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '0 2px',
+        fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)',
+      }}>
+        <span>
+          <strong style={{ color: 'var(--text-primary)' }}>{trains.length}</strong> trains
+        </span>
+        <button className="btn"
+          onClick={onExport}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 'var(--font-size-label)',
+            padding: '2px 10px',
+          }}
+          title="Export per-train summary to CSV">
+          Export trains CSV
+        </button>
+      </div>
+      <div style={{
+        flex: 1, border: '1px solid var(--border)', borderRadius: 4,
+        overflow: 'auto', minHeight: 0,
+      }}>
+        <table style={{
+          width: '100%', borderCollapse: 'collapse',
+          fontSize: 'var(--font-size-label)', fontFamily: 'var(--font-mono)',
+        }}>
+          <thead>
+            <tr style={{
+              background: 'var(--bg-secondary)', textAlign: 'left',
+              position: 'sticky', top: 0,
+            }}>
+              {headers.map((h, i) => <Th key={i}>{h}</Th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {trains.map((t, i) => (
+              <tr key={i}
+                onClick={(ev) => sel.onRowClick(i, ev)}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
+                style={{
+                  background: sel.isSelected(i)
+                    ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                    : 'transparent',
+                  cursor: 'pointer',
+                  borderTop: '1px solid var(--border)',
+                }}>
+                <Td><span style={{ color: 'rgba(255,167,38,0.95)' }}>T{t.id + 1}</span></Td>
+                <Td>{t.sweep + 1}</Td>
+                <Td>{t.startS.toFixed(4)}</Td>
+                <Td>{t.endS.toFixed(4)}</Td>
+                <Td>{t.durationMs.toFixed(2)}</Td>
+                <Td>{t.nEvents}</Td>
+                <Td>{t.meanIeiMs != null ? t.meanIeiMs.toFixed(2) : '—'}</Td>
+                <Td>{t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : '—'}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {copyMenu.menu}
+      </div>
+    </div>
+  )
+}
+
+function exportApTrainsCSV(
+  trains: Array<TrainSummary & { sweep: number }>,
+  cfg: TrainParams & { enabled?: boolean },
+  fileName: string,
+  group: number,
+  series: number,
+) {
+  if (trains.length === 0) return
+  const header = [
+    'file', 'group', 'series', 'sweep_index', 'train_id',
+    'start_s', 'end_s', 'duration_ms', 'n_spikes',
+    'mean_isi_ms', 'intra_freq_hz',
+    'metric', 'max_iei_ms', 'min_count',
+    'min_duration_ms', 'min_inter_train_ms',
+    'first_spike_idx', 'last_spike_idx',
+  ]
+  const rows = trains.map((t) => [
+    JSON.stringify(fileName),
+    group, series, t.sweep, t.id + 1,
+    t.startS.toFixed(6), t.endS.toFixed(6), t.durationMs.toFixed(3),
+    t.nEvents,
+    t.meanIeiMs != null ? t.meanIeiMs.toFixed(3) : '',
+    t.intraFreqHz != null ? t.intraFreqHz.toFixed(4) : '',
+    String(cfg.metric),
+    cfg.maxIeiMs,
+    cfg.minCount,
+    cfg.minDurationMs ?? 0,
+    cfg.minInterTrainMs ?? 0,
+    t.memberIndices[0],
+    t.memberIndices[t.memberIndices.length - 1],
+  ])
+  const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  const name = fileName.replace(/\.[^.]+$/, '') + '_ap_trains.csv'
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 function APRheobaseBadge({ entry }: { entry: APData }) {
@@ -1705,6 +1985,7 @@ function APFICurve({
 
 function APKineticsTable({
   entry, onSelectSpike, selectedSpikeSet, onToggleSpike,
+  trainIdByIdx,
 }: {
   entry: APData | undefined
   onSelectSpike: (idx: number) => void
@@ -1714,14 +1995,21 @@ function APKineticsTable({
    *  zoom; this one drives overlay rendering. */
   selectedSpikeSet: Set<number>
   onToggleSpike: (idx: number) => void
+  /** Per-spike train assignment (same length + order as
+   *  ``entry.perSpike``). ``null`` = isolated; integer = global
+   *  train id. When omitted or all-null the Train column is hidden
+   *  so users without grouping enabled don't see an empty column. */
+  trainIdByIdx?: (number | null)[] | null
 }) {
   const sel = useRowSelection(entry?.perSpike.length ?? 0)
-  const headers = ['#', 'Sweep', 'Threshold (mV)', 'Peak (mV)', 'Amp (mV)',
+  const showTrainCol = !!trainIdByIdx && trainIdByIdx.some((v) => v != null)
+  const baseHeaders = ['#', 'Sweep', 'Threshold (mV)', 'Peak (mV)', 'Amp (mV)',
     'Rise (ms)', 'Decay (ms)', 'FWHM (ms)', 'fAHP (mV)', 'mAHP (mV)',
     '+slope', '−slope']
+  const headers = showTrainCol ? [...baseHeaders, 'Train'] : baseHeaders
   const rowToCells = (i: number): Array<string | number | null> => {
     const sp = entry!.perSpike[i]
-    return [
+    const base: Array<string | number | null> = [
       (sp.manual ? '★ ' : '') + (i + 1),
       sp.sweep + 1,
       sp.thresholdVm.toFixed(2),
@@ -1735,6 +2023,11 @@ function APKineticsTable({
       sp.maxRiseSlopeMvMs ?? null,
       sp.maxDecaySlopeMvMs ?? null,
     ]
+    if (showTrainCol) {
+      const tid = trainIdByIdx?.[i]
+      base.push(tid != null ? `T${tid + 1}` : '')
+    }
+    return base
   }
   const copyMenu = useRowCopyMenu({
     selectionCount: sel.selectedIndexes.length,
@@ -1812,6 +2105,13 @@ function APKineticsTable({
                 <Td>{sp.mahpVm != null ? sp.mahpVm.toFixed(2) : '—'}</Td>
                 <Td>{sp.maxRiseSlopeMvMs != null ? sp.maxRiseSlopeMvMs.toFixed(1) : '—'}</Td>
                 <Td>{sp.maxDecaySlopeMvMs != null ? sp.maxDecaySlopeMvMs.toFixed(1) : '—'}</Td>
+                {showTrainCol && (
+                  <Td>
+                    {trainIdByIdx?.[i] != null
+                      ? <span style={{ color: 'rgba(255,167,38,0.95)' }}>T{(trainIdByIdx![i] as number) + 1}</span>
+                      : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                  </Td>
+                )}
               </tr>
             )
           })}
@@ -2202,6 +2502,7 @@ function APSweepViewer({
   onAddSpike,
   onRemoveSpikeAt,
   showBounds,
+  trainsForSweep,
 }: {
   traceTime: number[] | null
   traceValues: number[] | null
@@ -2237,6 +2538,10 @@ function APSweepViewer({
    *  drag-edge / drag-band hit-test is skipped, so click-through
    *  works in the area they normally cover. */
   showBounds: boolean
+  /** Trains computed for the currently previewed sweep. Drawn as
+   *  translucent shaded spans behind the spike markers; empty when
+   *  grouping is off or no clusters qualify. */
+  trainsForSweep: TrainSummary[]
 }) {
   void previewSweep; void totalSweeps; void traceUnits
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2285,11 +2590,52 @@ function APSweepViewer({
   showBoundsRef.current = showBounds
   useEffect(() => { plotRef.current?.redraw() }, [showBounds])
 
+  // Per-sweep trains, mirrored in a ref so the imperative
+  // ``drawOverlays`` callback (registered once on plot init) reads
+  // the latest set without forcing a uPlot rebuild. The redraw is
+  // triggered by the dedicated useEffect below.
+  const trainsRef = useRef<TrainSummary[]>(trainsForSweep)
+  trainsRef.current = trainsForSweep
+  useEffect(() => { plotRef.current?.redraw() }, [trainsForSweep])
+
   const drawOverlays = (u: uPlot) => {
     const ctx = u.ctx
     const dpr = devicePixelRatio || 1
     const top = u.bbox.top
     const bottom = u.bbox.top + u.bbox.height
+
+    // Train spans (drawn first so the bounds band + spike markers all
+    // sit on top). Faint amber band per train spanning [startS, endS]
+    // with a small "T#" label at the upper-left corner — same colour
+    // family as the manual-spike orange so the user reads "this is a
+    // grouping of the spikes inside." Empty when grouping is off.
+    const trains = trainsRef.current
+    if (trains.length > 0) {
+      const trainColor = 'rgba(255,167,38,0.13)'
+      const edgeColor = 'rgba(255,167,38,0.45)'
+      const labelColor = 'rgba(255,167,38,0.95)'
+      ctx.save()
+      ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
+      for (const t of trains) {
+        const a = u.valToPos(t.startS, 'x', true)
+        const b = u.valToPos(t.endS, 'x', true)
+        if (!isFinite(a) || !isFinite(b)) continue
+        const lo = Math.min(a, b)
+        const w = Math.max(1 * dpr, Math.abs(b - a))
+        ctx.fillStyle = trainColor
+        ctx.fillRect(lo, top, w, bottom - top)
+        ctx.strokeStyle = edgeColor
+        ctx.lineWidth = 1 * dpr
+        ctx.beginPath()
+        ctx.moveTo(a, top); ctx.lineTo(a, bottom)
+        ctx.moveTo(b, top); ctx.lineTo(b, bottom)
+        ctx.stroke()
+        ctx.fillStyle = labelColor
+        ctx.fillText(`T${t.id + 1}`, lo + 3 * dpr, top + 12 * dpr)
+      }
+      ctx.restore()
+    }
+
     // Bounds bands — translucent blue, label inside.
     const drawBand = (x0: number, x1: number, color: string, label: string) => {
       const px0 = u.valToPos(x0, 'x', true)

@@ -538,6 +538,7 @@ const ANALYSIS_WINDOW_TITLES: Record<string, string> = {
   resistance: 'Rs / Rin / Cm',
   iv: 'I-V Curve',
   action_potential: 'Action Potentials',
+  paired: 'Paired Recording',
   events: 'Event Detection',
   // Sub-windows of Event Detection — open via a button in the main
   // events window. Open at the same time as the parent (keyed by

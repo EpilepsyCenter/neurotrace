@@ -87,6 +87,7 @@ const ANALYSIS_LABELS: Record<string, string> = {
   iv_curves: 'I-V Curve',
   bursts: 'Bursts',
   cursors: 'Cursor Measurements',
+  paired: 'Paired Recording',
   fpsp_io: 'fPSP — Input-Output',
   fpsp_ppr: 'fPSP — Paired-Pulse Ratio',
   fpsp_ltp: 'fPSP — LTP / LTD',

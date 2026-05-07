@@ -96,9 +96,11 @@ def _descriptives(values: list[float]) -> dict:
 
 def _shapiro(values: list[float]) -> dict:
     """Shapiro-Wilk normality. Returns p plus a verdict. Skipped
-    (verdict 'unknown') when n < 3 (Pingouin requires that)."""
+    (verdict 'unknown') when n < 4 — pingouin's ``normality``
+    asserts ``data.size > 3`` so anything below that crashes the
+    request with an unhelpful 500."""
     n = len(values)
-    if n < 3:
+    if n < 4:
         return {'n': n, 'p': None, 'is_normal': None, 'verdict': 'unknown'}
     df = pg.normality(np.array(values, dtype=float))
     p = float(df.iloc[0]['pval'])

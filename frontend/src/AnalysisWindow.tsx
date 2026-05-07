@@ -20,6 +20,8 @@ const CursorAnalysisWindow = lazy(() =>
   import('./components/AnalysisWindows/CursorAnalysisWindow').then((m) => ({ default: m.CursorAnalysisWindow })))
 const APWindow = lazy(() =>
   import('./components/AnalysisWindows/APWindow').then((m) => ({ default: m.APWindow })))
+const PairedWindow = lazy(() =>
+  import('./components/AnalysisWindows/PairedWindow').then((m) => ({ default: m.PairedWindow })))
 const EventDetectionWindow = lazy(() =>
   import('./components/AnalysisWindows/EventDetectionWindow').then((m) => ({ default: m.EventDetectionWindow })))
 const EventsTemplateGeneratorWindow = lazy(() =>
@@ -169,6 +171,12 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.eventsAnalyses) {
             useAppStore.setState({ eventsAnalyses: ev.data.eventsAnalyses })
           }
+          if (ev.data.pairedAnalyses) {
+            useAppStore.setState({ pairedAnalyses: ev.data.pairedAnalyses })
+          }
+          if (ev.data.pairedForm) {
+            useAppStore.setState({ pairedForm: ev.data.pairedForm })
+          }
           if (ev.data.eventsTemplates) {
             useAppStore.setState({ eventsTemplates: ev.data.eventsTemplates })
           }
@@ -221,6 +229,14 @@ export function AnalysisWindow({ view }: { view: string }) {
         if (ev.data?.type === 'ap-update' && ev.data.apAnalyses) {
           useAppStore.setState({ apAnalyses: ev.data.apAnalyses })
         }
+        if (ev.data?.type === 'paired-update') {
+          if (ev.data.pairedAnalyses) {
+            useAppStore.setState({ pairedAnalyses: ev.data.pairedAnalyses })
+          }
+          if (ev.data.pairedForm) {
+            useAppStore.setState({ pairedForm: ev.data.pairedForm })
+          }
+        }
         if (ev.data?.type === 'resistance-update' && ev.data.resistanceResults) {
           useAppStore.setState({ resistanceResults: ev.data.resistanceResults })
         }
@@ -268,6 +284,7 @@ export function AnalysisWindow({ view }: { view: string }) {
     resistance: 'Rs / Rin / Cm',
     iv: 'I-V Curve',
     action_potential: 'Action Potentials',
+    paired: 'Paired Recording',
     events: 'Event Detection',
     events_template_generator: 'Events — Template Generator',
     events_template_refinement: 'Events — Refine Template',
@@ -389,6 +406,13 @@ export function AnalysisWindow({ view }: { view: string }) {
             mainGroup={mainGroup}
             mainSeries={mainSeries}
             mainTrace={mainTrace}
+          />
+        ) : view === 'paired' ? (
+          <PairedWindow
+            backendUrl={backendUrl}
+            fileInfo={fileInfo}
+            mainGroup={mainGroup}
+            mainSeries={mainSeries}
           />
         ) : view === 'events' ? (
           <EventDetectionWindow

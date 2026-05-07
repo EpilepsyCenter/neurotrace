@@ -156,6 +156,9 @@ export function AnalysisWindow({ view }: { view: string }) {
           if (ev.data.burstFormParams) {
             useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
           }
+          if (ev.data.trainParams) {
+            useAppStore.setState({ trainParams: ev.data.trainParams })
+          }
           if (ev.data.ivCurves) {
             useAppStore.setState({ ivCurves: ev.data.ivCurves })
           }
@@ -260,6 +263,12 @@ export function AnalysisWindow({ view }: { view: string }) {
         // the main window pushing freshly-loaded prefs on file open).
         if (ev.data?.type === 'burst-form-params-update' && ev.data.burstFormParams) {
           useAppStore.setState({ burstFormParams: ev.data.burstFormParams })
+        }
+        // Train-grouping params from any window — keep this window's
+        // store in sync so the TrainOptions sidepanel rehydrates and
+        // the live `useMemo`-driven train overlay picks up changes.
+        if (ev.data?.type === 'train-params-update' && ev.data.trainParams) {
+          useAppStore.setState({ trainParams: ev.data.trainParams })
         }
         // Scale overrides changed elsewhere → adopt into this window's
         // store. Analysis windows fetch their own trace data on every

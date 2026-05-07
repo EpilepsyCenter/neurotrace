@@ -47,6 +47,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from .trains import group_into_trains
+
 # Recording extensions that carry a ``.neurotrace`` sidecar. Mirrors
 # ``RECORDING_EXTENSIONS`` in ``electron/main.ts`` so a cohort scan
 # sees the same files the metadata window does.
@@ -154,6 +156,167 @@ def _within_sweep_intervals_ms(events: list[dict],
 
 
 # ---------------------------------------------------------------------
+# Train grouping (post-detection cluster of closely spaced events)
+# ---------------------------------------------------------------------
+
+def _train_params_for(
+    sidecar: dict,
+    module: str,
+    group: Any,
+    series: Any,
+) -> Optional[dict]:
+    """Pull the per-series train-detection params from the sidecar's
+    ``train_params`` block. Returns ``None`` when the user hasn't
+    enabled grouping for this slice — callers skip the train work.
+
+    Sidecar keys are camelCase (``maxIeiMs``, ``minCount`` …); we
+    translate to the snake_case kwargs ``group_into_trains`` expects.
+    """
+    if group is None or series is None:
+        return None
+    block = (sidecar.get('train_params') or {}).get(module) or {}
+    raw = block.get(f'{int(group)}:{int(series)}')
+    if not raw or not raw.get('enabled'):
+        return None
+    return {
+        'metric': raw.get('metric', 'gap'),
+        'max_iei_ms': float(raw.get('maxIeiMs') or 0.0),
+        'min_count': int(raw.get('minCount') or 2),
+        'min_duration_ms': float(raw.get('minDurationMs') or 0.0),
+        'min_inter_train_ms': float(raw.get('minInterTrainMs') or 0.0),
+    }
+
+
+def _trains_per_sweep(
+    items: list[dict],
+    *,
+    sweep_key: str,
+    t_key: str,
+    t_start_key: Optional[str] = None,
+    t_end_key: Optional[str] = None,
+    cfg: dict,
+) -> tuple[list[Optional[int]], list[dict]]:
+    """Walk events grouped by sweep, sort each group, run
+    ``group_into_trains`` per sweep, and renumber train IDs globally
+    so the returned summaries are unique across the whole cell. Same
+    contract as ``frontend/src/utils/burstTrains.ts`` etc., so cohort
+    metrics agree with the on-screen labels.
+
+    Returns ``(train_id_per_global_idx, flat_summaries)`` where
+    ``flat_summaries[i]`` carries an extra ``sweep`` key to identify
+    the sweep the train belongs to.
+    """
+    n = len(items)
+    train_id_by_idx: list[Optional[int]] = [None] * n
+    flat: list[dict] = []
+    if n < 2:
+        return train_id_by_idx, flat
+
+    # Bucket global indices by sweep.
+    indices_by_sweep: dict[int, list[int]] = {}
+    for gi, e in enumerate(items):
+        sw = e.get(sweep_key)
+        if sw is None:
+            continue
+        try:
+            sw_int = int(sw)
+        except (TypeError, ValueError):
+            continue
+        indices_by_sweep.setdefault(sw_int, []).append(gi)
+
+    counter = 0
+    for sw in sorted(indices_by_sweep.keys()):
+        sweep_idxs = indices_by_sweep[sw]
+        # Sort by t (defensive: manual edits, importer quirks).
+        sweep_idxs.sort(key=lambda gi: items[gi].get(t_key, 0.0) or 0.0)
+        train_events: list[dict] = []
+        for gi in sweep_idxs:
+            ev: dict = {'t': float(items[gi].get(t_key, 0.0) or 0.0)}
+            if t_start_key is not None:
+                v = items[gi].get(t_start_key)
+                if v is not None:
+                    ev['t_start'] = float(v)
+            if t_end_key is not None:
+                v = items[gi].get(t_end_key)
+                if v is not None:
+                    ev['t_end'] = float(v)
+            train_events.append(ev)
+        _, summaries = group_into_trains(train_events, **cfg)
+        for orig in summaries:
+            new_id = counter
+            counter += 1
+            remapped_members = [sweep_idxs[li] for li in orig['member_indices']]
+            for gi in remapped_members:
+                train_id_by_idx[gi] = new_id
+            flat.append({
+                **orig,
+                'id': new_id,
+                'member_indices': remapped_members,
+                'sweep': sw,
+            })
+    return train_id_by_idx, flat
+
+
+def _train_metrics(
+    flat_summaries: list[dict],
+    train_id_by_idx: list[Optional[int]],
+    n_items: int,
+    duration_s: float,
+) -> tuple[dict, dict]:
+    """Build the (scalars, distributions) bundles that get merged into
+    each extractor's output when train grouping is enabled. Same
+    metric names across modules so cohort plots / stats / export pick
+    them up uniformly. Caller decides whether to publish them; this
+    function never returns ``None`` so the keys are always present
+    once the helper is called."""
+    n_trains = len(flat_summaries)
+    durations_ms = [t['duration_ms'] for t in flat_summaries]
+    n_events_per_train = [float(t['n_events']) for t in flat_summaries]
+    intra_iei_ms: list[float] = []  # all within-train IEIs, flattened
+    intra_freq_hz: list[float] = []
+    inter_iei_ms: list[float] = []  # gap end→start between consecutive trains in same sweep
+    for t in flat_summaries:
+        if t.get('mean_iei_ms') is not None:
+            intra_iei_ms.append(float(t['mean_iei_ms']))
+        if t.get('intra_freq_hz') is not None:
+            intra_freq_hz.append(float(t['intra_freq_hz']))
+    # Per-sweep inter-train gap.
+    by_sweep: dict[int, list[tuple[float, float]]] = {}
+    for t in flat_summaries:
+        by_sweep.setdefault(int(t.get('sweep', 0)), []).append(
+            (float(t['start_s']), float(t['end_s']))
+        )
+    for spans in by_sweep.values():
+        spans.sort()
+        for (_, e1), (s2, _) in zip(spans, spans[1:]):
+            gap = (s2 - e1) * 1000.0
+            if gap >= 0:
+                inter_iei_ms.append(gap)
+
+    n_in_trains = sum(1 for x in train_id_by_idx if x is not None)
+    fraction_in_trains = (n_in_trains / n_items) if n_items > 0 else None
+    train_rate_per_min = (n_trains / (duration_s / 60.0)) if duration_s > 0 else None
+
+    scalars: dict[str, Optional[float]] = {
+        'n_trains': float(n_trains),
+        'n_events_in_trains': float(n_in_trains),
+        'fraction_events_in_trains': fraction_in_trains,
+        'train_rate_per_min': train_rate_per_min,
+        'mean_events_per_train': _mean(n_events_per_train),
+        'mean_train_duration_ms': _mean(durations_ms),
+        'mean_intra_train_iei_ms': _mean(intra_iei_ms),
+        'mean_intra_train_freq_hz': _mean(intra_freq_hz),
+    }
+    distributions: dict[str, list[float]] = {
+        'events_per_train': _clean(n_events_per_train),
+        'train_durations_ms': _clean(durations_ms),
+        'intra_train_iei_ms': _clean(intra_iei_ms),
+        'inter_train_iei_ms': _clean(inter_iei_ms),
+    }
+    return scalars, distributions
+
+
+# ---------------------------------------------------------------------
 # Events extractor (spontaneous events / minis / sPSCs)
 # ---------------------------------------------------------------------
 
@@ -215,6 +378,31 @@ def extract_events(slice_data: dict, sidecar: dict) -> CellExtraction:
         # auto-min control: per-distribution non-null count.
         'distribution_counts': {k: len(v) for k, v in distributions.items()},
     }
+
+    # Optional train grouping — recomputed from the user's sidecar
+    # params so cohort metrics match the on-screen labels exactly. No
+    # work when the user hasn't enabled grouping for this slice.
+    cfg = _train_params_for(sidecar, 'events',
+                            slice_data.get('group'), slice_data.get('series'))
+    if cfg is not None:
+        train_ids, train_summaries = _trains_per_sweep(
+            events,
+            sweep_key='sweep',
+            t_key='peakTimeS',
+            cfg=cfg,
+        )
+        t_scalars, t_dists = _train_metrics(
+            train_summaries, train_ids, n_events, total_s,
+        )
+        scalars.update(t_scalars)
+        distributions.update(t_dists)
+        meta['distribution_counts'] = {k: len(v) for k, v in distributions.items()}
+        meta['train_params'] = {
+            'metric': cfg['metric'], 'max_iei_ms': cfg['max_iei_ms'],
+            'min_count': cfg['min_count'],
+            'min_duration_ms': cfg['min_duration_ms'],
+            'min_inter_train_ms': cfg['min_inter_train_ms'],
+        }
 
     return CellExtraction(scalars=scalars, distributions=distributions, meta=meta)
 
@@ -293,6 +481,34 @@ def extract_ap(slice_data: dict, sidecar: dict) -> CellExtraction:
         'rheobase_mode': rheobase.get('mode'),
         'distribution_counts': {k: len(v) for k, v in distributions.items()},
     }
+
+    # Optional train grouping on the per-spike list. AP recordings are
+    # short bursts inside long current pulses, so the duration scalar
+    # uses the union of analysed-sweep windows when known; otherwise
+    # falls back to span(peakT) so train_rate_per_min stays sensible.
+    cfg = _train_params_for(sidecar, 'ap',
+                            slice_data.get('group'), slice_data.get('series'))
+    if cfg is not None:
+        train_ids, train_summaries = _trains_per_sweep(
+            per_spike,
+            sweep_key='sweep',
+            t_key='peakT',
+            cfg=cfg,
+        )
+        peak_ts = [s.get('peakT') for s in per_spike if s.get('peakT') is not None]
+        duration_s = (max(peak_ts) - min(peak_ts)) if len(peak_ts) >= 2 else 0.0
+        t_scalars, t_dists = _train_metrics(
+            train_summaries, train_ids, len(per_spike), float(duration_s),
+        )
+        scalars.update(t_scalars)
+        distributions.update(t_dists)
+        meta['distribution_counts'] = {k: len(v) for k, v in distributions.items()}
+        meta['train_params'] = {
+            'metric': cfg['metric'], 'max_iei_ms': cfg['max_iei_ms'],
+            'min_count': cfg['min_count'],
+            'min_duration_ms': cfg['min_duration_ms'],
+            'min_inter_train_ms': cfg['min_inter_train_ms'],
+        }
 
     return CellExtraction(scalars=scalars, distributions=distributions, meta=meta)
 
@@ -419,6 +635,41 @@ def extract_bursts(slice_data: dict, sidecar: dict) -> CellExtraction:
         'n_bursts_total': n_bursts,
         'distribution_counts': {k: len(v) for k, v in distributions.items()},
     }
+
+    # Optional super-burst grouping (clusters of closely-spaced field
+    # bursts). Default metric for bursts is "gap" — end-to-start —
+    # since extended events with long quiet stretches between them
+    # shouldn't merge just because their peaks are close in time.
+    cfg = _train_params_for(sidecar, 'bursts',
+                            slice_data.get('group'), slice_data.get('series'))
+    if cfg is not None:
+        train_ids, train_summaries = _trains_per_sweep(
+            bursts,
+            sweep_key='sweepIndex',
+            t_key='peakTimeS',
+            t_start_key='startS',
+            t_end_key='endS',
+            cfg=cfg,
+        )
+        # Burst recordings are continuous; use the span of detected
+        # bursts as the duration scalar so train_rate_per_min has a
+        # sensible denominator. If the sidecar grew a totalLengthS for
+        # bursts later, prefer that.
+        starts = [b.get('startS') for b in bursts if b.get('startS') is not None]
+        ends = [b.get('endS') for b in bursts if b.get('endS') is not None]
+        duration_s = (max(ends) - min(starts)) if (starts and ends) else 0.0
+        t_scalars, t_dists = _train_metrics(
+            train_summaries, train_ids, n_bursts, float(duration_s),
+        )
+        scalars.update(t_scalars)
+        distributions.update(t_dists)
+        meta['distribution_counts'] = {k: len(v) for k, v in distributions.items()}
+        meta['train_params'] = {
+            'metric': cfg['metric'], 'max_iei_ms': cfg['max_iei_ms'],
+            'min_count': cfg['min_count'],
+            'min_duration_ms': cfg['min_duration_ms'],
+            'min_inter_train_ms': cfg['min_inter_train_ms'],
+        }
 
     return CellExtraction(scalars=scalars, distributions=distributions, meta=meta)
 

@@ -121,6 +121,21 @@ export function IVCurveWindow({
     if (entry.manualImEndS != null) setManualImEndS(entry.manualImEndS)
     if (entry.manualImStartPA != null) setManualImStartPA(entry.manualImStartPA)
     if (entry.manualImStepPA != null) setManualImStepPA(entry.manualImStepPA)
+    // Restore the cursor windows the original run used. Without
+    // this, the cursors stay at whatever the main TraceViewer
+    // currently shows — typically the defaults — and the next Run
+    // computes points off a different baseline / peak window than
+    // the one the saved curve was generated from. ``updateCursors``
+    // also broadcasts so the main viewer's bands move in lockstep.
+    if (entry.baselineStartS != null && entry.baselineEndS != null
+        && entry.peakStartS != null && entry.peakEndS != null) {
+      updateCursors({
+        baselineStart: entry.baselineStartS,
+        baselineEnd:   entry.baselineEndS,
+        peakStart:     entry.peakStartS,
+        peakEnd:       entry.peakEndS,
+      })
+    }
   }, [entry, key])
 
   // Mode + per-sweep range controls. "all" runs every sweep; "range" runs a
@@ -310,23 +325,14 @@ export function IVCurveWindow({
       manualImEndS,
       manualImStartPA,
       manualImStepPA,
-    })
-    // Stamp form state onto the entry so the sidecar persists it and
-    // the rehydration effect below restores it on reopen.
-    useAppStore.setState((s) => {
-      const e = s.ivCurves[`${group}:${series}`]
-      if (!e) return s
-      return {
-        ivCurves: {
-          ...s.ivCurves,
-          [`${group}:${series}`]: {
-            ...e,
-            runMode, sweepFrom, sweepTo, sweepOne,
-            manualImEnabled, manualImStartS, manualImEndS,
-            manualImStartPA, manualImStepPA,
-          },
-        },
-      }
+      // Form-state passes through the action now and lands on the
+      // stored entry inside ``runIVCurve`` itself; the broadcast
+      // afterwards carries it to the main window's store and from
+      // there to the sidecar auto-save. Replaces the old local
+      // ``useAppStore.setState`` stamp which only updated the
+      // analysis window's OWN store and was therefore invisible to
+      // the sidecar persistence path.
+      runMode, sweepFrom, sweepTo, sweepOne,
     })
   }
   const onSelectRow = (idx: number) => {
@@ -882,21 +888,36 @@ function IVPlot({
 
     const xLabel = `Stim${entry.stimUnit ? ` (${entry.stimUnit})` : ''}`
     const yLabel = `Response Δ${entry.responseUnit ? ` (${entry.responseUnit})` : ''}`
+    // Compute x/y ranges ourselves and feed them via static `range`
+    // callbacks. uPlot's auto-range was producing a degenerate scale
+    // on the reopen path (xScale.min/max coming back null) — the data
+    // is identical to the fresh-Run path that works, but something in
+    // uPlot's setScales pipeline doesn't pick it up. Skipping the
+    // auto-range entirely makes the curve render reliably either way.
+    const xMin = xs[0]
+    const xMax = xs[xs.length - 1]
+    const xPad = (xMax - xMin) * 0.05 || 1
+    let yMinD = Infinity, yMaxD = -Infinity
+    for (const v of ys) {
+      if (v < yMinD) yMinD = v
+      if (v > yMaxD) yMaxD = v
+    }
+    for (const v of yFit) {
+      if (v != null) {
+        if (v < yMinD) yMinD = v
+        if (v > yMaxD) yMaxD = v
+      }
+    }
+    const yLo = Math.min(0, yMinD)
+    const yHi = Math.max(0, yMaxD)
+    const yPad = (yHi - yLo) * 0.1 || 1
     const opts: uPlot.Options = {
       width: el.clientWidth || 400,
       height: Math.max(120, el.clientHeight || 180),
       legend: { show: false },
       scales: {
-        x: { time: false },
-        y: {
-          range: (_u, dMin, dMax) => {
-            // Pad the range and include zero so reversal is visible.
-            const lo = Math.min(0, dMin)
-            const hi = Math.max(0, dMax)
-            const pad = (hi - lo) * 0.1 || 1
-            return [lo - pad, hi + pad]
-          },
-        },
+        x: { time: false, range: () => [xMin - xPad, xMax + xPad] },
+        y: { range: () => [yLo - yPad, yHi + yPad] },
       },
       axes: [
         {
@@ -947,12 +968,19 @@ function IVPlot({
     const ro = new ResizeObserver(() => {
       const u = plotRef.current
       if (!u || !el) return
-      u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      const w = el.clientWidth, h = el.clientHeight
+      // Skip 0-size invalidations — happens briefly on layout
+      // transitions (display: none toggles, parent flex reflow).
+      // Calling setSize with 0×0 makes the canvas invisible and
+      // uPlot doesn't recover when a real size arrives later.
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     })
     ro.observe(el)
     const onWin = () => {
       const u = plotRef.current
-      if (u && el) u.setSize({ width: el.clientWidth, height: el.clientHeight })
+      if (!u || !el) return
+      const w = el.clientWidth, h = el.clientHeight
+      if (w > 0 && h > 0) u.setSize({ width: w, height: h })
     }
     window.addEventListener('resize', onWin)
     return () => {
@@ -961,8 +989,14 @@ function IVPlot({
       plotRef.current?.destroy()
       plotRef.current = null
     }
+    // Depend on ``entry`` directly (rather than its sub-properties)
+    // so any change — including the initial undefined → loaded
+    // transition on file-reopen — guarantees a rebuild. The earlier
+    // sub-property dep list was too clever and missed the reopen
+    // path; the rebuild is cheap (a handful of points), so the
+    // occasional extra fire on selection changes is fine.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry?.points, entry?.responseMetric, entry?.stimUnit, entry?.responseUnit])
+  }, [entry])
 
   // Re-fit size synchronously on splitter drag.
   useEffect(() => {
@@ -976,6 +1010,7 @@ function IVPlot({
     plotRef.current?.redraw()
   }, [entry?.selectedIdx])
 
+  void sweepByIdx  // kept for potential future use
   if (!entry || xs.length === 0) {
     return (
       <div style={{
@@ -994,8 +1029,6 @@ function IVPlot({
       </div>
     )
   }
-
-  void sweepByIdx  // kept for potential future use
   return (
     <div
       onContextMenu={onContextMenu}

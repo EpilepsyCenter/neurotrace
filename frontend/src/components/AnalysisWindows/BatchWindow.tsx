@@ -73,6 +73,15 @@ interface SidecarShape {
     peakStart: number; peakEnd: number
     fitStart: number; fitEnd: number
   }
+  /** Per-module train-grouping form state, keyed by ``${group}:
+   *  ${series}``. Batch propagates the template's value for each
+   *  recipe to the matched target's sidecar so cohort metrics are
+   *  computed consistently across the cohort. */
+  train_params?: {
+    bursts?: Record<string, AnyBlob>
+    events?: Record<string, AnyBlob>
+    ap?: Record<string, AnyBlob>
+  }
 }
 
 interface TargetEntry {
@@ -174,6 +183,14 @@ export interface BatchRecipe {
   cursors: { baselineStart: number; baselineEnd: number;
              peakStart: number; peakEnd: number;
              fitStart: number; fitEnd: number } | null
+  /** Snapshot of the template's ``train_params`` for the matching
+   *  module + ``${group}:${series}``. Only populated for analyses
+   *  that support train grouping (events / bursts / ap); ``null``
+   *  for everything else. The runner writes this onto the target's
+   *  store after the recipe runs so the next sidecar save persists
+   *  it — cohort then sees consistent train params across the
+   *  whole batch. */
+  trainParams: AnyBlob | null
 }
 
 /** Parse an analysis-storage key into its (group, series, subtype)
@@ -286,12 +303,25 @@ export function extractRecipes(sidecar: SidecarShape): {
       const cursors = (type === 'resistance' && sidecar.cursors)
         ? { ...sidecar.cursors }
         : null
+      // Train-grouping params travel alongside the analysis params
+      // for the three modules that support it. Map analysis_type →
+      // train module key (events / bursts / ap; others are null).
+      const trainModule: 'events' | 'bursts' | 'ap' | null =
+        type === 'events' ? 'events'
+        : type === 'bursts' ? 'bursts'
+        : type === 'ap' ? 'ap'
+        : null
+      const trainParams: AnyBlob | null = trainModule
+        ? ((sidecar.train_params?.[trainModule]?.[groupSeries] as AnyBlob | undefined) ?? null)
+        : null
+
       // Emit one recipe per tag on the series — multiple tags = the
       // recipe matches any of those tags on a target file.
       for (const tag of tags) {
         recipes.push({
           tag, analysisType: type, sourceKey: key,
           subtype, params, channel, secondaryTags, cursors,
+          trainParams,
         })
       }
     }
@@ -767,6 +797,9 @@ export function BatchWindow({ backendUrl }: Props) {
         manualEdits,
         measureKinetics,
       )
+      if (item.recipe.trainParams) {
+        useAppStore.getState().setTrainParams('ap', g, s, item.recipe.trainParams as any)
+      }
     })
   }, [forEachMatch, appRunAP])
 
@@ -803,6 +836,9 @@ export function BatchWindow({ backendUrl }: Props) {
     await forEachMatch(item, fileFraction, async (g, s) => {
       const channel = item.recipe.channel ?? 0
       await appRunBursts(g, s, channel, params)
+      if (item.recipe.trainParams) {
+        useAppStore.getState().setTrainParams('bursts', g, s, item.recipe.trainParams as any)
+      }
     })
   }, [forEachMatch, appRunBursts])
 
@@ -1058,6 +1094,11 @@ export function BatchWindow({ backendUrl }: Props) {
       }
       // eslint-disable-next-line no-await-in-loop
       await appRunEvents(g, s, channel, seedSweep, params, template, partFrac)
+      // Propagate the template's train-grouping params (if any) so
+      // the cohort extractor on this target sees the same grouping.
+      if (item.recipe.trainParams) {
+        useAppStore.getState().setTrainParams('events', g, s, item.recipe.trainParams as any)
+      }
     }
   }, [appRunEvents, eventsTemplates])
 

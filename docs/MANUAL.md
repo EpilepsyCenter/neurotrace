@@ -3931,3 +3931,205 @@ than per-recording.
   you get the numbers, not the verbal interpretation.
 
 ---
+
+## 21. Train Grouping (events, APs, bursts)
+
+**Train Grouping** is a cross-cutting feature shared by the Action
+Potentials, Event Detection, and Burst Detection windows. Once a
+module has produced a list of detected events, it can optionally
+cluster the closely-spaced ones into *trains* — multi-event groups
+the user wants to count, measure, and compare separately from
+isolated events. Off by default; flip a single sidebar checkbox in
+any of the three windows to turn it on.
+
+The grouping is purely post-detection. Toggling it on does **not**
+re-run detection: the algorithm walks the existing list of
+timestamps, walks consecutive pairs, and labels every cluster
+whose inter-event intervals fall under your threshold. Manual
+edits — adding or deleting an event with a click — instantly
+refresh the train assignments without going back to the backend.
+
+### When to use this
+
+- Identifying *epileptiform clusters*: groups of field bursts that
+  fire close together, separated by quiet stretches.
+- Picking out *high-frequency AP bursts* inside a long
+  current-clamp depolarisation, distinct from the steady tonic
+  firing of an adapting cell.
+- Detecting *barrages* of synaptic events from a single release
+  site or evoked train, separately from the spontaneous baseline.
+- Per-cell metrics for cohort comparison: how often does each cell
+  produce a train, how many events on average, how high is the
+  intra-train frequency.
+
+If the only thing you need is "how often does *anything* fire", the
+plain detection numbers are enough. Trains are for the question
+*"how often does it fire **a lot at once**?"*
+
+### The sidebar panel
+
+The same `Group into trains` panel appears in all three windows
+— it lives below the detection-method controls so it reads as a
+post-processing step.
+
+- **Group into trains** — the master checkbox. Off by default; no
+  trains are computed and no extra UI shows.
+- **Metric** — *Gap (end → start)* or *Peak-to-peak*. Bursts
+  default to **Gap** because they are extended events: a long
+  burst followed by a long silence shouldn't merge with the next
+  burst just because their peaks are close in time. Events and
+  APs default to **Peak-to-peak** because they are point events
+  and the literature convention is peak-time differences.
+- **Max IEI (ms)** — the threshold below which two consecutive
+  events count as belonging to the same train. Defaults: bursts
+  500 ms, events 50 ms, APs 20 ms.
+- **Min events / train** — clusters with fewer than this many
+  events are dropped (returned as isolated events). Default 2 for
+  bursts, 3 for events and APs.
+- **Min duration (ms)** — drop trains shorter than this in total
+  span. 0 disables the floor (default).
+- **Min silence (ms)** — after the initial pass, two trains
+  separated by less than this gap get merged into one. 0 disables
+  the merge (default).
+
+A small inline warning appears under the Burst-window panel when
+**Max IEI** is set below the detection's own `min_gap_ms` —
+adjacent bursts under that threshold are already merged upstream
+into a single burst, so they cannot cluster into a train. Raise
+**Max IEI** above `min_gap_ms` to make grouping meaningful.
+
+### How the algorithm works
+
+Single forward pass, sweep by sweep. Trains never cross sweep
+boundaries — different sweeps are different trials. Within each
+sweep, events are sorted by time (defensive against manual edits
+landing out of order), then walked pair-by-pair: while consecutive
+IEIs stay under **Max IEI**, the train grows; once an IEI exceeds
+the threshold the train closes. Candidates shorter than **Min
+events / train** or **Min duration** are discarded. Finally, if
+**Min silence** is non-zero, a merge sweep glues adjacent trains
+whose end-to-start gap falls below it.
+
+Train IDs are global per series (T1, T2, … across all sweeps), so
+the on-screen labels match the CSV `train_id` column exactly.
+
+### Visualisation on the trace
+
+When grouping is on, every sweep viewer (Burst, Event, AP) paints
+a faint amber band across each train's `[start_s, end_s]` range,
+with a small `T#` label at the upper-left corner. The bands sit
+*behind* the per-event markers so the markers stay readable. The
+amber colour matches the manual-event ring colour throughout the
+app — the visual story is *"this is a higher-level grouping of the
+events you already see."*
+
+The bands refresh live on every change: enabling the checkbox,
+editing **Max IEI**, adding or removing a manual event, switching
+sweeps. None of these triggers a re-detection.
+
+### Tables and CSV exports
+
+Each module surfaces the grouping in two places:
+
+- **Per-event table** — gains a `Train` column showing `T1`, `T2`,
+  …, or `—` for isolated events. Hidden when grouping is off so
+  users without the feature don't see an empty column.
+- **Per-train summary** — shown alongside the per-event table.
+  Burst window: a compact card directly above the bursts table.
+  Event window: a dedicated **Trains** sub-tab next to **Results**.
+  AP window: a sub-tab strip in the Counting tab (**Per sweep** /
+  **Trains**) that swaps the per-sweep counting table for the
+  per-train summary. Each train summary lists `Train | Sweep |
+  Start | End | Dur | n events | Mean IEI | Intra freq`.
+
+CSV exports follow the same split:
+
+- The main per-event CSV gains a trailing `train_id` column (1-based,
+  blank for isolated events or when grouping is off). The button
+  is the same `Export CSV` you already use; nothing about the
+  workflow changes.
+- A second `Export trains CSV` button writes a per-train summary
+  file (`*_event_trains.csv`, `*_burst_trains.csv`,
+  `*_ap_trains.csv`) — one row per train, with the IEI / duration
+  / frequency stats *plus* the train-detection parameters used
+  to derive them. The parameter columns at the right let someone
+  reading the CSV later reproduce the train list without your
+  sidecar.
+
+### Persistence
+
+Train **parameters** are saved per-recording in the `.neurotrace`
+sidecar under `train_params.<module>[group:series]`. Train
+**results** are not saved — they are recomputed from the events
+list on demand whenever a window opens, a manual edit happens, or
+a cohort scan runs. This keeps the sidecar small and guarantees
+the displayed trains and the CSV always agree with the current
+event list, even after edits.
+
+If you change a train parameter and don't run anything, the new
+value is still saved — the sidecar auto-saves on every form edit
+the same way the rest of the analysis windows do.
+
+### Cohort integration
+
+When the cohort module aggregates a folder, each per-cell
+extractor (events, AP, bursts) reads `train_params` from that
+cell's sidecar and recomputes the trains using the *same*
+algorithm the on-screen windows use. Whenever grouping is enabled
+on a cell, the extractor adds:
+
+**Scalars** (one number per cell, used for stats and dot-plots):
+
+- `n_trains` — number of trains in the recording.
+- `n_events_in_trains` — events that belong to a train (vs
+  isolated).
+- `fraction_events_in_trains` — `n_events_in_trains / n_total`.
+- `train_rate_per_min` — `n_trains / recording_duration_min`.
+- `mean_events_per_train` — average cluster size.
+- `mean_train_duration_ms` — average train span.
+- `mean_intra_train_iei_ms` — average within-train IEI.
+- `mean_intra_train_freq_hz` — average within-train frequency.
+
+**Distributions** (per-cell arrays, used for histograms / ECDFs
+and per-cell tests):
+
+- `events_per_train` — cluster size for every train.
+- `train_durations_ms` — duration of every train.
+- `intra_train_iei_ms` — every within-train mean IEI.
+- `inter_train_iei_ms` — gap between consecutive trains within
+  a sweep.
+
+These appear automatically in the cohort metric picker once a
+cell with `train_params.enabled = true` lands in the scan.
+Cells with grouping off contribute zero to the train metric
+columns, so mixed cohorts (some cells with grouping, some
+without) are handled gracefully.
+
+### Batch integration
+
+When you run **Batch** with a template recipe, the template's
+`train_params` for each `(group, series)` recipe travel
+alongside the analysis params. After the runner finishes the
+analysis on each target file, it writes the matching
+`train_params` slot to the target's sidecar. End result: every
+target inherits the template's grouping parameters, so a
+cohort scan over the post-batch folder produces consistent
+train metrics across the whole batch — no need to open each
+target manually and toggle grouping on.
+
+### Honest gaps
+
+- There is no global `Apply trains everywhere` toggle in the
+  Cohort window. To run a single set of train parameters across
+  a heterogeneous folder, set them in the template, run Batch
+  to propagate, and *then* aggregate.
+- The algorithm is sweep-local. There is currently no setting
+  that lets a train span sweep boundaries; in long protocols
+  with intentional cross-sweep continuity (e.g. concatenating
+  short sweeps from one tonic recording) you'd need to edit
+  the underlying sweep structure first.
+- The default thresholds reflect cortical / hippocampal
+  norms — adjust them for your cell type rather than treating
+  them as gospel.
+
+---

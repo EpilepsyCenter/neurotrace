@@ -1149,6 +1149,22 @@ Failures shown with faint red row tint; manual-edited trials marked with `*`. Ri
 
 ---
 
+## 21. Train Grouping (events, APs, bursts)
+
+### Features
+- Cross-cutting post-detection feature: clusters of closely-spaced events labelled as trains (T1, T2, …)
+- Off by default; one shared `Group into trains` panel per window (Burst / Event / AP), with module-aware defaults
+- Algorithm shared between frontend (`utils/trains.ts`) and backend (`analysis/trains.py`); parity test in `tests/trains_parity.py`
+- Live recompute on manual edits or parameter tweaks — never re-runs detection
+- Visualisation: shaded amber spans + `T#` labels behind event markers
+- Tables: per-event `Train` column + per-train summary (Burst card, Event Trains tab, AP sub-tab)
+- CSV exports: `train_id` column on the main per-event CSV; dedicated `*_<module>_trains.csv` per-train summary CSV with parameters baked in
+- Persistence: only the params are saved (`sidecar.train_params.<module>[group:series]`); results recomputed on demand
+- Cohort: scalars (`n_trains`, `fraction_events_in_trains`, `mean_events_per_train`, `train_rate_per_min`, `mean_intra_train_iei_ms`, `mean_intra_train_freq_hz`) + distributions (`events_per_train`, `train_durations_ms`, `intra_train_iei_ms`, `inter_train_iei_ms`)
+- Batch: template's `train_params` propagate to each target sidecar after the analysis runs
+
+---
+
 # Notes
 
 - Cursor Measurements fit-function set: enumerate from `GET /api/cursors/fit_functions` when writing prose

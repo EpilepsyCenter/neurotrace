@@ -17,6 +17,9 @@ import { useRowSelection, buildTSV } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { attachHoverCoords } from '../../utils/hoverCoords'
 import { sampleTraceYAt } from '../../utils/sampleTraceY'
+import { TrainOptions, defaultTrainParamsFor } from './TrainOptions'
+import type { TrainParams, TrainSummary } from '../../utils/trains'
+import { computeEventTrainIds } from '../../utils/eventTrains'
 
 /**
  * Event detection & analysis — Phase 1 (expanded).
@@ -164,6 +167,7 @@ export function EventDetectionWindow({
     computeEventsRms,
     saveEventsTemplate, deleteEventsTemplate, selectEventsTemplate,
     setCursors,
+    trainParams,
     loading, error, setError,
   } = useAppStore()
   const theme = useThemeStore((s) => s.theme)
@@ -281,6 +285,28 @@ export function EventDetectionWindow({
   const [params, setParams] = useState<EventsParams>(() => defaultEventsParams())
   const key = `${group}:${series}`
   const entry: EventsData | undefined = eventsAnalyses[key]
+
+  // Train-grouping (post-detection cluster of closely spaced events).
+  // Pure derivation: read params from the store, walk events per-sweep,
+  // run the shared algorithm, hand the per-event train_id and per-
+  // sweep summaries back to the overlay + tables. Manual edits to
+  // ``entry.events`` invalidate the memo automatically. ``minIeiMs``
+  // from the detection params drives the warning floor — events
+  // closer than that get dropped upstream.
+  const storedTrainParams = trainParams.events[key] as
+    | (TrainParams & { enabled?: boolean })
+    | undefined
+  const effectiveTrainParams = storedTrainParams ?? defaultTrainParamsFor('events')
+  const trainsEnabled = effectiveTrainParams.enabled === true
+  const trainData = useMemo(
+    () => computeEventTrainIds(
+      entry?.events ?? [],
+      { ...effectiveTrainParams, enabled: trainsEnabled },
+    ),
+    [entry?.events, trainsEnabled, effectiveTrainParams.metric,
+      effectiveTrainParams.maxIeiMs, effectiveTrainParams.minCount,
+      effectiveTrainParams.minDurationMs, effectiveTrainParams.minInterTrainMs],
+  )
   const rehydratedKeyRef = useRef<string | null>(null)
   useEffect(() => {
     if (!entry) return
@@ -378,7 +404,7 @@ export function EventDetectionWindow({
   // all-events overlay moved to their own Electron window (see the
   // "Open browser window" button in the results header).
   const [bottomTab, setBottomTab] = useState<
-    'table' | 'histogram' | 'rate' | 'ampvstime' | 'iei'
+    'table' | 'histogram' | 'rate' | 'ampvstime' | 'iei' | 'trains'
   >('table')
   // Group filter applied to results table + histograms + viewer
   // markers. UI-only state — not persisted, defaults to "all" each
@@ -1062,6 +1088,20 @@ export function EventDetectionWindow({
               viewport={viewport}
               cardProps={cardProps('Skip regions')}
             />
+
+            {/* Post-detection: optional grouping of closely-spaced
+                events into trains. Off by default; results derive
+                live from the events list, so manual add/remove
+                rebuilds train assignments without re-running
+                detection. ``minIeiMs`` from the detection params
+                drives the warning floor — events closer than that
+                are already dropped upstream. */}
+            <TrainOptions
+              module="events"
+              group={group}
+              series={series}
+              hostMergeFloorMs={params.minIeiMs}
+            />
           </div>
 
           {/* Pinned Run footer */}
@@ -1193,7 +1233,11 @@ export function EventDetectionWindow({
                 Clear
               </button>
               <button className="btn"
-                onClick={() => exportEventsCSV(entry, fileInfo?.fileName ?? 'recording')}
+                onClick={() => exportEventsCSV(
+                  entry,
+                  fileInfo?.fileName ?? 'recording',
+                  trainsEnabled ? trainData.idByGlobalIdx : null,
+                )}
                 disabled={!entry || entry.events.length === 0}
                 style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
                 Export CSV
@@ -1257,6 +1301,7 @@ export function EventDetectionWindow({
               setViewport={setViewport}
               sweepDurationS={sweepDurationS}
               setSweepDurationS={setSweepDurationS}
+              trainsForSweep={trainData.summariesBySweep.get(sweep) ?? []}
               shiftViewport={shiftViewport}
               goHome={goHome}
               goEnd={goEnd}
@@ -1303,7 +1348,7 @@ export function EventDetectionWindow({
               flexShrink: 0,
               padding: '2px 2px 0 2px',
             }}>
-              {(['table', 'histogram', 'iei', 'rate', 'ampvstime'] as const).map((k) => (
+              {(['table', 'histogram', 'iei', 'rate', 'ampvstime', 'trains'] as const).map((k) => (
                 <button key={k} className="btn"
                   onClick={() => setBottomTab(k)}
                   style={{
@@ -1319,7 +1364,9 @@ export function EventDetectionWindow({
                     : k === 'histogram' ? 'Amp hist'
                     : k === 'iei' ? 'IEI hist'
                     : k === 'rate' ? 'Rate'
-                    : 'Amp vs time'}
+                    : k === 'ampvstime' ? 'Amp vs time'
+                    : `Trains${trainData.flatSummaries.length > 0
+                      ? ` (${trainData.flatSummaries.length})` : ''}`}
                 </button>
               ))}
               <span style={{ flex: 1 }} />
@@ -1436,6 +1483,7 @@ export function EventDetectionWindow({
                       }
                     }}
                     onDiscard={(idx) => onDiscardEvent(idx)}
+                    trainIdByIdx={trainsEnabled ? trainData.idByGlobalIdx : null}
                   />
                 </div>
               )}
@@ -1475,6 +1523,18 @@ export function EventDetectionWindow({
                   templateFilter={templateFilter}
                   heightSignal={plotHeight}
                   binMs={ieiHistBinMs} setBinMs={setIeiHistBinMs}
+                />
+              )}
+              {bottomTab === 'trains' && (
+                <EventTrainsTab
+                  trains={trainData.flatSummaries}
+                  enabled={trainsEnabled}
+                  onExport={() => exportEventTrainsCSV(
+                    trainData.flatSummaries,
+                    effectiveTrainParams,
+                    fileInfo?.fileName ?? 'recording',
+                    group, series,
+                  )}
                 />
               )}
             </div>
@@ -2249,6 +2309,7 @@ function EventsSweepViewer({
   theme, fontSize, heightSignal,
   onAddEvent, onDiscardEvent,
   zeroOffset, onZeroOffsetChange,
+  trainsForSweep,
 }: {
   backendUrl: string
   group: number; series: number; channel: number; sweep: number
@@ -2284,6 +2345,10 @@ function EventsSweepViewer({
    *  the choice survives across sessions. */
   zeroOffset: boolean
   onZeroOffsetChange: (v: boolean) => void
+  /** Trains computed for the currently shown sweep. Drawn as
+   *  translucent shaded spans behind the per-event markers; empty
+   *  when grouping is off or no clusters qualify. */
+  trainsForSweep: TrainSummary[]
 }) {
   void theme; void fontSize
   const rootRef = useRef<HTMLDivElement>(null)
@@ -2386,6 +2451,11 @@ function EventsSweepViewer({
   entryRef.current = entry
   const paramsRef = useRef(params)
   paramsRef.current = params
+  // Mirror the per-sweep trains in a ref so the imperative
+  // ``drawOverlays`` callback (registered once on plot init) can
+  // pick up updated train assignments without a remount.
+  const trainsRef = useRef<TrainSummary[]>(trainsForSweep)
+  trainsRef.current = trainsForSweep
   // Group filter mirrored into a ref — the draw hook + pointer
   // handler read it inside closures bound to the plot's lifetime.
   const groupFilterRef = useRef(groupFilter)
@@ -2611,6 +2681,39 @@ function EventsSweepViewer({
     const c = cursorsRef.current
     const ctx = u.ctx
     const dpr = devicePixelRatio || 1
+
+    // Train spans (drawn first so cursors / skip-bands / per-event
+    // markers all sit on top). Each train gets a faint amber band
+    // spanning [startS, endS] with a small "T#" label at the upper-
+    // left corner — same colour family as the manual-event orange
+    // so the user reads "this is a higher-level grouping of the
+    // events below." Empty when grouping is off.
+    const trains = trainsRef.current
+    if (trains.length > 0) {
+      const trainColor = 'rgba(255,167,38,0.13)'
+      const edgeColor = 'rgba(255,167,38,0.45)'
+      const labelColor = 'rgba(255,167,38,0.95)'
+      ctx.save()
+      ctx.font = `bold ${10 * dpr}px ${cssVar('--font-mono')}`
+      for (const t of trains) {
+        const a = u.valToPos(t.startS, 'x', true)
+        const b = u.valToPos(t.endS, 'x', true)
+        if (!isFinite(a) || !isFinite(b)) continue
+        const lo = Math.min(a, b)
+        const w = Math.max(1 * dpr, Math.abs(b - a))
+        ctx.fillStyle = trainColor
+        ctx.fillRect(lo, u.bbox.top, w, u.bbox.height)
+        ctx.strokeStyle = edgeColor
+        ctx.lineWidth = 1 * dpr
+        ctx.beginPath()
+        ctx.moveTo(a, u.bbox.top); ctx.lineTo(a, u.bbox.top + u.bbox.height)
+        ctx.moveTo(b, u.bbox.top); ctx.lineTo(b, u.bbox.top + u.bbox.height)
+        ctx.stroke()
+        ctx.fillStyle = labelColor
+        ctx.fillText(`T${t.id + 1}`, lo + 3 * dpr, u.bbox.top + 12 * dpr)
+      }
+      ctx.restore()
+    }
 
     // Cursor baseline band (blue) — drag-move / drag-edge on pointerdown below.
     {
@@ -3578,9 +3681,12 @@ function EventsSweepViewer({
     }
   }, [heightSignal])
 
-  // Redraw overlays when cursors / entry / params / baseline curve change.
+  // Redraw overlays when cursors / entry / params / baseline curve /
+  // trains change. ``trainsForSweep`` flows in via a ref read inside
+  // ``drawOverlays``, so a redraw is the only way to refresh the
+  // shaded train spans without rebuilding the plot.
   useEffect(() => { plotRef.current?.redraw() },
-    [cursors, entry, params, baselineCurve])
+    [cursors, entry, params, baselineCurve, trainsForSweep])
 
   return (
     <div ref={rootRef} style={{
@@ -4438,12 +4544,18 @@ function EventsResultsTable({
   groupFilter = { kind: 'all' },
   templateFilter = { kind: 'all' },
   onSelect, onDiscard,
+  trainIdByIdx,
 }: {
   entry: EventsData | undefined
   groupFilter?: GroupFilter
   templateFilter?: TemplateFilter
   onSelect: (idx: number) => void
   onDiscard: (idx: number) => void
+  /** Per-event train assignment (same length + order as
+   *  ``entry.events``). ``null`` = isolated; integer = global train
+   *  id. When omitted or all-null the Train column is hidden so
+   *  users without grouping enabled don't see an empty column. */
+  trainIdByIdx?: (number | null)[] | null
 }) {
   // Multi-row selection — click / shift-click for range / cmd-or-ctrl
   // -click for toggle. Right-click brings up the Copy-as-TSV menu;
@@ -4459,6 +4571,7 @@ function EventsResultsTable({
   // it's a wasted column for single-template / threshold runs.
   const showTplCol = !!entry && entry.events.some(
     (e) => e.templateIdx != null || e.manual)
+  const showTrainCol = !!trainIdByIdx && trainIdByIdx.some((v) => v != null)
   const unit = entry?.units ?? ''
   const headers = [
     '#',
@@ -4466,7 +4579,9 @@ function EventsResultsTable({
     ...(showTplCol ? ['Tpl'] : []),
     'Time (s)', `Amp (${unit})`, 'Rise (ms)', 'Decay (ms)',
     'τ rise (ms)', 'τ decay (ms)',
-    'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)', '',
+    'FWHM (ms)', `AUC (${unit}·s)`, 'IEI (ms)',
+    ...(showTrainCol ? ['Train'] : []),
+    '',
   ]
   // TSV header drops the trailing empty (the discard-button column)
   // and the Tpl column is collapsed to the integer template index
@@ -4497,6 +4612,10 @@ function EventsResultsTable({
       e.auc ?? null,
       iei == null ? null : iei.toFixed(2),
     )
+    if (showTrainCol) {
+      const tid = trainIdByIdx?.[i]
+      cells.push(tid != null ? `T${tid + 1}` : '')
+    }
     return cells
   }
   const copyMenu = useRowCopyMenu({
@@ -4600,6 +4719,13 @@ function EventsResultsTable({
               <td style={td}>{e.halfWidthMs != null ? e.halfWidthMs.toFixed(2) : '—'}</td>
               <td style={td}>{e.auc != null ? e.auc.toFixed(4) : '—'}</td>
               <td style={td}>{iei != null ? iei.toFixed(1) : '—'}</td>
+              {showTrainCol && (
+                <td style={td}>
+                  {trainIdByIdx?.[i] != null
+                    ? <span style={{ color: 'rgba(255,167,38,0.95)' }}>T{(trainIdByIdx![i] as number) + 1}</span>
+                    : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                </td>
+              )}
               <td style={{ ...td, textAlign: 'right' }}>
                 <button className="btn" onClick={(ev) => { ev.stopPropagation(); onDiscard(i) }}
                   style={{ padding: '1px 6px', fontSize: 'var(--font-size-label)' }}
@@ -4627,7 +4753,11 @@ const td: React.CSSProperties = {
 // CSV export
 // ---------------------------------------------------------------------------
 
-function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
+function exportEventsCSV(
+  entry: EventsData | undefined,
+  fileName: string,
+  trainIdByIdx?: (number | null)[] | null,
+) {
   if (!entry || entry.events.length === 0) return
   const unit = entry.units
   const header = [
@@ -4638,11 +4768,13 @@ function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
     'DecayTau_ms', 'FWHM_ms', `AUC_${unit}·s`,
     'IEI_ms',
     'Manual',
+    'Train_id',
   ]
   const rows = entry.events.map((e, i) => {
     const iei = i === 0
       ? ''
       : ((e.peakTimeS - entry.events[i - 1].peakTimeS) * 1000).toFixed(3)
+    const tid = trainIdByIdx?.[i]
     return [
       i + 1, e.sweep,
       e.peakTimeS.toFixed(6), e.footTimeS.toFixed(6),
@@ -4654,10 +4786,189 @@ function exportEventsCSV(entry: EventsData | undefined, fileName: string) {
       e.auc ?? '',
       iei,
       e.manual ? 1 : 0,
+      tid != null ? tid + 1 : '',
     ]
   })
   const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
   const name = fileName.replace(/\.[^.]+$/, '') + '_events.csv'
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ---------------------------------------------------------------------------
+// Trains tab + per-train CSV export
+// ---------------------------------------------------------------------------
+
+function EventTrainsTab({
+  trains, enabled, onExport,
+}: {
+  trains: Array<TrainSummary & { sweep: number }>
+  enabled: boolean
+  onExport: () => void
+}) {
+  const sel = useRowSelection(trains.length)
+  const headers = ['Train', 'Sweep', 'Start (s)', 'End (s)', 'Dur (ms)',
+    'n events', 'Mean IEI (ms)', 'Intra freq (Hz)']
+  const rowToCells = (i: number): Array<string | number | null> => {
+    const t = trains[i]
+    return [
+      `T${t.id + 1}`,
+      t.sweep + 1,
+      t.startS.toFixed(4),
+      t.endS.toFixed(4),
+      t.durationMs.toFixed(2),
+      t.nEvents,
+      t.meanIeiMs != null ? t.meanIeiMs.toFixed(2) : null,
+      t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : null,
+    ]
+  }
+  const copyMenu = useRowCopyMenu({
+    selectionCount: sel.selectedIndexes.length,
+    getTSV: () => sel.selectedIndexes.length === 0 ? null
+      : buildTSV(headers, sel.selectedIndexes.map(rowToCells)),
+  })
+  if (!enabled) {
+    return (
+      <div style={{
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        Train grouping is off. Enable it in the sidebar's "Group into trains"
+        section to cluster closely-spaced events.
+      </div>
+    )
+  }
+  if (trains.length === 0) {
+    return (
+      <div style={{
+        padding: 16, textAlign: 'center',
+        color: 'var(--text-muted)', fontStyle: 'italic',
+        fontSize: 'var(--font-size-label)',
+      }}>
+        No trains found with the current parameters. Try widening the
+        "Max IEI" or lowering the "Min events / train" threshold.
+      </div>
+    )
+  }
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      minHeight: 0, gap: 4,
+    }}>
+      <div style={{
+        flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px',
+        fontSize: 'var(--font-size-label)',
+        color: 'var(--text-muted)',
+      }}>
+        <span>
+          <strong style={{ color: 'var(--text-primary)' }}>
+            {trains.length}
+          </strong> trains
+        </span>
+        <button className="btn"
+          onClick={onExport}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 'var(--font-size-label)',
+            padding: '2px 10px',
+          }}
+          title="Export per-train summary to CSV">
+          Export trains CSV
+        </button>
+      </div>
+      <div style={{
+        flex: 1, overflow: 'auto',
+        border: '1px solid var(--border)', borderRadius: 4,
+      }}>
+        <table style={{
+          width: '100%', borderCollapse: 'collapse',
+          fontSize: 'var(--font-size-xs)', fontFamily: 'var(--font-mono)',
+        }}>
+          <thead>
+            <tr>
+              {headers.map((h, i) => (
+                <th key={i} style={{
+                  padding: '3px 6px', textAlign: 'left',
+                  borderBottom: '1px solid var(--border)',
+                  color: 'var(--text-secondary)', fontWeight: 500,
+                  position: 'sticky', top: 0,
+                  background: 'var(--bg-primary)', whiteSpace: 'nowrap',
+                }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {trains.map((t, i) => (
+              <tr key={i}
+                onClick={(ev) => sel.onRowClick(i, ev)}
+                onContextMenu={(ev) => copyMenu.onContextMenu(ev, () => {
+                  if (!sel.isSelected(i)) sel.setSelected([i])
+                })}
+                style={{
+                  cursor: 'pointer',
+                  background: sel.isSelected(i)
+                    ? 'var(--accent-muted, rgba(100,181,246,0.30))'
+                    : (i % 2 === 0 ? 'transparent' : 'var(--bg-secondary)'),
+                }}>
+                <td style={td}><span style={{ color: 'rgba(255,167,38,0.95)' }}>T{t.id + 1}</span></td>
+                <td style={td}>{t.sweep + 1}</td>
+                <td style={td}>{t.startS.toFixed(4)}</td>
+                <td style={td}>{t.endS.toFixed(4)}</td>
+                <td style={td}>{t.durationMs.toFixed(2)}</td>
+                <td style={td}>{t.nEvents}</td>
+                <td style={td}>{t.meanIeiMs != null ? t.meanIeiMs.toFixed(2) : '—'}</td>
+                <td style={td}>{t.intraFreqHz != null ? t.intraFreqHz.toFixed(2) : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {copyMenu.menu}
+      </div>
+    </div>
+  )
+}
+
+function exportEventTrainsCSV(
+  trains: Array<TrainSummary & { sweep: number }>,
+  cfg: TrainParams & { enabled?: boolean },
+  fileName: string,
+  group: number,
+  series: number,
+) {
+  if (trains.length === 0) return
+  const header = [
+    'file', 'group', 'series', 'sweep_index', 'train_id',
+    'start_s', 'end_s', 'duration_ms', 'n_events',
+    'mean_iei_ms', 'intra_freq_hz',
+    'metric', 'max_iei_ms', 'min_count',
+    'min_duration_ms', 'min_inter_train_ms',
+    'first_event_idx', 'last_event_idx',
+  ]
+  const rows = trains.map((t) => [
+    JSON.stringify(fileName),
+    group, series, t.sweep, t.id + 1,
+    t.startS.toFixed(6), t.endS.toFixed(6), t.durationMs.toFixed(3),
+    t.nEvents,
+    t.meanIeiMs != null ? t.meanIeiMs.toFixed(3) : '',
+    t.intraFreqHz != null ? t.intraFreqHz.toFixed(4) : '',
+    String(cfg.metric),
+    cfg.maxIeiMs,
+    cfg.minCount,
+    cfg.minDurationMs ?? 0,
+    cfg.minInterTrainMs ?? 0,
+    t.memberIndices[0],
+    t.memberIndices[t.memberIndices.length - 1],
+  ])
+  const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  const name = fileName.replace(/\.[^.]+$/, '') + '_event_trains.csv'
   const blob = new Blob([csv], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

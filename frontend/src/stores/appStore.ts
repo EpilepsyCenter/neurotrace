@@ -2228,6 +2228,15 @@ interface AppState {
       manualImEndS?: number
       manualImStartPA?: number
       manualImStepPA?: number
+      /** Form-state echoed onto the stored ``IVCurveData`` so a close-
+       *  and-reopen cycle restores the user's exact run setup (the
+       *  Im-source widget AND the run-scope dropdown). Optional —
+       *  pre-stamp callers can omit and the action falls back to the
+       *  existing entry's values when re-running. */
+      runMode?: 'all' | 'range' | 'one'
+      sweepFrom?: number
+      sweepTo?: number
+      sweepOne?: number
     },
   ) => Promise<void>
   clearIVCurve: (group?: number, series?: number) => void
@@ -4250,6 +4259,24 @@ export const useAppStore = create<AppState>((set, get) => ({
           mode: resp.im_source.mode as ImSource['mode'],
           label: resp.im_source.label ?? null,
         } : undefined,
+        // Echo form-state into the entry so the broadcast (and the
+        // sidecar auto-save that follows) carries everything needed
+        // to restore the user's setup on next open. Without this,
+        // any local ``setState`` in the analysis window only updated
+        // the analysis window's OWN store; the main window stamped
+        // the original (form-state-less) blob to disk via its
+        // sidecar subscriber. Falls back to the previous entry's
+        // values when the caller didn't pass them (e.g. mid-run
+        // updates from older code paths).
+        runMode: params.runMode ?? existing?.runMode,
+        sweepFrom: params.sweepFrom ?? existing?.sweepFrom,
+        sweepTo: params.sweepTo ?? existing?.sweepTo,
+        sweepOne: params.sweepOne ?? existing?.sweepOne,
+        manualImEnabled: params.manualImEnabled ?? existing?.manualImEnabled,
+        manualImStartS: params.manualImStartS ?? existing?.manualImStartS,
+        manualImEndS: params.manualImEndS ?? existing?.manualImEndS,
+        manualImStartPA: params.manualImStartPA ?? existing?.manualImStartPA,
+        manualImStepPA: params.manualImStepPA ?? existing?.manualImStepPA,
       }
       set((s) => ({ ivCurves: { ...s.ivCurves, [key]: next }, loading: false }))
       _broadcastIVCurves(get().ivCurves)

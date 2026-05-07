@@ -43,6 +43,7 @@ const ANALYSIS_BADGES: { id: string; code: string; label: string; color: string 
   { id: 'cursors',    code: 'C',  label: 'Cursors',           color: '#ffca28' },
   { id: 'fpsp',       code: 'FP', label: 'fPSP',              color: '#ec407a' },
   { id: 'resistance', code: 'R',  label: 'Resistance (Rs/Rin/Cm)', color: '#26c6da' },
+  { id: 'paired',     code: 'P',  label: 'Paired recording',  color: '#7e57c2' },
 ]
 
 export function TreeNavigator() {
@@ -70,6 +71,7 @@ export function TreeNavigator() {
   const cursorKeys = useAppStore((s) => Object.keys(s.cursorAnalyses))
   const fpspKeys = useAppStore((s) => Object.keys(s.fpspCurves))
   const resistanceKeys = useAppStore((s) => Object.keys(s.resistanceResults))
+  const pairedKeys = useAppStore((s) => Object.keys(s.pairedAnalyses))
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set([0]))
   const [expandedSeries, setExpandedSeries] = useState<Set<string>>(new Set())
   const [hoveredSweep, setHoveredSweep] = useState<string | null>(null)
@@ -113,6 +115,7 @@ export function TreeNavigator() {
       cursors: cursorKeys.includes(k),
       fpsp: fpspKeys.some((fk) => fk.startsWith(fpspPrefix)),
       resistance: resistanceKeys.includes(k),
+      paired: pairedKeys.includes(k),
     }
   }
 

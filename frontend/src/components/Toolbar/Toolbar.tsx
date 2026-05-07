@@ -9,26 +9,71 @@ import { TextImportWizard } from '../Scaling/TextImportWizard'
 
 /** Convert a CSS colour string (any form: hex, rgb, oklch, named) to
  *  ``#rrggbb`` so it can be assigned as the value of a native
- *  ``<input type="color">``. Uses the canvas 2D API as a parser —
- *  the browser does the colour conversion for us. Returns ``#888888``
- *  if conversion fails (e.g. empty string). */
+ *  ``<input type="color">``.
+ *
+ *  Implementation: render the colour into a 1×1 canvas and read the
+ *  resulting pixel back via ``getImageData``. The browser's compositor
+ *  performs whatever colour-space conversion is needed (oklch → sRGB
+ *  in modern Chromium ≥ 111), and ``getImageData`` always returns
+ *  sRGB integers regardless of the input form. A magenta sentinel
+ *  primed before the assignment lets us detect the rare case where
+ *  ``ctx.fillStyle = css`` was rejected (engine doesn't recognise
+ *  the input) — we fall back to a hidden DOM probe which uses the
+ *  CSS engine itself to resolve the colour (and re-canvases the
+ *  resolved value to convert into hex).
+ *
+ *  The earlier "read ctx.fillStyle" path failed because the getter
+ *  returns the colour in its specified form (e.g. ``oklch(...)``)
+ *  rather than auto-converting to ``#rrggbb`` — so swatches on
+ *  Telegraph / Precision themes stuck on the sentinel. */
 function cssColorToHex(css: string): string {
   if (!css) return '#888888'
+  const direct = renderToHex(css)
+  if (direct) return direct
+  // Fallback: ask the CSS engine to resolve the value via
+  // ``getComputedStyle``, then run THAT through the canvas. Handles
+  // edge cases where ctx.fillStyle rejects the input form even
+  // though style.color accepts it.
   try {
-    const ctx = document.createElement('canvas').getContext('2d')
-    if (!ctx) return '#888888'
-    ctx.fillStyle = '#000'
-    ctx.fillStyle = css
-    const norm = ctx.fillStyle  // browser-normalised
-    if (typeof norm === 'string' && norm.startsWith('#')) return norm
-    // rgb()/rgba() form — pull out three ints
-    const m = (norm as string).match(/(\d+)\D+(\d+)\D+(\d+)/)
-    if (m) {
-      const toHex = (n: string) => Number(n).toString(16).padStart(2, '0')
-      return `#${toHex(m[1])}${toHex(m[2])}${toHex(m[3])}`
+    const probe = document.createElement('span')
+    probe.style.color = css
+    if (!probe.style.color) return '#888888'
+    probe.style.position = 'absolute'
+    probe.style.visibility = 'hidden'
+    probe.style.pointerEvents = 'none'
+    document.body.appendChild(probe)
+    const resolved = getComputedStyle(probe).color
+    document.body.removeChild(probe)
+    if (resolved) {
+      const second = renderToHex(resolved)
+      if (second) return second
     }
   } catch { /* fall through */ }
   return '#888888'
+}
+
+/** Helper: render ``css`` into a 1×1 canvas, read the pixel back as
+ *  ``#rrggbb``. Returns null when the browser rejected the input
+ *  (sentinel survived). */
+function renderToHex(css: string): string | null {
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1; canvas.height = 1
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    // Magenta sentinel — if the assignment below is rejected, the
+    // pixel reads back as #ff00ff and we know to bail.
+    ctx.fillStyle = '#ff00ff'
+    ctx.fillRect(0, 0, 1, 1)
+    ctx.fillStyle = css
+    ctx.fillRect(0, 0, 1, 1)
+    const data = ctx.getImageData(0, 0, 1, 1).data
+    if (data[0] === 0xff && data[1] === 0 && data[2] === 0xff) return null
+    const toHex = (n: number) => n.toString(16).padStart(2, '0')
+    return `#${toHex(data[0])}${toHex(data[1])}${toHex(data[2])}`
+  } catch {
+    return null
+  }
 }
 
 const TRACE_COLOR_LABELS = [
@@ -55,6 +100,7 @@ const ANALYSIS_TYPES = [
   { type: 'resistance', label: 'Rs / Rin / Cm' },
   { type: 'iv', label: 'I-V Curve' },
   { type: 'action_potential', label: 'Action Potentials' },
+  { type: 'paired', label: 'Paired Recording' },
   { type: 'events', label: 'Event Detection' },
   { type: 'bursts', label: 'Burst Detection' },
   { type: 'field_potential', label: 'Field Potential' },

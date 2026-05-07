@@ -958,6 +958,190 @@ def extract_fpsp_ltp(slice_data: dict, sidecar: dict) -> CellExtraction:
 
 
 # ---------------------------------------------------------------------
+# Paired-recording extractor
+# ---------------------------------------------------------------------
+
+def extract_paired(slice_data: dict, sidecar: dict) -> CellExtraction:
+    """Per-cell summary of one paired-recording slice.
+
+    Each slice in ``analyses.paired`` corresponds to a single
+    pre/post-synaptic recording (one ``${group}:${series}``).
+    Successes-only stats live alongside the all-trials stats — the
+    user picks which they want at the cohort UI level.
+
+    The primary cohort scalars are the textbook release-statistics
+    quintet:
+
+    * ``failure_rate``        — fraction of trials that failed.
+    * ``mean_amplitude``      — mean over ALL trials (failures
+      included as their measured amplitude, NOT zeroed).
+    * ``mean_amplitude_zeroed`` — mean treating each failure as
+      amplitude = 0 (some labs report this convention).
+    * ``potency``             — mean over successful trials only.
+    * ``cv_success`` / ``inv_cv2`` — coefficient of variation and
+      its 1/CV² complement. 1/CV² scales with quantal release
+      probability under the binomial model and is what the cohort
+      figure typically plots.
+
+    Plus per-cell ``latency_mean_ms`` / ``latency_sd_ms`` (jitter)
+    and ``ppr_2_1`` (paired-pulse ratio between pulse 2 and pulse 1
+    averaged across sweeps with a successful first pulse).
+
+    Distributions surface every per-trial measurement so the cohort
+    UI's ECDF view can spot population-level shifts (rundown,
+    drug effects).
+
+    ``post_manual_failure`` overrides are honoured because they're
+    already baked into ``trial.success`` server-side at run time.
+    """
+    per_trial = slice_data.get('perTrial') or []
+    summary = slice_data.get('seriesSummary') or {}
+
+    # Pull amplitudes / latencies / kinetics out of perTrial. We
+    # could trust ``seriesSummary`` for the scalars, but recomputing
+    # from perTrial keeps the extractor honest if the summary is
+    # ever stale relative to the trials list (e.g. after a manual
+    # edit that wasn't followed by a fresh /run).
+    amps_all: list[float] = []
+    amps_success: list[float] = []
+    latencies_ms: list[float] = []
+    rises_ms: list[float] = []
+    decays_ms: list[float] = []
+    decay_taus_ms: list[float] = []
+    half_widths_ms: list[float] = []
+    n_success = 0
+    n_failure = 0
+    for t in per_trial:
+        amp = t.get('amplitude')
+        if amp is not None:
+            try:
+                amps_all.append(float(amp))
+            except (TypeError, ValueError):
+                pass
+        success = bool(t.get('success'))
+        if success:
+            n_success += 1
+            if amp is not None:
+                try:
+                    amps_success.append(float(amp))
+                except (TypeError, ValueError):
+                    pass
+            for key, dest in (
+                ('latencyMs', latencies_ms),
+                ('riseMs', rises_ms),
+                ('decayMs', decays_ms),
+                ('decayTauMs', decay_taus_ms),
+                ('halfWidthMs', half_widths_ms),
+            ):
+                v = t.get(key)
+                if v is None:
+                    continue
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isnan(f):
+                    dest.append(f)
+        else:
+            n_failure += 1
+    n_trials = len(per_trial)
+
+    # Failures-as-zero amplitude (some labs report this average).
+    amps_zeroed: list[float] = []
+    for t in per_trial:
+        if t.get('success'):
+            amp = t.get('amplitude')
+            try:
+                amps_zeroed.append(float(amp) if amp is not None else 0.0)
+            except (TypeError, ValueError):
+                amps_zeroed.append(0.0)
+        else:
+            amps_zeroed.append(0.0)
+
+    # CV / 1/CV² on successful amplitudes — refuse to compute on
+    # near-zero potency (would blow up).
+    potency = _mean(amps_success)
+    cv_success: Optional[float] = None
+    inv_cv2: Optional[float] = None
+    if potency is not None and abs(potency) > 1e-12 and len(amps_success) >= 2:
+        sd = float(np.std(amps_success, ddof=1))
+        cv_success = sd / abs(potency)
+        if cv_success > 0:
+            inv_cv2 = 1.0 / (cv_success * cv_success)
+
+    # Paired-pulse 2/1 ratio — pull from the summary's pprN1 list
+    # (computed server-side with the standard "exclude sweeps where
+    # pulse 1 fails" convention).
+    ppr_2_1: Optional[float] = None
+    n_sweeps_ppr: Optional[float] = None
+    for entry in (summary.get('pprN1') or []):
+        if int(entry.get('n') or 0) == 2:
+            r = entry.get('ratio')
+            if r is not None:
+                try:
+                    ppr_2_1 = float(r)
+                except (TypeError, ValueError):
+                    pass
+            ns = entry.get('nSweeps')
+            if ns is not None:
+                try:
+                    n_sweeps_ppr = float(ns)
+                except (TypeError, ValueError):
+                    pass
+            break
+
+    failure_rate = (n_failure / n_trials) if n_trials > 0 else None
+
+    scalars: dict[str, Optional[float]] = {
+        'n_trials': float(n_trials) if n_trials > 0 else None,
+        'n_successes': float(n_success),
+        'n_failures': float(n_failure),
+        'failure_rate': failure_rate,
+        'mean_amplitude': _mean(amps_all),
+        'mean_amplitude_zeroed': _mean(amps_zeroed),
+        'potency': potency,
+        'cv_success': cv_success,
+        'inv_cv2': inv_cv2,
+        'latency_mean_ms': _mean(latencies_ms),
+        'latency_sd_ms': _sd(latencies_ms),
+        'rise_mean_ms': _mean(rises_ms),
+        'decay_mean_ms': _mean(decays_ms),
+        'tau_decay_mean_ms': _mean(decay_taus_ms),
+        'half_width_mean_ms': _mean(half_widths_ms),
+        'ppr_2_1': ppr_2_1,
+        'ppr_2_1_n_sweeps': n_sweeps_ppr,
+    }
+
+    distributions: dict[str, list[float]] = {
+        'amplitude': amps_all,
+        'amplitude_success': amps_success,
+        'latency_ms': latencies_ms,
+        'rise_ms': rises_ms,
+        'decay_ms': decays_ms,
+        'tau_decay_ms': decay_taus_ms,
+        'half_width_ms': half_widths_ms,
+    }
+
+    meta: dict[str, Any] = {
+        'n_trials': n_trials,
+        'n_successes': n_success,
+        'n_failures': n_failure,
+        'sweeps_analysed': list(slice_data.get('sweeps') or []),
+        'pre_trace': slice_data.get('preTrace'),
+        'post_trace': slice_data.get('postTrace'),
+        'pre_mode': slice_data.get('preMode'),
+        # If the user fixed cursors, surface the bounds so the
+        # cohort UI can warn "this cell used a tighter window than
+        # the others" when comparing across cells.
+        'post_search_start_s': slice_data.get('postSearchStartS'),
+        'post_search_end_s': slice_data.get('postSearchEndS'),
+        'distribution_counts': {k: len(v) for k, v in distributions.items()},
+    }
+
+    return CellExtraction(scalars=scalars, distributions=distributions, meta=meta)
+
+
+# ---------------------------------------------------------------------
 # Registry — analysis_type → extractor
 # ---------------------------------------------------------------------
 
@@ -968,6 +1152,7 @@ EXTRACTORS: dict[str, ExtractorFn] = {
     'bursts': extract_bursts,
     'cursors': extract_cursors,
     'resistance': extract_resistance,
+    'paired': extract_paired,
     # fPSP exposes three cohort analysis types because the three modes
     # (I-O, PPR, LTP) are different experiments with different metric
     # vocabularies — bundling them would force the metric tree to
@@ -988,6 +1173,7 @@ SIDECAR_KEY: dict[str, str] = {
     'bursts': 'bursts',
     'cursors': 'cursor_analyses',
     'resistance': 'resistance',
+    'paired': 'paired',
     'fpsp_io': 'fpsp_curves',
     'fpsp_ppr': 'fpsp_curves',
     'fpsp_ltp': 'fpsp_curves',
@@ -1058,6 +1244,24 @@ DEFAULT_METRICS: dict[str, dict[str, list[str]]] = {
             'slot0__half_width_mean', 'slot0__max_decay_slope_mean',
         ],
         'distributions': ['slot0__amp'],
+    },
+    'paired': {
+        # Release statistics — the canonical paired-recording figure
+        # tends to compare failure rate, mean amplitude / potency,
+        # and 1/CV² across conditions. Latency jitter is the runner-
+        # up. PPR is rarely the headline metric in unitary recordings
+        # but worth surfacing alongside.
+        'scalars': [
+            'failure_rate', 'mean_amplitude', 'potency',
+            'inv_cv2', 'cv_success',
+            'latency_mean_ms', 'latency_sd_ms',
+            'ppr_2_1',
+        ],
+        # ECDFs of these per-trial distributions reveal population-
+        # level shifts (e.g. amplitude rundown after wash-in).
+        'distributions': [
+            'amplitude', 'amplitude_success', 'latency_ms',
+        ],
     },
     'fpsp_io': {
         'scalars': ['io_slope', 'io_max_response'],

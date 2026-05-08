@@ -507,20 +507,20 @@ toggle (or the `Z` shortcut):
   viewer zooms into it on release. Useful for picking out a precise
   time-and-amplitude window in a single gesture.
 
-**Right-clicking** the trace opens a small context menu with the
-following entries:
+**Right-clicking** the trace opens a small context menu with two
+entries:
 
-- **Copy as PNG** — copies the current view to the clipboard as a
+- **Copy PNG** — copies the current view to the clipboard as a
   raster image.
-- **Save as PNG…** — writes a PNG to disk via a file dialog.
-- **Copy as SVG** — copies the view as a scalable vector graphic.
-- **Save as SVG…** — writes an SVG to disk.
+- **Save PNG…** — writes a PNG to disk via a file dialog.
 
-The PNG entries export at the displayed resolution; the SVG entries
-preserve the trace as vector paths, suitable for scaling without
-loss in figure-editing software. For more elaborate
-publication-ready figures with multiple sweeps and annotations,
-use the **Export Traces** window described in chapter 17 instead.
+Both export at the displayed resolution. The trace viewer does not
+offer vector export from this menu — for publication-ready figures
+with multiple sweeps, scale bars, and annotations, use the **Export
+Traces** window described in chapter 17, which writes vector SVG
+and PDF. (Cohort statistics plots are the one exception: their
+right-click menu also offers SVG, because the plot is rendered as
+SVG by the backend.)
 
 ![Right-click context menu](screenshots/trace-viewer-right-click-menu.png)
 
@@ -2334,6 +2334,8 @@ Detected events are drawn on the trace as small markers at each
 peak; manual edits and curation groups colour them differently
 (see *Manual edits* below).
 
+![Event Detection window overview](screenshots/events-window-overview.png)
+
 ### Choosing a detection method
 
 The **Method** dropdown picks one of three detectors.
@@ -2527,6 +2529,8 @@ window before and after the anchor in milliseconds, and how the
 traces are scaled (none / amplitude → 1 / σ → 1) and shifted
 (none / demean / align to anchor / first sample = 0).
 
+![Events Browser overlay](screenshots/events-window-browser.png)
+
 ### The Template Generator
 
 The **Template Generator** is for building a recording-specific
@@ -2567,6 +2571,8 @@ coefficient stepper for fine adjustments.
 This is the fastest route to a good template: run a permissive
 first pass with the default template, refine against the average
 of what came back, re-run with the refined template.
+
+![Template Refinement — average event with biexponential fit](screenshots/events-window-template-refinement.png)
 
 ### The detection-measure subplot
 
@@ -2683,6 +2689,8 @@ Above the table, a small summary strip reports the burst count,
 the estimated baseline and threshold, and a few signal
 diagnostics — useful when "no bursts detected" needs explaining.
 
+![Burst Detection window overview](screenshots/bursts-window-overview.png)
+
 ### The continuous-mode viewer
 
 Unlike the other analysis windows, the Burst Detection window's
@@ -2708,6 +2716,8 @@ Keyboard shortcuts work when the viewer has focus:
 | `←` / `→` | Scroll one viewport width |
 | `PgUp` / `PgDn` | Scroll three viewport widths |
 | `Home` / `End` | Jump to the start / end of the sweep |
+
+![Continuous-mode viewer with viewport bar and scroll indicator](screenshots/bursts-window-continuous-viewer.png)
 
 ### The pre-detection filter
 
@@ -2829,6 +2839,8 @@ inside the cluster (`1000 / mean_isi_ms`), which is a more
 faithful number than the peak-counting heuristic the other
 methods use.
 
+![ISI clustering — spike picks and burst grouping](screenshots/bursts-window-isi-method.png)
+
 ### Burst window extension
 
 After detection, each burst's window is **extended outward** until
@@ -2946,6 +2958,8 @@ currently-selected bin's averaged waveform with the detected
 points overlaid. The bottom half is the time-course graph and the
 results table.
 
+![Field Potential window overview — LTP mode](screenshots/fpsp-window-overview.png)
+
 ### Cursor windows
 
 Field Potential uses *three* cursor pairs rather than the usual
@@ -3040,6 +3054,8 @@ fEPSP is no longer comfortably bigger than the volley", which is
 typically a sign of fibre fatigue or electrode drift. Flagged rows
 are tinted red.
 
+![LTP-mode time-course with baseline + post bins](screenshots/fpsp-window-ltp-mode.png)
+
 ### I-O mode specifics
 
 The I-O tab plots stimulus intensity against fEPSP slope or
@@ -3074,6 +3090,8 @@ exceeds 1.
 The V2 and F2 bands are currently read-only (positioned by the
 ISI helper); inline drag-to-edit on the mini-viewer is a planned
 follow-up.
+
+![PPR mode — paired-pulse waveform with V1/V2 cursor bands](screenshots/fpsp-window-ppr-mode.png)
 
 ### Results table
 
@@ -3168,6 +3186,8 @@ drawn as dots on the pre trace, post-peak markers are drawn on
 the post trace (green for successes, pink for failures), and two
 draggable cursor bands delimit the post-search window so you can
 clip out late artefacts.
+
+![Paired Recording window overview — pre / post overlay](screenshots/paired-window-overview.png)
 
 ### Selectors and channel choice
 
@@ -3292,6 +3312,8 @@ trial index across the entire run; successes appear as blue dots,
 failures as red. Run-down, run-up, and bursty failures all have
 recognisable signatures here.
 
+![Statistics tab — amplitude / latency histograms and trial scatter](screenshots/paired-window-statistics-tab.png)
+
 ### The STA tab
 
 The **STA** tab is the spike-triggered average: every post
@@ -3314,8 +3336,11 @@ A small header above the plot gives you:
   averaged trace and overlay it as a dashed line, with τ shown
   in the header.
 
-Right-click the plot for the standard Copy / Save PNG / SVG
-context menu.
+Right-click the plot for the standard Copy / Save PNG context
+menu (this viewer is canvas-based, so vector export is not
+offered here — use **Trace Export** for vector figures).
+
+![STA tab — mean ± SEM with monoexponential decay fit](screenshots/paired-window-sta-tab.png)
 
 ### Run modes and manual editing
 
@@ -3415,6 +3440,8 @@ The **right pane** is a single-file editor by default and
 switches into a batch editor when one or more files are checked
 in the left pane.
 
+![Metadata window overview — file list and single-file editor](screenshots/metadata-window-overview.png)
+
 ### The status dot
 
 The status dot beside each file gives a quick read on its tagging
@@ -3471,6 +3498,8 @@ into a batch editor. Three operations are exposed:
 A progress line below the operation reports *Applying… 3 / 12*
 during the run and finalises with a count of files updated and,
 if any failed, an error list.
+
+![Batch editor — apply tags to multiple recordings at once](screenshots/metadata-window-batch-editor.png)
 
 ### The consistency checker
 
@@ -3555,6 +3584,8 @@ The **toolbar** along the top carries: **+ Add traces…**,
 (figure-style presets), and the accent **Export…** button on the
 right.
 
+![Trace Export window overview — left pane, tabbed editor, toolbar](screenshots/trace-export-window-overview.png)
+
 ### Adding traces — the source picker
 
 The **+ Add traces…** button opens a modal that lets you walk
@@ -3602,6 +3633,8 @@ group, series)* — editing them on one trace updates every other
 trace from the same series, with a small caption noting how many
 items share the change.
 
+![Trace tab — per-trace style and processing controls](screenshots/trace-export-trace-tab.png)
+
 ### The Figure tab
 
 The Figure tab governs everything the Trace tab does not.
@@ -3623,6 +3656,8 @@ The Figure tab governs everything the Trace tab does not.
   trace items that did not get an explicit legend name).
 - **Figure size** — width and height in centimetres, DPI for the
   raster outputs.
+
+![Figure tab — axes, scalebar, legend, figure size](screenshots/trace-export-figure-tab.png)
 
 ### Templates and sessions
 
@@ -3747,6 +3782,8 @@ default, recipes whose results already exist on a target file
 are skipped, marked *has results · skip*. Tick the box to
 overwrite.
 
+![Batch window overview — template recording and target list](screenshots/batch-window-overview.png)
+
 ### What recipes Batch supports
 
 Batch can replay these analyses:
@@ -3848,6 +3885,8 @@ becomes available as the previous one is filled in.
 5. **Metrics + Results** — pick which metrics to test and plot.
    Stats and graphs render in the right pane in three tabs.
 
+![Cohort window overview — folder, groups, metrics, results](screenshots/cohort-window-overview.png)
+
 ### How groups are defined
 
 Cohort never asks you to drag cells into groups. Group
@@ -3918,6 +3957,8 @@ axes, group colours, and labels.
 - **Timeseries metrics** — per-cell faint traces with a group
   mean ± SEM band, optionally re-zeroed at the LTP induction
   marker.
+
+![Cohort plots tab — group comparison with stats annotations](screenshots/cohort-window-plots.png)
 
 ### Export
 

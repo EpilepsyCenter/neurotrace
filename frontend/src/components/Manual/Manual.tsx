@@ -4,6 +4,22 @@ import remarkGfm from 'remark-gfm'
 import manualMd from '../../../../docs/MANUAL.md?raw'
 import { Icon } from '../common/Icon'
 
+// Bundle every PNG / JPG / SVG sitting in docs/screenshots/ so that
+// markdown ``![alt](screenshots/foo.png)`` references resolve to the
+// hashed asset URL Vite emits at build time. Without this the
+// `<img src="screenshots/foo.png">` we render is resolved relative to
+// the Electron page URL — which is somewhere under ``frontend/dist/``
+// where ``screenshots/`` doesn't exist, so every image silently 404s.
+const screenshotModules = import.meta.glob<string>(
+  '../../../../docs/screenshots/*.{png,jpg,jpeg,svg,webp}',
+  { eager: true, query: '?url', import: 'default' }
+)
+const screenshotByName: Record<string, string> = {}
+for (const [path, url] of Object.entries(screenshotModules)) {
+  const name = path.split('/').pop()
+  if (name) screenshotByName[name] = url
+}
+
 /**
  * Local user manual viewer. Bundled at build time via Vite's
  * ``?raw`` import — no runtime fs read, no network — so the manual
@@ -169,6 +185,26 @@ export function Manual() {
                   {children}
                 </a>
               ),
+              img: ({ src, alt }) => {
+                const srcStr = typeof src === 'string' ? src : ''
+                // External or already-resolved URLs pass through untouched.
+                if (!srcStr.startsWith('screenshots/')) {
+                  return <img src={srcStr} alt={alt ?? ''} loading="lazy" />
+                }
+                const name = srcStr.slice('screenshots/'.length)
+                const url = screenshotByName[name]
+                if (url) {
+                  return <img src={url} alt={alt ?? ''} loading="lazy" />
+                }
+                // Screenshot referenced but not yet captured — render a
+                // neutral placeholder rather than a broken <img>.
+                return (
+                  <span className="manual-img-missing" role="img" aria-label={alt ?? ''}>
+                    <span className="k">Screenshot pending</span>
+                    <span className="v">{name}</span>
+                  </span>
+                )
+              },
             }}
           >
             {manualMd}

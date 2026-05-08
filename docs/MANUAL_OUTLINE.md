@@ -392,9 +392,9 @@ _(Spectral is in the dropdown but its window is minimal — flag this when writi
 - Wheel near a Y-axis edge: zooms that axis only
 - Click-drag on plot interior pans
 - Right-click → context menu (`PlotMenu`):
-  - Copy as PNG
-  - Save as PNG…
-  - (SVG copy / save when an SVG source is available — not for the main canvas)
+  - Copy PNG
+  - Save PNG…
+  - SVG entries appear only when the viewer supplies a `getSvg` source — none of the trace / sweep viewers do; only `CohortWindow` (matplotlib SVG strings from the backend)
 
 ### Viewport bar (top)
 - Reset zoom button
@@ -1065,7 +1065,7 @@ Failures shown with faint red row tint; manual-edited trials marked with `*`. Ri
 **STA** — spike-triggered average:
 - Header — series picker (`all` / `success` / `failure`); checkboxes (overlay individual trials, include failures in overlay, show fit)
 - Plot — X = time relative to `t_pre` (ms), Y = post amplitude. Bold mean curve + ±1 SEM ribbon; optional faint per-trial overlays; optional dashed monoexp fit line with τ label.
-- Right-click → Copy/Save PNG/SVG (same `PlotMenu` as elsewhere).
+- Right-click → Copy / Save PNG (same `PlotMenu` as elsewhere; this viewer is canvas-based, no SVG source).
 
 ### Endpoints
 - `POST /api/paired/run` — body: `{group, series, pre_trace, post_trace, sweeps?: int[], pre_mode, pre_params, post_params, failure_params, latency_params, manual_edits?}`. Returns `{per_trial[], per_sweep_summary[], series_summary{}, sta_all{}, sta_success{}, sta_failure{}, request, sampling_rate}`. 400 on validation errors.

@@ -97,6 +97,18 @@ main.doc{min-width:0;max-width:780px;}
 .doc-header .lead{color:var(--text-secondary);font-size:17px;line-height:1.55;max-width:62ch;}
 .doc-header .meta{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap;}
 
+@media (max-width:1100px){
+  .doc-layout{grid-template-columns:220px 1fr;gap:32px;}
+}
+@media (max-width:900px){
+  .doc-layout{grid-template-columns:1fr;}
+  aside.side{position:static;max-height:none;}
+}
+</style>
+
+<!-- Manual body styles must be global because the content is
+     injected via set:html and won't carry Astro's scope marker. -->
+<style is:global>
 .manual-body{font-family:var(--font-ui);font-size:15px;line-height:1.65;color:var(--text-primary);}
 .manual-body > h1{display:none;}
 
@@ -158,11 +170,38 @@ main.doc{min-width:0;max-width:780px;}
 .manual-body td:first-child,.manual-body td:nth-child(2){color:var(--text-primary);}
 
 .manual-body img{
-  display:block;max-width:min(100%, 560px);height:auto;
-  margin:18px auto;
+  display:block;max-width:100%;height:auto;
+  margin:18px 0;
   border:1px solid var(--border);border-radius:var(--rad);
   background:var(--bg-secondary);
+  cursor:zoom-in;
+  transition:opacity 0.12s;
 }
+.manual-body img:hover{opacity:0.9;}
+
+.manual-lightbox{
+  position:fixed;inset:0;z-index:100;
+  background:rgba(20,22,28,0.88);
+  display:flex;align-items:center;justify-content:center;
+  cursor:zoom-out;
+  animation:lightbox-in 0.12s ease-out;
+  padding:24px;
+}
+.manual-lightbox img{
+  max-width:96vw;max-height:96vh;
+  width:auto;height:auto;
+  border:1px solid var(--border);border-radius:var(--rad);
+  background:var(--bg-secondary);
+  box-shadow:0 30px 80px rgba(0,0,0,0.5);
+}
+.manual-lightbox .caption{
+  position:absolute;left:0;right:0;bottom:0;
+  padding:16px 24px;text-align:center;
+  font-family:var(--font-mono);font-size:11px;letter-spacing:0.06em;
+  color:rgba(255,255,255,0.7);
+  pointer-events:none;
+}
+@keyframes lightbox-in{from{opacity:0;}to{opacity:1;}}
 
 .manual-body kbd{
   font-family:var(--font-mono);font-size:11px;
@@ -192,14 +231,6 @@ main.doc{min-width:0;max-width:780px;}
 .manual-body .manual-img-missing .k{
   text-transform:uppercase;letter-spacing:0.1em;
   color:var(--text-secondary);font-weight:500;
-}
-
-@media (max-width:1100px){
-  .doc-layout{grid-template-columns:220px 1fr;gap:32px;}
-}
-@media (max-width:900px){
-  .doc-layout{grid-template-columns:1fr;}
-  aside.side{position:static;max-height:none;}
 }
 </style>
 
@@ -247,4 +278,46 @@ main.doc{min-width:0;max-width:780px;}
     <article class="manual-body" set:html={html}></article>
   </main>
 </div>
+
+<script>
+  // Click any manual screenshot to open a fullscreen lightbox.
+  // Click anywhere or press Escape to close.
+  const onReady = () => {
+    document.querySelectorAll<HTMLImageElement>('.manual-body img').forEach((img) => {
+      img.addEventListener('click', () => {
+        const overlay = document.createElement('div');
+        overlay.className = 'manual-lightbox';
+
+        const big = document.createElement('img');
+        big.src = img.src;
+        big.alt = img.alt;
+        overlay.appendChild(big);
+
+        if (img.alt) {
+          const cap = document.createElement('div');
+          cap.className = 'caption';
+          cap.textContent = img.alt;
+          overlay.appendChild(cap);
+        }
+
+        const close = () => {
+          overlay.remove();
+          document.body.style.overflow = '';
+          document.removeEventListener('keydown', onKey);
+        };
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+
+        overlay.addEventListener('click', close);
+        document.addEventListener('keydown', onKey);
+        document.body.style.overflow = 'hidden';
+        document.body.appendChild(overlay);
+      });
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', onReady);
+  } else {
+    onReady();
+  }
+</script>
 </Base>

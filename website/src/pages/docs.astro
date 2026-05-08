@@ -1,77 +1,95 @@
 ---
 import Base from '../layouts/Base.astro';
-const repo = 'https://github.com/EpilepsyCenter/neurotrace';
-const manualUrl = `${repo}/blob/main/docs/MANUAL.md`;
-const releases = `${repo}/releases`;
+import { marked } from 'marked';
+import manualMd from '../../../docs/MANUAL.md?raw';
 
-const sidebar = [
-  {
-    h: 'Getting started',
-    items: [
-      ['#install', 'Install', null],
-      ['#first-recording', 'Your first recording', null],
-      ['#sidecar', 'The .neurotrace sidecar', null],
-      ['#shortcuts', 'Keyboard shortcuts', '?'],
-    ],
-  },
-  {
-    h: 'Single-cell',
-    items: [
-      ['#cursors', 'Cursor measurements', null],
-      ['#resistance', 'Resistance', null],
-      ['#iv', 'I–V curves', null],
-      ['#ap', 'Action potentials', null],
-    ],
-  },
-  {
-    h: 'Detection',
-    items: [
-      ['#events', 'Event detection', null],
-      ['#bursts', 'Burst detection', null],
-      ['#field', 'Field potential', null],
-      ['#paired', 'Paired recordings', null],
-      ['#trains', 'Train grouping', null],
-    ],
-  },
-  {
-    h: 'Cross-cell',
-    items: [
-      ['#metadata', 'Metadata', null],
-      ['#export', 'Trace Export', null],
-      ['#batch', 'Batch', null],
-      ['#cohort', 'Cohort', null],
-    ],
-  },
-  {
-    h: 'Reference',
-    items: [
-      ['#formats', 'File formats', null],
-      ['#manual', 'Full MANUAL.md', null],
-      ['#contributing', 'Contributing', null],
-    ],
-  },
-];
+const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const releases = `${repo}/releases`;
+const manualUrl = `${repo}/blob/main/docs/MANUAL.md`;
+
+const screenshotModules = import.meta.glob(
+  '../../../docs/screenshots/*.{png,jpg,jpeg,svg,webp}',
+  { eager: true, query: '?url', import: 'default' }
+) as Record<string, string>;
+
+const screenshotByName: Record<string, string> = {};
+for (const [path, url] of Object.entries(screenshotModules)) {
+  const name = path.split('/').pop();
+  if (name) screenshotByName[name] = url;
+}
+
+const SCREENSHOT_RE = /!\[([^\]]*)\]\(screenshots\/([^)]+)\)/g;
+
+function placeholderCard(name: string): string {
+  return '<div class="manual-img-missing"><span class="k">Screenshot pending</span><span class="v">' + name + '</span></div>';
+}
+
+const mdWithScreenshots = manualMd.replace(SCREENSHOT_RE, (_m, alt, name) => {
+  const url = screenshotByName[name];
+  if (url) return '![' + alt + '](' + url + ')';
+  return placeholderCard(name);
+});
+
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
+}
+
+interface Heading { level: number; text: string; id: string; }
+function extractHeadings(md: string): Heading[] {
+  const out: Heading[] = [];
+  const seen = new Map<string, number>();
+  const lines = md.split('\n');
+  let inFence = false;
+  for (const line of lines) {
+    if (line.startsWith('```')) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const m = /^(#{1,3})\s+(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const level = m[1].length;
+    const text = m[2].replace(/`/g, '');
+    let id = slugify(text);
+    const dup = seen.get(id) ?? 0;
+    if (dup > 0) id = id + '-' + dup;
+    seen.set(slugify(text), dup + 1);
+    out.push({ level, text, id });
+  }
+  return out;
+}
+
+const headings = extractHeadings(mdWithScreenshots);
+const chapters = headings.filter((h) => h.level === 2);
+
+let html = await marked.parse(mdWithScreenshots, { gfm: true });
+
+{
+  const seen = new Map<string, number>();
+  html = html.replace(
+    /<h([1-3])>([\s\S]*?)<\/h\1>/g,
+    (_m, levelStr, inner) => {
+      const text = inner.replace(/<[^>]+>/g, '').trim();
+      let id = slugify(text);
+      const dup = seen.get(id) ?? 0;
+      if (dup > 0) id = id + '-' + dup;
+      seen.set(slugify(text), dup + 1);
+      return '<h' + levelStr + ' id="' + id + '">' + inner + '</h' + levelStr + '>';
+    }
+  );
+}
 ---
-<Base title="NeuroTrace — Docs">
+<Base title="NeuroTrace — Manual">
 <style>
-.doc-layout{display:grid;grid-template-columns:240px 1fr 220px;gap:40px;padding:40px 0 80px;align-items:start;}
+.doc-layout{display:grid;grid-template-columns:260px 1fr;gap:48px;padding:40px 0 80px;align-items:start;}
 
 aside.side{position:sticky;top:72px;max-height:calc(100vh - 90px);overflow:auto;padding-right:8px;font-family:var(--font-mono);font-size:12px;}
-aside.side h5{font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--text-muted);margin:20px 0 10px;font-weight:500;display:flex;align-items:center;gap:8px;}
+aside.side h5{font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--text-muted);margin:0 0 14px;font-weight:500;display:flex;align-items:center;gap:8px;}
 aside.side h5::before{content:'';width:5px;height:5px;background:var(--accent);}
-aside.side h5:first-child{margin-top:0;}
+aside.side h5.tail{margin-top:28px;}
 aside.side ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}
-aside.side a{display:block;padding:5px 10px;border-radius:var(--rad);color:var(--text-secondary);letter-spacing:0.02em;transition:all 0.1s;border-left:2px solid transparent;}
+aside.side a{display:block;padding:5px 10px;border-radius:var(--rad);color:var(--text-secondary);letter-spacing:0.02em;transition:all 0.1s;border-left:2px solid transparent;line-height:1.4;}
 aside.side a:hover{background:var(--bg-secondary);color:var(--text-primary);}
-aside.side a .count{float:right;color:var(--text-muted);font-size:10px;}
-
-aside.toc-r{position:sticky;top:72px;max-height:calc(100vh - 90px);overflow:auto;font-family:var(--font-mono);font-size:11px;padding-left:12px;border-left:1px solid var(--border);}
-aside.toc-r h6{font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--text-muted);margin:0 0 12px;font-weight:500;}
-aside.toc-r ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;}
-aside.toc-r a{color:var(--text-secondary);letter-spacing:0.02em;display:block;line-height:1.5;padding:2px 0 2px 8px;margin-left:-9px;border-left:1px solid transparent;}
-aside.toc-r a:hover{color:var(--accent);border-left-color:var(--accent);}
 
 main.doc{min-width:0;max-width:780px;}
+
 .doc-header{padding-bottom:32px;margin-bottom:40px;border-bottom:1px solid var(--border);}
 .doc-header .crumb{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:14px;display:flex;gap:10px;align-items:center;}
 .doc-header h1{font-family:var(--font-ui);font-weight:300;font-size:60px;line-height:1;letter-spacing:-0.02em;margin:0 0 18px;}
@@ -79,26 +97,105 @@ main.doc{min-width:0;max-width:780px;}
 .doc-header .lead{color:var(--text-secondary);font-size:17px;line-height:1.55;max-width:62ch;}
 .doc-header .meta{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap;}
 
-main.doc h2{font-family:var(--font-ui);font-weight:300;font-size:34px;line-height:1.1;letter-spacing:-0.015em;margin:56px 0 16px;scroll-margin-top:76px;}
-main.doc h2 em{font-style:italic;color:var(--text-muted);}
-main.doc h2::before{content:'§ ';color:var(--accent);font-family:var(--font-mono);font-size:0.5em;vertical-align:0.4em;letter-spacing:0;margin-right:2px;}
-main.doc h3{font-family:var(--font-ui);font-weight:600;font-size:17px;margin:32px 0 10px;letter-spacing:-0.005em;scroll-margin-top:76px;display:flex;align-items:baseline;gap:10px;}
-main.doc h3::before{content:'';width:5px;height:5px;background:var(--accent);display:inline-block;margin-right:2px;flex-shrink:0;}
-main.doc p{margin:0 0 16px;color:var(--text-secondary);line-height:1.6;}
-main.doc p .mono,main.doc li .mono{background:var(--bg-secondary);padding:1px 6px;border:1px solid var(--border);border-radius:var(--rad);color:var(--text-primary);font-size:13px;}
-main.doc ul,main.doc ol{padding-left:24px;margin:0 0 16px;color:var(--text-secondary);line-height:1.6;}
-main.doc ul li,main.doc ol li{margin-bottom:6px;}
-main.doc ul li::marker{color:var(--accent);}
-main.doc strong{color:var(--text-primary);font-weight:600;}
-main.doc kbd{font-family:var(--font-mono);font-size:11px;background:var(--bg-surface);border:1px solid var(--border);border-bottom-width:2px;padding:1px 6px;border-radius:var(--rad);color:var(--text-primary);}
-main.doc pre{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--rad);padding:14px 16px;font-family:var(--font-mono);font-size:12px;overflow:auto;margin:0 0 18px;}
+.manual-body{font-family:var(--font-ui);font-size:15px;line-height:1.65;color:var(--text-primary);}
+.manual-body > h1{display:none;}
 
-.notice{padding:14px 16px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--rad);font-size:13.5px;color:var(--text-secondary);line-height:1.55;margin:0 0 24px;}
-.notice strong{color:var(--text-primary);}
+.manual-body h2{
+  font-family:var(--font-mono);font-size:17px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;color:var(--text-primary);
+  margin:64px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border);
+  scroll-margin-top:76px;
+}
+.manual-body h2::before{
+  content:'';display:inline-block;width:8px;height:8px;background:var(--accent);
+  margin-right:10px;vertical-align:middle;margin-top:-3px;
+}
+.manual-body h3{
+  font-family:var(--font-mono);font-size:13px;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.04em;color:var(--text-primary);
+  margin:36px 0 10px;scroll-margin-top:76px;
+  display:flex;align-items:baseline;gap:10px;
+}
+.manual-body h3::before{
+  content:'';width:5px;height:5px;background:var(--accent);
+  display:inline-block;flex-shrink:0;
+}
+
+.manual-body p{margin:0 0 14px;color:var(--text-secondary);}
+.manual-body strong{color:var(--text-primary);font-weight:600;}
+.manual-body em{font-style:italic;}
+
+.manual-body code{
+  font-family:var(--font-mono);font-size:13px;
+  background:var(--bg-secondary);padding:1px 6px;
+  border:1px solid var(--border);border-radius:var(--rad);color:var(--text-primary);
+}
+.manual-body pre{
+  background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--rad);
+  padding:14px 16px;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;
+  overflow:auto;margin:0 0 18px;
+}
+.manual-body pre code{background:transparent;border:none;padding:0;font-size:12.5px;}
+
+.manual-body a{color:var(--accent);}
+.manual-body a:hover{text-decoration:underline;}
+
+.manual-body ul,.manual-body ol{padding-left:24px;margin:0 0 16px;color:var(--text-secondary);}
+.manual-body li{margin-bottom:5px;}
+.manual-body ul li::marker{color:var(--accent);}
+
+.manual-body table{width:100%;border-collapse:collapse;margin:0 0 18px;font-size:13px;}
+.manual-body th,.manual-body td{
+  text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);
+  vertical-align:top;
+}
+.manual-body th{
+  font-family:var(--font-mono);font-size:10px;font-weight:600;
+  letter-spacing:0.10em;text-transform:uppercase;color:var(--text-muted);
+  background:var(--bg-secondary);
+}
+.manual-body td{color:var(--text-secondary);}
+.manual-body td:first-child,.manual-body td:nth-child(2){color:var(--text-primary);}
+
+.manual-body img{
+  display:block;max-width:100%;height:auto;
+  margin:18px auto;
+  border:1px solid var(--border);border-radius:var(--rad);
+  background:var(--bg-secondary);
+}
+
+.manual-body kbd{
+  font-family:var(--font-mono);font-size:11px;
+  background:var(--bg-surface);border:1px solid var(--border);border-bottom-width:2px;
+  padding:1px 6px;border-radius:var(--rad);color:var(--text-primary);
+}
+
+.manual-body blockquote{
+  border-left:2px solid var(--accent);
+  padding:8px 16px;margin:0 0 16px;
+  background:var(--bg-secondary);
+  color:var(--text-secondary);
+}
+
+.manual-body hr{
+  border:none;border-top:1px solid var(--border);margin:32px 0;
+}
+
+.manual-body .manual-img-missing{
+  display:flex;flex-direction:column;gap:2px;
+  padding:14px 18px;margin:18px auto;
+  border:1px dashed var(--border);border-radius:var(--rad);
+  background:var(--bg-secondary);
+  font-family:var(--font-mono);font-size:11px;color:var(--text-muted);
+  max-width:520px;
+}
+.manual-body .manual-img-missing .k{
+  text-transform:uppercase;letter-spacing:0.1em;
+  color:var(--text-secondary);font-weight:500;
+}
 
 @media (max-width:1100px){
-  .doc-layout{grid-template-columns:220px 1fr;}
-  aside.toc-r{display:none;}
+  .doc-layout{grid-template-columns:220px 1fr;gap:32px;}
 }
 @media (max-width:900px){
   .doc-layout{grid-template-columns:1fr;}
@@ -110,34 +207,36 @@ main.doc pre{background:var(--bg-secondary);border:1px solid var(--border);borde
   <div>
     <div class="eyebrow">Documentation · v0.6.1</div>
     <h1>The user<br><em>manual.</em></h1>
-    <p class="sub">A living version of the in-app manual. Same source as <span class="mono" style="background:var(--bg-secondary);padding:1px 6px;border-radius:var(--rad);">docs/MANUAL.md</span> in the repository — what ships inside the app under <kbd>?</kbd> or <em>Help → User Manual</em>.</p>
+    <p class="sub">The full in-app manual, served from <a href={manualUrl}><code>docs/MANUAL.md</code></a> in the repository.</p>
   </div>
   <div class="meta">
-    <span><strong>21</strong> chapters</span>
+    <span><strong>{chapters.length}</strong> chapters</span>
     <span><strong>v0.6.1</strong> current</span>
-    <span class="led ok">In-app · ?</span>
+    <span class="led ok">Single page</span>
   </div>
 </div></header>
 
 <div class="wrap doc-layout">
   <aside class="side">
-    {sidebar.map(s => (
-      <>
-        <h5>{s.h}</h5>
-        <ul>
-          {s.items.map(([href, label, count]) => (
-            <li><a href={href}>{label}{count && <span class="count">{count}</span>}</a></li>
-          ))}
-        </ul>
-      </>
-    ))}
+    <h5>Chapters</h5>
+    <ul>
+      {chapters.map((c) => (
+        <li><a href={`#${c.id}`}>{c.text}</a></li>
+      ))}
+    </ul>
+    <h5 class="tail">Source</h5>
+    <ul>
+      <li><a href={manualUrl}>docs/MANUAL.md</a></li>
+      <li><a href={repo}>Repository</a></li>
+      <li><a href={releases}>Releases</a></li>
+    </ul>
   </aside>
 
   <main class="doc">
     <div class="doc-header">
-      <div class="crumb"><span>Docs</span><span style="opacity:.4;">/</span><span>Getting started</span></div>
-      <h1>Welcome to <em>NeuroTrace.</em></h1>
-      <p class="lead">Open a recording, navigate the group → series → sweep tree, and run the analysis modules over the trace. This page is the short version of the manual; the full reference lives at <a href={manualUrl} class="mono" style="background:var(--bg-secondary);padding:1px 6px;border-radius:var(--rad);">docs/MANUAL.md</a>.</p>
+      <div class="crumb"><span>Docs</span><span style="opacity:.4;">/</span><span>User manual</span></div>
+      <h1>NeuroTrace <em>user manual.</em></h1>
+      <p class="lead">Open a recording, navigate the group → series → sweep tree, and run the analysis modules over the trace. Below is the complete in-app reference — {chapters.length} chapters covering every analysis window, the persistence model, and the keyboard shortcuts.</p>
       <div class="meta">
         <span class="chip ok">v0.6.1</span>
         <span class="chip">macOS · Linux · Windows</span>
@@ -145,107 +244,7 @@ main.doc pre{background:var(--bg-secondary);border:1px solid var(--border);borde
       </div>
     </div>
 
-    <h2 id="install">Install</h2>
-    <p>Download the latest installer from the <a href={releases}>releases page</a>. Four artifacts are produced on each release: a macOS Apple Silicon DMG, a Windows x64 NSIS <span class="mono">.exe</span>, and Linux x64 + arm64 AppImages. Intel macOS is not built — re-add the <span class="mono">macos-13</span> matrix row in <span class="mono">.github/workflows/build.yml</span> if you need it.</p>
-    <div class="notice"><strong>From source.</strong> NeuroTrace is an Electron + React + Python app. Clone the repo, <span class="mono">npm install</span>, <span class="mono">pip install -r backend/requirements.txt</span>, then <span class="mono">npm run dev</span> to run the desktop app with hot-reload.</div>
-
-    <h2 id="first-recording">Your first recording</h2>
-    <p>Drag a <span class="mono">.dat</span> or <span class="mono">.abf</span> file into the workspace. NeuroTrace builds a <strong>group → series → sweep</strong> tree from the file's protocol metadata. Click any sweep to view it; click a series header to scope an analysis to that series.</p>
-    <ul>
-      <li><strong>Toolbar</strong>: file open, traces, average modes, theme, and the analysis-window launcher.</li>
-      <li><strong>Tree navigator</strong>: walk the recording. Multi-select sweeps with <kbd>⇧</kbd> or <kbd>⌘</kbd>.</li>
-      <li><strong>Continuous viewer</strong>: the main trace pane. Cursors are off by default; toggle from the cursor panel.</li>
-    </ul>
-
-    <h2 id="sidecar">The <em>.neurotrace</em> sidecar</h2>
-    <p>Per-recording state lives in a plain JSON sidecar next to the recording: <span class="mono">recording.dat.neurotrace</span>. The sidecar carries:</p>
-    <ul>
-      <li>All analysis results — events, bursts, AP, IV, fEPSP, paired, cursors, resistance.</li>
-      <li>Form / parameter state for each module so reopening a file lands you back on the exact same configuration.</li>
-      <li>Train-grouping params per module per series.</li>
-      <li>Recording metadata (file-level + series-level tags) consumed by the cohort module.</li>
-      <li>Excluded / averaged-sweep selections, cursor positions, scale overrides, per-series filter overrides.</li>
-    </ul>
-    <p>Atomic write via Electron IPC; debounced save 1 s after any change.</p>
-
-    <h2 id="shortcuts">Keyboard shortcuts</h2>
-    <p>Press <kbd>?</kbd> anywhere in the app to open the shortcuts overlay. The most common bindings:</p>
-    <ul>
-      <li><kbd>←</kbd> / <kbd>→</kbd> — previous / next sweep</li>
-      <li><kbd>Home</kbd> / <kbd>End</kbd> — first / last sweep</li>
-      <li><kbd>PgUp</kbd> / <kbd>PgDn</kbd> — jump ±3 viewport widths (continuous-mode windows)</li>
-      <li><kbd>?</kbd> — shortcuts overlay</li>
-      <li><kbd>⌘ K</kbd> — global command palette (recording / window / sweep)</li>
-    </ul>
-
-    <h2 id="cursors">Cursor measurements</h2>
-    <p>Up to ten user-configurable measurement slots per recording. Each slot is a named pair of cursor regions plus a metric: baseline, peak, amplitude, rise time, decay τ, half-width, integrated area.</p>
-
-    <h2 id="resistance">Resistance</h2>
-    <p>Series resistance, input resistance, capacitance, and membrane time constant from a test pulse. Single-sweep mode for one current step; cross-sweep mode for averaged passive properties across a protocol.</p>
-
-    <h2 id="iv">I–V curves</h2>
-    <p>Steady-state and transient-peak responses to current / voltage steps. Sag ratio for I<sub>h</sub> estimation; reversal potential by linear fit.</p>
-
-    <h2 id="ap">Action potentials</h2>
-    <p>Threshold (eight methods), peak, amplitude, rise / decay slopes, half-width, fAHP, mAHP. Per-sweep counting → F–I curve → rheobase. Phase plot (dV/dt vs. V). Optional interpolation to 200 kHz before threshold detection.</p>
-
-    <h2 id="events">Event detection</h2>
-    <p>Template matching (correlation or deconvolution) and threshold detection. Per-event biexponential fits with τ<sub>rise</sub>, τ<sub>decay</sub>, amplitude. Multi-template detection with per-event template tagging. Manual add / remove with one click. Companion windows for template generation and refinement.</p>
-
-    <h2 id="bursts">Burst detection</h2>
-    <p>Three detectors on continuous extracellular traces: threshold, oscillation envelope, ISI clustering. Per-burst kinetics + integrated charge. Continuous-mode viewer with viewport presets (Full / 5 min / 1 min / 30 s / 10 s / 1 s) and a draggable scroll-indicator slider.</p>
-
-    <h2 id="field">Field potential</h2>
-    <p>fEPSP slope (10–90% linear default), population spike amplitude, paired-pulse ratio, LTP / LTD time-courses. One window with mode tabs.</p>
-
-    <h2 id="paired">Paired recordings</h2>
-    <p>Pre / post detection in two-channel recordings. Success / failure classification, monosynaptic latency, paired-pulse ratio, spike-triggered average with biexponential decay fit.</p>
-
-    <h2 id="trains">Train grouping</h2>
-    <p>Optional post-detection clustering labels closely-spaced events as <span class="mono">T1, T2, …</span>. Off by default; toggle one sidebar checkbox per module to enable. Defaults: bursts <em>500 ms / ≥2</em>, events <em>50 ms / ≥3</em>, AP <em>20 ms / ≥3</em>. The same algorithm runs in the cohort extractor — on-screen labels and CSV <span class="mono">train_id</span> columns match by construction.</p>
-
-    <h2 id="metadata">Metadata</h2>
-    <p>File-level and series-level tag editor. Bulk consistency checker. Group definitions for downstream cohort comparisons.</p>
-
-    <h2 id="export">Trace Export</h2>
-    <p>Figure-quality SVG, PNG, PDF, and JPG export with templates and saved sessions. Configure once, reuse across cells in a study.</p>
-
-    <h2 id="batch">Batch</h2>
-    <p>Pick a template recording, extract recipes from its tags, run them across a folder of target files. Train-grouping params propagate to each target sidecar.</p>
-
-    <h2 id="cohort">Cohort</h2>
-    <p>Aggregate sidecars across a folder of cells. Two-group / N-group / paired / RM-ANOVA stats with post-hocs. K–S family for distribution metrics (events / IEIs / amplitudes). Publication-ready dot / bar / box / violin / ECDF / time-series plots. Export to CSV, Excel, and Prism <span class="mono">.pzfx</span>.</p>
-
-    <h2 id="formats">File formats</h2>
-    <p>HEKA Patchmaster (<span class="mono">.dat</span>) and Axon Binary Format (<span class="mono">.abf</span>) are read directly. 50+ other formats — Spike2, Igor, Plexon, Blackrock, Intan, NWB, etc. — are read via <a href="https://github.com/NeuralEnsemble/python-neo">python-neo</a>.</p>
-
-    <h2 id="manual">Full <em>MANUAL.md</em></h2>
-    <p>The complete user manual is bundled into the app and lives at <a href={manualUrl}>docs/MANUAL.md</a> in the repository. Open the in-app version at any time via <em>Help → User Manual</em> or by opening the <em>manual</em> analysis window. Chapter 21 covers train grouping in full.</p>
-
-    <h2 id="contributing">Contributing</h2>
-    <p>Issues and pull requests are welcome at <a href={repo}>EpilepsyCenter/neurotrace</a>. See <a href={`${repo}/blob/main/AGENTS.md`}>AGENTS.md</a> for contributor notes — especially the cross-window architecture (per-window Zustand stores synced via <span class="mono">BroadcastChannel('neurotrace-sync')</span>) which is load-bearing.</p>
+    <article class="manual-body" set:html={html}></article>
   </main>
-
-  <aside class="toc-r">
-    <h6>On this page</h6>
-    <ul>
-      <li><a href="#install">Install</a></li>
-      <li><a href="#first-recording">First recording</a></li>
-      <li><a href="#sidecar">.neurotrace sidecar</a></li>
-      <li><a href="#shortcuts">Shortcuts</a></li>
-      <li><a href="#cursors">Cursors</a></li>
-      <li><a href="#resistance">Resistance</a></li>
-      <li><a href="#iv">I–V curves</a></li>
-      <li><a href="#ap">Action potentials</a></li>
-      <li><a href="#events">Events</a></li>
-      <li><a href="#bursts">Bursts</a></li>
-      <li><a href="#field">Field PSP</a></li>
-      <li><a href="#paired">Paired</a></li>
-      <li><a href="#trains">Train grouping</a></li>
-      <li><a href="#cohort">Cohort</a></li>
-      <li><a href="#formats">Formats</a></li>
-    </ul>
-  </aside>
 </div>
 </Base>

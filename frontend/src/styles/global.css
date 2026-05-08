@@ -1612,6 +1612,45 @@ body[data-platform="mac"] .toolbar {
   color: var(--text-primary);
 }
 
+/* Inline screenshots from docs/screenshots/, bundled by Vite. */
+.manual-content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: var(--space-4) auto;
+  border: 1px solid var(--border);
+  border-radius: var(--rad);
+  background: var(--bg-secondary);
+}
+
+/* Placeholder shown when MANUAL.md references a screenshot that
+   hasn't been captured yet — keeps the page from showing broken
+   <img> icons. Replaced automatically once the file is dropped
+   into docs/screenshots/. */
+.manual-img-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3) var(--space-4);
+  margin: var(--space-4) auto;
+  border: 1px dashed var(--border);
+  border-radius: var(--rad);
+  background: var(--bg-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.manual-img-missing .k {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.manual-img-missing .v {
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
 .manual-content h1 {
   font-family: var(--font-mono);
   font-size: var(--fs-xl);

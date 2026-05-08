@@ -3,10 +3,20 @@ import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import renderer from 'vite-plugin-electron-renderer'
 import { resolve } from 'path'
+import { readFileSync } from 'fs'
 
 const root = resolve(__dirname, 'frontend')
 
+// Read app version from package.json so the renderer can include it
+// in bug reports / about boxes without bundling all of package.json.
+const appVersion = JSON.parse(
+  readFileSync(resolve(__dirname, 'package.json'), 'utf8'),
+).version as string
+
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   plugins: [
     react(),
     electron([

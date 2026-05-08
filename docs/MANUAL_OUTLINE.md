@@ -296,6 +296,7 @@ fine.
 
 ### Help / About
 - Help button — opens this user manual
+- Bug-report button — opens an in-app Tally form (form ID `ZjvoQB`); no GitHub account needed; auto-attaches `app_version, os, view, recording_format, recording_size, last_error, submission_id` (filenames / paths deliberately omitted); user-visible fields: title, description, steps, expected, severity, optional email, optional screenshot
 
 ---
 

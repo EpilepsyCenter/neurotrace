@@ -2,9 +2,11 @@
 
 A modern electrophysiology analysis desktop app inspired by [Stimfit](https://github.com/neurodroid/stimfit). Electron shell + React/TypeScript/Vite frontend + Python FastAPI backend. All numerical work lives in Python; the frontend renders and handles interaction.
 
-Current release: **v0.6.1**. macOS Apple-Silicon DMG and Windows NSIS installers are built automatically by GitHub Actions on each tag — see the [releases page](https://github.com/marcoledri/neurotrace/releases).
+Current release: **v0.6.1**. macOS Apple-Silicon DMG, Windows NSIS, and Linux AppImage installers are built automatically by GitHub Actions on each tag — see the [releases page](https://github.com/EpilepsyCenter/neurotrace/releases).
 
 ![NeuroTrace](logo/NeuroTrace-lockup-horizontal.png)
+
+**[Website](https://epilepsycenter.github.io/neurotrace/)** · **[Releases](https://github.com/EpilepsyCenter/neurotrace/releases)** · **[Manual](docs/MANUAL.md)**
 
 ## What it does
 

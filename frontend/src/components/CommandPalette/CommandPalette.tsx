@@ -22,10 +22,12 @@ interface Cmd {
 }
 
 const ANALYSES: Array<{ key: string; label: string; icon: IconName }> = [
+  // Order mirrors the Toolbar's Analyses dropdown for consistency.
   { key: 'cursors',          label: 'Cursor Measurements', icon: 'chart' },
   { key: 'resistance',       label: 'Rs / Rin / Cm',       icon: 'chart' },
   { key: 'iv',               label: 'I-V Curve',           icon: 'chart' },
   { key: 'action_potential', label: 'Action Potentials',   icon: 'chart' },
+  { key: 'paired',           label: 'Paired Recording',    icon: 'chart' },
   { key: 'events',           label: 'Event Detection',     icon: 'chart' },
   { key: 'bursts',           label: 'Burst Detection',     icon: 'chart' },
   { key: 'field_potential',  label: 'Field Potential',     icon: 'chart' },
@@ -289,6 +291,12 @@ export function CommandPalette() {
       label: 'Open user manual',
       keywords: 'documentation help',
       run: () => openAnalysis('manual'),
+    })
+    cmds.push({
+      id: 'help.bug', group: 'Help', icon: 'bug',
+      label: 'Report a bug or send feedback',
+      keywords: 'issue feedback report tally',
+      run: () => { window.dispatchEvent(new CustomEvent('open-bug-report')) },
     })
 
     FONT_SIZES.forEach((sz) => {

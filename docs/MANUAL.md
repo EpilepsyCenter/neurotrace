@@ -130,6 +130,26 @@ You can safely move a recording and its sidecar together. If the
 sidecar is missing, the recording opens cleanly and a fresh one is
 written the first time you change anything worth saving.
 
+### Reporting bugs and sending feedback
+
+Click the **bug icon** in the top-right of the toolbar (next to the
+help icon) — or run **Report a bug** from the command palette
+(`⌘K` / `Ctrl+K`) — to open an in-app form. Describe what
+happened in plain language; you do not need a GitHub account, the
+form is anonymous by default, and submission stays inside the app.
+
+Alongside your description NeuroTrace attaches a small block of
+diagnostic context: app version, OS, the analysis window you were
+in, the recording's format and group/series count, the most recent
+error message, and a random submission ID. Filenames, file paths,
+recording data, and any personally-identifying field are
+deliberately *not* sent. A "What we'll send" expander at the
+bottom of the form shows the exact lines of context being attached
+so you can review them before clicking submit.
+
+If you would like a reply, fill in the optional email field on the
+form; otherwise leave it blank to stay anonymous.
+
 ---
 
 ## 2. The Toolbar
@@ -269,6 +289,11 @@ keeps only:
   a keyboard-shortcut cheat sheet plus an *Open user manual*
   button. The help modal is also reachable by pressing `?` anywhere
   outside an input.
+- A **Report a bug** button (the bug icon) that opens an in-app
+  feedback form. No GitHub account needed; submission stays inside
+  the app and includes a small block of automatic diagnostics. See
+  *Reporting bugs and sending feedback* in chapter 1 for what's
+  attached.
 - The gear (**⚙**) button at the far right that opens the
   **Settings** popover. Settings are global rather than
   per-recording.

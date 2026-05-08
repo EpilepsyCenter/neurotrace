@@ -25,6 +25,7 @@ export type IconName =
   | 'gear'
   | 'help'
   | 'book'
+  | 'bug'
   | 'external'
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -95,6 +96,16 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <path d="M2.5 3.5h4c1 0 1.5.5 1.5 1.5v8c0-1-.5-1.5-1.5-1.5h-4z" />
       <path d="M13.5 3.5h-4c-1 0-1.5.5-1.5 1.5v8c0-1 .5-1.5 1.5-1.5h4z" />
+    </>
+  ),
+  // Stylised bug — round body, antennae, and three pairs of legs.
+  bug: (
+    <>
+      <ellipse cx="8" cy="9" rx="3.5" ry="4.5" />
+      <path d="M8 4.5V3.5" />
+      <path d="M6.5 3.5 5.5 2.5M9.5 3.5l1-1" />
+      <path d="M4.5 7H3M4.5 9H2.5M4.5 11H3" />
+      <path d="M11.5 7H13M11.5 9H13.5M11.5 11H13" />
     </>
   ),
   external: (

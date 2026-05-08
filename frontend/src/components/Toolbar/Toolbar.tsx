@@ -674,6 +674,17 @@ export function Toolbar() {
         <Icon name="help" size={15} />
       </button>
 
+      {/* Report a bug — opens the in-app Tally form. Available to
+          users without GitHub accounts; submission lands in the
+          team's Tally inbox / webhook. */}
+      <button
+        className="btn btn-compact"
+        onClick={() => window.dispatchEvent(new CustomEvent('open-bug-report'))}
+        title="Report a bug or send feedback"
+      >
+        <Icon name="bug" size={15} />
+      </button>
+
       {/* Settings gear */}
       <div style={{ position: 'relative' }} ref={settingsRef}>
         <button

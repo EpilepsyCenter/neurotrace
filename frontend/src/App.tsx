@@ -12,6 +12,7 @@ import { TagToast } from './components/TagToast/TagToast'
 import { RecordingHeader } from './components/RecordingHeader/RecordingHeader'
 import { CommandPalette } from './components/CommandPalette/CommandPalette'
 import { HelpModal } from './components/HelpModal/HelpModal'
+import { BugReportModal } from './components/BugReportModal/BugReportModal'
 import { useGlobalTooltips } from './hooks/useGlobalTooltips'
 
 const MIN_SIDEBAR = 160
@@ -58,6 +59,29 @@ export default function App() {
     return () => {
       window.removeEventListener('open-help', onOpen)
       window.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  // Bug-report modal — same mount pattern as HelpModal. Listens for
+  // the ``open-bug-report`` window event, dispatched by the toolbar
+  // button (and by analysis windows over BroadcastChannel below).
+  const [showBugReport, setShowBugReport] = useState(false)
+  useEffect(() => {
+    const onOpen = () => setShowBugReport(true)
+    window.addEventListener('open-bug-report', onOpen)
+    // Analysis windows can ask the main window to open the modal —
+    // they have their own renderer, but landing the modal in main
+    // keeps the user-action / view diagnostics consistent.
+    let ch: BroadcastChannel | null = null
+    try {
+      ch = new BroadcastChannel('neurotrace-sync')
+      ch.onmessage = (ev) => {
+        if (ev.data?.type === 'open-bug-report') setShowBugReport(true)
+      }
+    } catch { /* BroadcastChannel unavailable */ }
+    return () => {
+      window.removeEventListener('open-bug-report', onOpen)
+      ch?.close()
     }
   }, [])
 
@@ -159,6 +183,11 @@ export default function App() {
       <TagToast />
       <CommandPalette />
       <HelpModal open={showHelp} onClose={() => setShowHelp(false)} />
+      <BugReportModal
+        open={showBugReport}
+        onClose={() => setShowBugReport(false)}
+        view="main"
+      />
     </div>
   )
 }

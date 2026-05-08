@@ -1,0 +1,173 @@
+---
+import Base from '../layouts/Base.astro';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const link = (p: string) => `${base}${p}`;
+const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const releases = `${repo}/releases`;
+
+const stages = [
+  {
+    id: 'open',
+    num: '01',
+    title: 'Open a recording',
+    kicker: 'Drag · drop · tree',
+    body: 'Drag a .dat or .abf file into the workspace. NeuroTrace builds a group → series → sweep tree from the file\'s native protocol metadata. No converters, no intermediate CSVs. The recording stays where it is — the analysis sits in a sidecar next to it.',
+    bullets: [
+      ['HEKA Patchmaster', 'Direct .dat reader. Group/series/sweep structure preserved, channel units and protocols loaded.'],
+      ['Axon Binary Format', 'Direct .abf reader for v1 and v2 files.'],
+      ['50+ via Neo', 'Spike2, Igor, Plexon, Blackrock, Intan, NWB and others through python-neo.'],
+    ],
+  },
+  {
+    id: 'navigate',
+    num: '02',
+    title: 'Navigate &amp; configure',
+    kicker: 'Tree · viewer · sidebar',
+    body: 'The tree on the left lets you walk the recording. The continuous-mode viewer in the middle shows the current sweep with draggable cursor regions. The sidebar on the right is where you set the per-module parameters. Same shape across every analysis window.',
+    bullets: [
+      ['Sweep arrows', 'Top of every analysis window: ⟨⟨ ⟪ ◀ ▶ ⟫ ⟩⟩ for jump, prev, ±1 sweep, next, end. Same on every window — keyboard ←/→ also work.'],
+      ['Pre-detection filter', 'Tick the checkbox in any window to live-filter the displayed trace. Filters propagate via the channel so new windows you open inherit the main viewer\'s filter.'],
+      ['Per-channel scaling', 'Override channel scale at the recording or series level when the device firmware lies about its own units.'],
+    ],
+  },
+  {
+    id: 'analyze',
+    num: '03',
+    title: 'Run the analysis',
+    kicker: 'Cursors · template · biexp · F–I',
+    body: 'Pick the analysis window from the toolbar. Cursor measurements for one-shot kinetics. Resistance, I–V, AP for single-cell properties. Event Detection for synaptic events with template + biexp fit. Burst Detection for continuous field traces. Field PSP for fEPSP / PPR / LTP. Paired for two-channel pre/post.',
+    bullets: [
+      ['Continuous-mode viewer', 'For burst and event detection, scroll smoothly through long recordings with viewport presets (Full, 5 min, 1 min, 30 s, 10 s, 1 s) and a draggable scroll-indicator slider.'],
+      ['Live filter applied', 'When the pre-detection filter is on, the viewer trace updates immediately — no Run-button gating.'],
+    ],
+  },
+  {
+    id: 'review',
+    num: '04',
+    title: 'Curate sweep-by-sweep',
+    kicker: 'Accept · reject · re-fit',
+    body: 'Detection produces a candidate set. You curate it: left-click to add an event, right-click to remove, drag to nudge a peak. Decisions are kept in the sidecar; the same decisions are visible to every other analysis window via the BroadcastChannel sync.',
+    bullets: [
+      ['Train grouping', 'Optional post-detection clustering labels closely-spaced events as T1, T2, …. Off by default. One sidebar checkbox to enable; max IEI and min count tunable per module.'],
+      ['Manual edits never lost', 'The Detect button only adds candidates — your accept/reject decisions and manual additions are preserved across re-runs.'],
+    ],
+  },
+  {
+    id: 'export',
+    num: '05',
+    title: 'Export &amp; archive',
+    kicker: 'SVG · PNG · PDF · CSV · Prism',
+    body: 'Two routes. Per-recording: Trace Export window for figure-quality SVG / PNG / PDF / JPG plus per-event CSVs. Cross-recording: Cohort module for aggregated stats and plots, exported to CSV / Excel / Prism .pzfx so the figure lands in your existing GraphPad workflow.',
+    bullets: [
+      ['Templates', 'Save a Trace Export configuration (which channels, scale bars, cursors visible, palette) and reuse it across cells in a study.'],
+      ['Sidecar always saved', 'Whatever you exported, the .neurotrace sidecar carries the parameters you used. Reopen the file in six months — every window comes back exactly.'],
+    ],
+  },
+  {
+    id: 'cohort',
+    num: '06',
+    title: 'Cohort &amp; batch',
+    kicker: 'Folder · stats · figures',
+    body: 'When you have many recordings, the Cohort module aggregates sidecars across a folder of cells, runs the stats (two-group, N-group, paired, RM-ANOVA, K–S for distributions) with post-hocs, and renders dot / bar / box / violin / ECDF / time-series plots. Batch propagates a template recording\'s recipes to every target file in a folder.',
+    bullets: [
+      ['Auto extractors', 'Each analysis module ships a cohort extractor that produces per-cell scalars and per-cell distributions, fed straight into the stats menu.'],
+      ['Train grouping at scale', 'When sidecar train_params is enabled for a module, train scalars and distributions are emitted automatically per cell.'],
+    ],
+  },
+];
+---
+<Base title="NeuroTrace — Workflow">
+<style>
+.stage{padding:80px 0;border-bottom:1px solid var(--border);}
+.stage .head{display:grid;grid-template-columns:80px 1fr auto;gap:24px;align-items:baseline;margin-bottom:18px;}
+.stage .num{font-family:var(--font-mono);font-size:11px;color:var(--text-muted);letter-spacing:0.14em;}
+.stage h2{font-family:var(--font-ui);font-weight:300;font-size:44px;letter-spacing:-0.015em;margin:0;line-height:1.05;}
+.stage h2 em{font-style:italic;color:var(--text-muted);}
+.stage .kicker{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;}
+.stage .lead{margin:4px 0 28px 104px;color:var(--text-secondary);font-size:16px;line-height:1.55;max-width:62ch;}
+.stage .bullets{margin-left:104px;display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--border);border-radius:var(--rad);overflow:hidden;background:var(--bg-secondary);}
+.stage .bullet{padding:18px 20px;background:var(--bg-primary);border-right:1px solid var(--border);}
+.stage .bullet:last-child{border-right:none;}
+.stage .bullet h3{margin:0 0 6px;font-family:var(--font-ui);font-weight:600;font-size:13px;}
+.stage .bullet p{margin:0;font-size:13px;line-height:1.55;color:var(--text-secondary);}
+.stage .bullet p .mono{background:var(--bg-secondary);padding:0 4px;border-radius:var(--rad);color:var(--text-primary);font-size:12px;}
+
+.cta-big{padding:120px 0;background:var(--dark-bg);color:var(--dark-text);text-align:center;position:relative;overflow:hidden;}
+.cta-big::before{content:'';position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(255,255,255,0.04) 1px,transparent 1px),linear-gradient(to bottom,rgba(255,255,255,0.04) 1px,transparent 1px);background-size:80px 80px;}
+.cta-big .wrap{position:relative;z-index:1;}
+.cta-big .eyebrow{color:var(--dark-accent);}
+.cta-big .eyebrow::before{background:var(--dark-accent);box-shadow:0 0 5px var(--dark-accent),0 0 9px oklch(0.78 0.10 215 / 0.5);border-radius:50%;width:7px;height:7px;}
+.cta-big h2{color:var(--dark-text);font-family:var(--font-ui);font-weight:300;font-size:52px;letter-spacing:-0.02em;margin:12px auto 16px;max-width:26ch;line-height:1.05;}
+.cta-big h2 em{font-style:italic;color:var(--dark-text-2);}
+.cta-big p{color:var(--dark-text-2);font-size:15px;max-width:46ch;margin:0 auto 32px;line-height:1.55;}
+.cta-big .btns{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;}
+.cta-big .btn-lg{background:transparent;border-color:var(--dark-border);color:var(--dark-text);}
+.cta-big .btn-lg:hover{background:var(--dark-bg-3);color:var(--dark-accent);}
+.cta-big .btn-lg.primary{background:var(--dark-accent);border-color:var(--dark-accent);color:var(--dark-bg);}
+
+@media (max-width:900px){
+  .stage .head{grid-template-columns:1fr;}
+  .stage .lead,.stage .bullets{margin-left:0;}
+  .stage .bullets{grid-template-columns:1fr;}
+  .stage .bullet{border-right:none;border-bottom:1px solid var(--border);}
+  .stage .bullet:last-child{border-bottom:none;}
+}
+</style>
+
+<header class="page-hd"><div class="wrap">
+  <div>
+    <div class="eyebrow">Workflow · Step by step</div>
+    <h1>From recording<br><em>to figure.</em></h1>
+    <p class="sub">Six stages, the way it actually goes: open the recording, navigate the tree, run the analysis, curate sweep-by-sweep, export the figure, aggregate at cohort scale. Same shape every day.</p>
+  </div>
+  <div class="meta">
+    <span><strong>6</strong> stages</span>
+    <span><strong>14</strong> windows</span>
+    <span><strong>0.6.1</strong> current build</span>
+    <span class="led ok">No CLI required</span>
+  </div>
+</div></header>
+
+<div class="toc"><div class="wrap">
+  <span class="k">Stages</span>
+  {stages.map(s => <a href={`#${s.id}`}>{s.num} {s.title.replace(/&amp;/g, '&')}</a>)}
+</div></div>
+
+{stages.map(s => (
+  <section class="stage" id={s.id}>
+    <div class="wrap">
+      <div class="head">
+        <div class="num">{s.num} / {String(stages.length).padStart(2, '0')}</div>
+        <div>
+          <div class="kicker">{s.kicker}</div>
+          <h2 set:html={s.title}></h2>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+          <span class="chip">Stage {s.num}</span>
+        </div>
+      </div>
+      <p class="lead">{s.body}</p>
+      <div class="bullets">
+        {s.bullets.map(([h, p]) => (
+          <div class="bullet">
+            <h3>{h}</h3>
+            <p>{p}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+))}
+
+<section class="cta-big">
+  <div class="wrap">
+    <div class="eyebrow">Try it</div>
+    <h2>Drop a recording in.<em> The rest is interface.</em></h2>
+    <p>NeuroTrace runs entirely on your machine. No account, no upload, no telemetry.</p>
+    <div class="btns">
+      <a class="btn-lg primary" href={releases}>Download v0.6.1 ↓</a>
+      <a class="btn-lg" href={link('/features')}>See the features →</a>
+    </div>
+  </div>
+</section>
+</Base>

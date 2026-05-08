@@ -1,0 +1,233 @@
+---
+import Base from '../layouts/Base.astro';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const link = (p: string) => `${base}${p}`;
+const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const releases = `${repo}/releases`;
+
+const blocks = [
+  {
+    id: 'cursor',
+    num: '01',
+    kicker: 'Baseline · Peak · Rise · Decay · Half-width · Area',
+    title: 'Cursor measurements',
+    chips: ['10 slots', 'Per-recording'],
+    lead: 'Up to ten user-configurable measurement slots per recording. Each slot is a named pair of cursor regions plus a metric (baseline, peak, amplitude, rise time, decay τ, half-width, integrated area). Cursors are draggable; values update live.',
+    bullets: [
+      ['Slot management', 'Name, save, reorder, duplicate, and delete slots from the sidebar. Slot configuration is persisted per recording in the .neurotrace sidecar.'],
+      ['Quick measure', 'Click anywhere on the trace to read out time/value at that exact sample — works on the LTTB-decimated viewer because we binary-search the time array, not the index.'],
+    ],
+  },
+  {
+    id: 'resistance',
+    num: '02',
+    kicker: 'Rs · Rin · Cm · τmembrane',
+    title: 'Resistance',
+    chips: ['Single-sweep', 'Cross-sweep'],
+    lead: 'Series resistance, input resistance, capacitance, and membrane time constant from a test pulse. Single-sweep mode for one current step, cross-sweep mode for averaged passive properties across a protocol.',
+    bullets: [
+      ['Test pulse fit', 'Single-exponential decay on the capacitive transient — Rs, Cm, and τm computed from the fit. Steady-state offset gives Rin.'],
+      ['Sweep selection', 'Pick which sweeps contribute. Excluded sweeps are remembered per recording and shared across analysis windows via the sidecar.'],
+    ],
+  },
+  {
+    id: 'iv',
+    num: '03',
+    kicker: 'Steady-state · Transient peak · Sag · Reversal',
+    title: 'I–V curves',
+    chips: ['Auto detect', 'Sag · Vrev'],
+    lead: 'Two cursor bands — baseline and steady-state (or transient peak) — give you the response per stimulus intensity. Linear or log-x axes, sag and reversal-potential extraction one toggle away.',
+    bullets: [
+      ['Sag ratio', 'Min trough during the step versus the steady-state response — useful for Ih estimation in I-clamp.'],
+      ['Reversal potential', 'Linear fit through the I–V data with explicit Vrev readout, or click any two points to bracket Vrev manually.'],
+    ],
+  },
+  {
+    id: 'ap',
+    num: '04',
+    kicker: 'Threshold · Peak · Rise / Decay slopes · F–I · Phase plot',
+    title: 'Action potentials',
+    chips: ['8 threshold methods', 'Up to 200 kHz'],
+    lead: 'Per-AP kinetics — threshold, peak, amplitude, rise and decay slopes, half-width, fAHP, mAHP. Per-sweep AP counting with F–I curve and rheobase. Phase plot (dV/dt vs. V) for any selection. Optional interpolation to 200 kHz before threshold detection.',
+    bullets: [
+      ['Threshold methods', 'Eight methods including dV/dt threshold, second-derivative max, percent-max, fixed mV. Toggle and compare side-by-side.'],
+      ['Per-sweep counting', 'Per-sweep AP counts feed the F–I curve and rheobase computation; train grouping can label closely-spaced APs as T1, T2…'],
+    ],
+  },
+  {
+    id: 'events',
+    num: '05',
+    kicker: 'Template match · Threshold · Multi-template · Biexp fit',
+    title: 'Event detection',
+    chips: ['EPSC', 'IPSC', 'Spikes'],
+    lead: 'Template matching by correlation or deconvolution; threshold detection as an alternative. Per-event biexponential fits with τrise, τdecay, amplitude. Multi-template detection with per-event template tagging. Manual add and remove with one click.',
+    bullets: [
+      ['Template suite', 'Companion windows for template generation (average + biexp fit), refinement (per-event re-fit, σ shaping), and a multi-event browser overlay.'],
+      ['Sweep-by-sweep review', 'Each sweep shows detected events as ticks. Accept, reject, or nudge — keyboard-driven curation. Decisions persist in the sidecar.'],
+    ],
+  },
+  {
+    id: 'bursts',
+    num: '06',
+    kicker: 'Threshold · Oscillation envelope · ISI clustering',
+    title: 'Burst detection',
+    chips: ['Field', 'Continuous'],
+    lead: 'Three burst-detection algorithms on continuous extracellular traces. Per-burst kinetics, integrated charge, manual add/remove on the continuous-mode viewer with viewport presets (Full / 5 min / 1 min / 30 s / 10 s / 1 s).',
+    bullets: [
+      ['Three detectors', 'Threshold (envelope crossings), oscillation envelope (Hilbert), and ISI clustering — picked from a dropdown, all sharing the same review UI.'],
+      ['Train grouping', 'Optional post-detection clustering labels closely-spaced bursts as T1, T2, … with a per-train summary card above the bursts table.'],
+    ],
+  },
+  {
+    id: 'field',
+    num: '07',
+    kicker: 'fEPSP slope · Population spike · Paired-pulse · LTP / LTD',
+    title: 'Field potential',
+    chips: ['fEPSP', 'PPR', 'LTP / LTD'],
+    lead: 'fEPSP slope (10–90% linear by default), population-spike amplitude, paired-pulse ratio, LTP/LTD time-courses. One window with mode tabs — switch between the four sub-analyses without leaving the recording.',
+    bullets: [
+      ['Stimulus artifact masking', 'Set the stimulus time and mask width; the slope fit ignores masked samples.'],
+      ['LTP / LTD time-course', 'Normalize to baseline, plot the time-course directly, export as a time-series figure.'],
+    ],
+  },
+  {
+    id: 'paired',
+    num: '08',
+    kicker: 'Pre / post detection · Latency · PPR · Spike-triggered average',
+    title: 'Paired recordings',
+    chips: ['Two-channel', 'Success / fail'],
+    lead: 'Pre/post detection in two-channel paired recordings. Success/failure classification, monosynaptic latency, paired-pulse ratio, and a spike-triggered average with decay fit.',
+    bullets: [
+      ['STA window', 'Window around each presynaptic spike, averaged on the postsynaptic channel; biexponential decay fit on the average.'],
+      ['Success rate', 'Configurable threshold for what counts as a postsynaptic response — failures are flagged and excluded from the STA optionally.'],
+    ],
+  },
+  {
+    id: 'persistence',
+    num: '09',
+    kicker: '.neurotrace sidecar JSON · atomic write · debounced save',
+    title: 'Sidecar persistence',
+    chips: ['Per-recording', 'Reproducible'],
+    lead: 'Every analysis result, every form parameter, every cursor position, every excluded sweep is persisted to a plain JSON sidecar (recording.dat.neurotrace) next to the recording. Reopen a file in six months — every window comes back exactly where you left it.',
+    bullets: [
+      ['What it carries', 'Analysis results (events, bursts, AP, IV, fPSP, paired, cursors, resistance), form state per module, train-grouping params per series, recording metadata, excluded/averaged sweeps, scale overrides, per-series filter overrides.'],
+      ['Atomic IO', 'Electron main process writes via temp-file rename. Debounced 1 s after any change. No corruption on crash, no half-written sidecars.'],
+    ],
+  },
+  {
+    id: 'cohort',
+    num: '10',
+    kicker: 'Folder aggregation · Stats · Plots · Prism export',
+    title: 'Cohort &amp; batch',
+    chips: ['ANOVA', 'K–S', 'Prism .pzfx'],
+    lead: 'Cohort module aggregates sidecars across a folder, runs two-group / N-group / paired / RM-ANOVA stats with post-hocs, renders publication-ready dot, bar, box, violin, ECDF, and time-series plots. K–S family for distribution metrics. Batch propagates a template recording\'s analysis recipes to every target file in a folder.',
+    bullets: [
+      ['Stats menu', 'Mann-Whitney, Wilcoxon, t-test, Welch, Kruskal-Wallis, one-way and RM-ANOVA. Dunn, Tukey, Holm, Bonferroni post-hocs. K–S for distribution comparisons.'],
+      ['Export', 'CSV (long and wide), Excel, and Prism .pzfx so the figure goes straight into the lab\'s existing GraphPad workflow.'],
+    ],
+  },
+  {
+    id: 'formats',
+    num: '11',
+    kicker: 'HEKA Patchmaster · Axon · 50+ via Neo',
+    title: 'Native file formats',
+    chips: ['DAT', 'ABF', 'Neo'],
+    lead: 'HEKA Patchmaster .dat and Axon Binary Format .abf are read directly. Everything else (Spike2, Igor, Plexon, Blackrock, Intan, NWB, etc.) is read via Neo — the same readers the wider Python neurophysiology ecosystem uses.',
+    bullets: [
+      ['Direct readers', 'Custom readers for HEKA and Axon ensure native precision and full metadata: protocols, channel units, comments, timestamps.'],
+      ['Neo fallback', '50+ formats supported via python-neo. Files open into the same group → series → sweep tree as the native readers.'],
+    ],
+  },
+];
+---
+<Base title="NeuroTrace — Features">
+<style>
+.feature-block{padding:88px 0;border-bottom:1px solid var(--border);}
+.feature-block .head{display:grid;grid-template-columns:80px 1fr auto;gap:24px;align-items:baseline;margin-bottom:24px;}
+.feature-block .num{font-family:var(--font-mono);font-size:11px;color:var(--text-muted);letter-spacing:0.14em;}
+.feature-block h2{font-family:var(--font-ui);font-weight:300;font-size:48px;letter-spacing:-0.015em;margin:0;line-height:1.05;}
+.feature-block h2 em{font-style:italic;color:var(--text-muted);}
+.feature-block .kicker{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;}
+.feature-block .lead{margin:4px 0 28px 104px;color:var(--text-secondary);font-size:16px;line-height:1.55;max-width:64ch;}
+.feature-block .body{margin-left:104px;display:grid;grid-template-columns:1fr 1fr;gap:32px;}
+.feature-block .body .pt h3{font-family:var(--font-ui);font-weight:600;font-size:14px;margin:0 0 4px;letter-spacing:-0.005em;color:var(--text-primary);}
+.feature-block .body .pt p{margin:0 0 18px;color:var(--text-secondary);font-size:14px;line-height:1.6;}
+
+/* CTA */
+.cta-big{padding:120px 0;background:var(--dark-bg);color:var(--dark-text);text-align:center;position:relative;overflow:hidden;}
+.cta-big::before{content:'';position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(255,255,255,0.04) 1px,transparent 1px),linear-gradient(to bottom,rgba(255,255,255,0.04) 1px,transparent 1px);background-size:80px 80px;}
+.cta-big .wrap{position:relative;z-index:1;}
+.cta-big .eyebrow{color:var(--dark-accent);}
+.cta-big .eyebrow::before{background:var(--dark-accent);box-shadow:0 0 5px var(--dark-accent),0 0 9px oklch(0.78 0.10 215 / 0.5);border-radius:50%;width:7px;height:7px;}
+.cta-big h2{color:var(--dark-text);font-family:var(--font-ui);font-weight:300;font-size:52px;letter-spacing:-0.02em;margin:12px auto 16px;max-width:24ch;line-height:1.05;}
+.cta-big h2 em{font-style:italic;color:var(--dark-text-2);}
+.cta-big p{color:var(--dark-text-2);font-size:15px;max-width:46ch;margin:0 auto 32px;line-height:1.55;}
+.cta-big .btns{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;}
+.cta-big .btn-lg{background:transparent;border-color:var(--dark-border);color:var(--dark-text);}
+.cta-big .btn-lg:hover{background:var(--dark-bg-3);color:var(--dark-accent);}
+.cta-big .btn-lg.primary{background:var(--dark-accent);border-color:var(--dark-accent);color:var(--dark-bg);}
+
+@media (max-width:900px){
+  .feature-block .head{grid-template-columns:1fr;}
+  .feature-block .lead,.feature-block .body{margin-left:0;}
+  .feature-block .body{grid-template-columns:1fr;}
+}
+</style>
+
+<header class="page-hd"><div class="wrap">
+  <div>
+    <div class="eyebrow">Features · Reference</div>
+    <h1>Every analysis<br><em>in one panel.</em></h1>
+    <p class="sub">A guided tour of the eleven analysis modules. What each one does, how it's configured, and what you can expect on the other side. Drawn from the actual instrument.</p>
+  </div>
+  <div class="meta">
+    <span><strong>11</strong> modules</span>
+    <span><strong>50+</strong> file formats</span>
+    <span><strong>0.6.1</strong> current build</span>
+    <span class="led ok">MIT licensed</span>
+  </div>
+</div></header>
+
+<div class="toc"><div class="wrap">
+  <span class="k">Jump to</span>
+  {blocks.map(b => <a href={`#${b.id}`}>{b.num} {b.title.replace(/&amp;/g, '&')}</a>)}
+</div></div>
+
+{blocks.map(b => (
+  <section class="feature-block" id={b.id}>
+    <div class="wrap">
+      <div class="head">
+        <div class="num">{b.num} / {String(blocks.length).padStart(2, '0')}</div>
+        <div>
+          <div class="kicker" set:html={b.kicker}></div>
+          <h2 set:html={b.title}></h2>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+          {b.chips.map(c => <span class="chip">{c}</span>)}
+        </div>
+      </div>
+      <p class="lead">{b.lead}</p>
+      <div class="body">
+        {b.bullets.map(([h, p]) => (
+          <div class="pt">
+            <h3>{h}</h3>
+            <p>{p}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+))}
+
+<section class="cta-big">
+  <div class="wrap">
+    <div class="eyebrow">v0.6.1 · Released</div>
+    <h2>Read the docs.<em> Then run it.</em></h2>
+    <p>User manual is bundled into the app and lives in the repository at <span class="mono" style="background:var(--dark-bg-3);padding:1px 6px;border-radius:var(--rad);color:var(--dark-text);">docs/MANUAL.md</span>.</p>
+    <div class="btns">
+      <a class="btn-lg primary" href={link('/docs')}>Open the docs →</a>
+      <a class="btn-lg" href={releases}>Download v0.6.1 ↓</a>
+    </div>
+  </div>
+</section>
+</Base>

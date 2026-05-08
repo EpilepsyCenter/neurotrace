@@ -60,3 +60,8 @@ preferences.json
 # Claude Code scratch
 .claude/
 .vite/
+
+# Internal contributor / agent notes — kept locally, not published.
+# Public-facing docs are README.md (root) and docs/MANUAL*.md.
+CLAUDE.md
+AGENTS.md

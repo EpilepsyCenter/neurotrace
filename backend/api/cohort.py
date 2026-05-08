@@ -166,6 +166,86 @@ def run_stats(req: RunStatsRequest) -> dict:
 
 
 # ---------------------------------------------------------------------
+# /run_distribution_stats — K-S family for distribution metrics
+# ---------------------------------------------------------------------
+
+class DistStatsGroup(BaseModel):
+    tag: str
+    # Per-cell event arrays. The full distribution for one cell is one
+    # inner list. Empty cells (zero events for the metric) get dropped
+    # server-side.
+    values_per_cell: list[list[Optional[float]]]
+
+
+class RunDistributionStatsRequest(BaseModel):
+    groups: list[DistStatsGroup] = Field(
+        ..., description=(
+            "One entry per group: {tag, values_per_cell}. The inner "
+            "lists are the per-cell event arrays for the metric being "
+            "tested (e.g. every IEI for one cell)."
+        ),
+    )
+    design_kind: str = Field(
+        ..., description=(
+            "Only 'unpaired_2' and 'oneway_n' are supported. K-S on "
+            "paired distributions isn't a coherent test."
+        ),
+    )
+    mode: str = Field(
+        default='pooled_ks',
+        description=(
+            "'pooled_ks'     — pool all events per group, run K-S "
+            "(2 groups) or pairwise + Holm (3+).\n"
+            "'per_cell_ks_d' — D vs reference group's pooled events, "
+            "then run scalar Mann-Whitney / Kruskal-Wallis on the "
+            "per-cell D's. Avoids pseudoreplication."
+        ),
+    )
+    anderson_darling: bool = Field(
+        default=False,
+        description=(
+            "If true and design_kind='oneway_n' and mode='pooled_ks', "
+            "run k-sample Anderson-Darling instead of the pairwise "
+            "pooled K-S. Returns a single p across all groups."
+        ),
+    )
+    reference_group_idx: int = Field(
+        default=0,
+        description=(
+            "Only used when mode='per_cell_ks_d'. Index into ``groups`` "
+            "whose pooled events are the reference distribution for "
+            "every cell's D computation. Default 0 = first group."
+        ),
+    )
+    metric: Optional[str] = Field(
+        default=None,
+        description="Optional metric name — echoed back in the response.",
+    )
+
+
+@router.post("/run_distribution_stats")
+def run_distribution_stats(req: RunDistributionStatsRequest) -> dict:
+    """K-S-family test for a distribution metric (event IEI, amplitude,
+    AUC, …). See ``cohort_stats.run_distribution_test`` for the modes."""
+    try:
+        payload = cohort_stats.run_distribution_test(
+            groups=[g.model_dump() for g in req.groups],
+            design_kind=req.design_kind,
+            mode=req.mode,
+            anderson_darling=req.anderson_darling,
+            reference_group_idx=req.reference_group_idx,
+        )
+    except (AssertionError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+    if req.metric is not None:
+        payload['metric'] = req.metric
+    return payload
+
+
+# ---------------------------------------------------------------------
 # /render_graph — matplotlib plot rendering for the cohort UI
 # ---------------------------------------------------------------------
 

@@ -99,7 +99,7 @@ python tests/trains_parity.py
 
 ## Documentation
 
-The full user manual is bundled into the app (`Help → User Manual`, or open the `manual` analysis window) and lives at `docs/MANUAL.md` for off-line reading. Architectural notes for contributors / agents are in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
+The full user manual is bundled into the app (`Help → User Manual`, or open the `manual` analysis window) and lives at [`docs/MANUAL.md`](docs/MANUAL.md) for off-line reading.
 
 Quick keyboard reference: press `?` inside the app for the shortcuts overlay; the manual's chapter 8 has the full list.
 

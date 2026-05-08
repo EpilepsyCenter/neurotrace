@@ -583,6 +583,16 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
   // overrides land in B.5; this is the global default.
   const [seriesRole, setSeriesRole] = useState<string>('')
   const [testOverride, setTestOverride] = useState<TestOverride>('auto')
+  // Distribution-metric test settings. ``pooled_ks`` is the textbook
+  // mEPSC-style choice and the most common in the literature;
+  // ``per_cell_ks_d`` avoids pseudoreplication; ``off`` disables the
+  // distribution stats call entirely. ``andersonDarling`` only kicks
+  // in for 3+ group designs under ``pooled_ks``. ``referenceTag`` is
+  // the per_cell_ks_d reference; empty string = first group.
+  type DistMode = 'pooled_ks' | 'per_cell_ks_d' | 'off'
+  const [distMode, setDistMode] = useState<DistMode>('pooled_ks')
+  const [distAndersonDarling, setDistAndersonDarling] = useState(false)
+  const [distReferenceTag, setDistReferenceTag] = useState<string>('')
 
   // ------------------------------------------------------------------
   // Session file (.neurocohort) — Phase B.9
@@ -1106,6 +1116,12 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
         series_role: seriesRole,
         n_unit: nUnit,
         test_override: testOverride,
+        // Distribution-metric K-S settings — saved alongside the
+        // scalar test override so reopening a session restores the
+        // exact stats configuration the figures were built with.
+        dist_mode: distMode,
+        dist_anderson_darling: distAndersonDarling,
+        dist_reference_tag: distReferenceTag,
         subsample: { mode: subsampleMode, n: subsampleN },
       },
       selected_metrics: selectedMetrics,
@@ -1116,7 +1132,8 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
     }
   }, [folder, analysisType, comparisonShape, selectedTags, filterTags,
       seriesRole, nUnit, testOverride, subsampleMode, subsampleN,
-      selectedMetrics, statsResults, graphPrefs])
+      selectedMetrics, statsResults, graphPrefs,
+      distMode, distAndersonDarling, distReferenceTag])
 
   const applySession = useCallback(async (data: Record<string, unknown>) => {
     setSessionLoading(true)
@@ -1140,6 +1157,9 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
       const sr = typeof design.series_role === 'string' ? design.series_role : ''
       const nu = (design.n_unit as NUnit) || 'cell'
       const to = (design.test_override as TestOverride) || 'auto'
+      const dm = (design.dist_mode as 'pooled_ks' | 'per_cell_ks_d' | 'off') || 'pooled_ks'
+      const dad = !!design.dist_anderson_darling
+      const drt = typeof design.dist_reference_tag === 'string' ? design.dist_reference_tag : ''
       const ss = (design.subsample as Record<string, unknown>) || {}
       const sm = (ss.mode as SubsampleMode) || 'all'
       const sn = typeof ss.n === 'number' ? ss.n : 100
@@ -1159,6 +1179,9 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
       setSeriesRole(sr)
       setNUnit(nu)
       setTestOverride(to)
+      setDistMode(dm)
+      setDistAndersonDarling(dad)
+      setDistReferenceTag(drt)
       setSubsampleMode(sm)
       setSubsampleN(sn)
       setSelectedMetrics(sel)
@@ -1329,26 +1352,59 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
     setStatsError(null)
     try {
       // Two parallel fan-outs:
-      //   1. /run_stats per scalar metric (distributions don't have
-      //      a stats path yet — graphs only)
+      //   1. /run_stats (scalars) + /run_distribution_stats (event
+      //      distributions). Both write into one ``statsOut`` map so
+      //      the card UI doesn't have to know which path produced it.
       //   2. /render_graph per metric, in the right plot kind
       // Awaited together so the UI flips from "Running…" to fully-
       // populated results in one paint.
       const statsCalls = selectedMetrics
-        .filter((m) => metricKindOf(m) === 'scalar')
         .map(async (metric) => {
-          const groups = extractValuesForMetric(metric)
-          if (!groups) return [metric, { error: 'no values' }] as const
-          const resp = await fetch(`${backendUrl}/api/cohort/run_stats`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              groups, design_kind: designKind,
-              test_override: testOverride, metric,
-            }),
-          })
-          if (!resp.ok) return [metric, { error: `HTTP ${resp.status}: ${await resp.text()}` }] as const
-          return [metric, await resp.json()] as const
+          const kind = metricKindOf(metric)
+          if (kind === 'scalar') {
+            const groups = extractValuesForMetric(metric)
+            if (!groups) return [metric, { error: 'no values' }] as const
+            const resp = await fetch(`${backendUrl}/api/cohort/run_stats`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                groups, design_kind: designKind,
+                test_override: testOverride, metric,
+              }),
+            })
+            if (!resp.ok) return [metric, { error: `HTTP ${resp.status}: ${await resp.text()}` }] as const
+            return [metric, await resp.json()] as const
+          }
+          if (kind === 'distribution' && distMode !== 'off' && designKind) {
+            // Distribution stats path. Pooled K-S works for any
+            // design (paired or unpaired); the pooling discards the
+            // pairing for the headline number. Per-cell K-S D goes
+            // through the design-aware scalar test so paired pre/
+            // post comparisons run Wilcoxon on the per-cell D's
+            // automatically.
+            const groups = extractGraphGroupsForMetric(metric, 'distribution')
+            if (!groups) return [metric, { error: 'no values' }] as const
+            // Resolve reference group index for per_cell_ks_d. Empty
+            // tag = first group (default behaviour).
+            const refIdx = distReferenceTag
+              ? Math.max(0, groups.findIndex((g) => g.tag === distReferenceTag))
+              : 0
+            const resp = await fetch(`${backendUrl}/api/cohort/run_distribution_stats`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                groups: groups.map((g) => ({ tag: g.tag, values_per_cell: g.values_per_cell })),
+                design_kind: designKind,
+                mode: distMode,
+                anderson_darling: distAndersonDarling,
+                reference_group_idx: refIdx,
+                metric,
+              }),
+            })
+            if (!resp.ok) return [metric, { error: `HTTP ${resp.status}: ${await resp.text()}` }] as const
+            return [metric, await resp.json()] as const
+          }
+          return [metric, null] as const  // no stats for this metric kind
         })
       const graphCalls = selectedMetrics.map(async (metric) => {
         const kind = metricKindOf(metric)
@@ -1390,7 +1446,10 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
         Promise.all(graphCalls),
       ])
       const statsOut: Record<string, any> = {}
-      for (const [metric, result] of statsResponses) statsOut[metric] = result
+      for (const [metric, result] of statsResponses) {
+        if (result == null) continue   // metric kind has no stats
+        statsOut[metric] = result
+      }
       const graphOut: Record<string, any> = {}
       for (const [metric, result] of graphResponses) graphOut[metric] = result
       setStatsResults(statsOut)
@@ -1401,7 +1460,8 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
       setStatsLoading(false)
     }
   }, [designKind, backendUrl, selectedMetrics, extractValuesForMetric,
-      extractGraphGroupsForMetric, testOverride, themeName, metricKindOf])
+      extractGraphGroupsForMetric, testOverride, themeName, metricKindOf,
+      distMode, distAndersonDarling, distReferenceTag])
 
   // Auto-run stats after a session restore completes its aggregate
   // step. The flow is:
@@ -1617,6 +1677,12 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
               setNUnit={setNUnit}
               testOverride={testOverride}
               setTestOverride={setTestOverride}
+              distMode={distMode}
+              setDistMode={setDistMode}
+              distAndersonDarling={distAndersonDarling}
+              setDistAndersonDarling={setDistAndersonDarling}
+              distReferenceTag={distReferenceTag}
+              setDistReferenceTag={setDistReferenceTag}
               design={design}
               metricOptions={scalarMetricOptions}
               selectedMetrics={selectedMetrics}
@@ -1702,6 +1768,12 @@ function Wizard(props: {
   setNUnit: (n: NUnit) => void
   testOverride: TestOverride
   setTestOverride: (o: TestOverride) => void
+  distMode: 'pooled_ks' | 'per_cell_ks_d' | 'off'
+  setDistMode: (m: 'pooled_ks' | 'per_cell_ks_d' | 'off') => void
+  distAndersonDarling: boolean
+  setDistAndersonDarling: (v: boolean) => void
+  distReferenceTag: string
+  setDistReferenceTag: (t: string) => void
   design: DesignInfo | null
   metricOptions: string[]
   selectedMetrics: string[]
@@ -1725,6 +1797,9 @@ function Wizard(props: {
     seriesRole, setSeriesRole,
     nUnit, setNUnit,
     testOverride, setTestOverride,
+    distMode, setDistMode,
+    distAndersonDarling, setDistAndersonDarling,
+    distReferenceTag, setDistReferenceTag,
     design,
     metricOptions, selectedMetrics, setSelectedMetrics, defaultMetrics,
     statsLoading, statsError, hasResults, onRunStats,
@@ -1884,6 +1959,12 @@ function Wizard(props: {
             design={design}
             testOverride={testOverride}
             setTestOverride={setTestOverride}
+            distMode={distMode}
+            setDistMode={setDistMode}
+            distAndersonDarling={distAndersonDarling}
+            setDistAndersonDarling={setDistAndersonDarling}
+            distReferenceTag={distReferenceTag}
+            setDistReferenceTag={setDistReferenceTag}
             metricOptions={metricOptions}
             selectedMetrics={selectedMetrics}
             setSelectedMetrics={setSelectedMetrics}
@@ -2001,6 +2082,9 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
 
 function DesignPreview({
   design, testOverride, setTestOverride,
+  distMode, setDistMode,
+  distAndersonDarling, setDistAndersonDarling,
+  distReferenceTag, setDistReferenceTag,
   metricOptions, selectedMetrics, setSelectedMetrics, defaultMetrics,
   statsLoading, statsError, hasResults, onRunStats,
   subsampleMode, setSubsampleMode, subsampleN, setSubsampleN, autoNHint,
@@ -2008,6 +2092,12 @@ function DesignPreview({
   design: DesignInfo
   testOverride: TestOverride
   setTestOverride: (o: TestOverride) => void
+  distMode: 'pooled_ks' | 'per_cell_ks_d' | 'off'
+  setDistMode: (m: 'pooled_ks' | 'per_cell_ks_d' | 'off') => void
+  distAndersonDarling: boolean
+  setDistAndersonDarling: (v: boolean) => void
+  distReferenceTag: string
+  setDistReferenceTag: (t: string) => void
   metricOptions: string[]
   selectedMetrics: string[]
   setSelectedMetrics: React.Dispatch<React.SetStateAction<string[]>>
@@ -2146,6 +2236,95 @@ function DesignPreview({
                 <span>{label}</span>
               </label>
             ))}
+          </div>
+
+          {/* Distribution-metric tests (K-S family). Works for both
+              unpaired and paired designs — pooled K-S asks "do the
+              two distributions differ" regardless of whether the
+              cells were matched, which is what mEPSC pre/post and
+              minis-vs-treatment papers report. Per-cell K-S D feeds
+              its scalars through the design-aware test runner so
+              paired designs get Wilcoxon on the per-cell D's. */}
+          <div style={{
+            marginTop: 8,
+            paddingTop: 6,
+            borderTop: '1px solid var(--border)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+          }}>
+            <div style={{
+              fontSize: 'var(--font-size-xs)',
+              color: 'var(--text-muted)',
+              fontWeight: 600,
+              marginBottom: 2,
+            }}>Distribution metrics:</div>
+            {([
+              ['pooled_ks', 'Pooled K-S (mEPSC convention)'],
+              ['per_cell_ks_d', 'Per-cell K-S D vs reference'],
+              ['off', 'Off (graphs only)'],
+            ] as ['pooled_ks' | 'per_cell_ks_d' | 'off', string][]).map(([value, label]) => (
+              <label
+                key={value}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  cursor: 'pointer',
+                  fontSize: 'var(--font-size-xs)',
+                }}
+              >
+                <input
+                  type="radio"
+                  name="distMode"
+                  checked={distMode === value}
+                  onChange={() => setDistMode(value)}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+            {/* Anderson-Darling toggle — only relevant for 3+ groups
+                under pooled K-S (oneway_n or rm_n). Otherwise hidden
+                so the panel doesn't carry a useless control. */}
+            {distMode === 'pooled_ks' && design.groups.length > 2 && (
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                cursor: 'pointer',
+                fontSize: 'var(--font-size-xs)',
+                marginTop: 4,
+                marginLeft: 16,
+              }}>
+                <input
+                  type="checkbox"
+                  checked={distAndersonDarling}
+                  onChange={(e) => setDistAndersonDarling(e.target.checked)}
+                />
+                <span>Use Anderson-Darling k-sample (one p across all groups)</span>
+              </label>
+            )}
+            {/* Reference-group picker for per-cell K-S D — only
+                rendered when that mode is active. Empty string
+                falls through to "first group". */}
+            {distMode === 'per_cell_ks_d' && design.groups.length >= 2 && (
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 'var(--font-size-xs)',
+                marginTop: 4,
+                marginLeft: 16,
+              }}>
+                <span style={{ color: 'var(--text-muted)' }}>Reference:</span>
+                <select
+                  value={distReferenceTag || design.groups[0].tag}
+                  onChange={(e) => setDistReferenceTag(e.target.value)}
+                  style={{
+                    fontSize: 'var(--font-size-xs)',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {design.groups.map((g) => (
+                    <option key={g.tag} value={g.tag}>{g.tag}</option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
         </div>
       )}
@@ -2816,29 +2995,37 @@ function StatsResult({ metric, kind, result, graph, backendUrl, themeName,
               </div>
             </div>
           )}
+          {/* Bottom note. Scalar tests carry an override/branch from
+              the Shapiro gate; distribution K-S tests don't, but
+              ``run_distribution_test`` returns its own ``note`` field
+              with a one-line caveat (pseudoreplication / k-sample
+              context). Render whichever is present. */}
           <div style={{
             marginTop: 6,
             color: 'var(--text-muted)',
             fontStyle: 'italic',
             fontSize: '0.95em',
           }}>
-            {result.override === 'auto'
-              ? `Branch chosen automatically (${result.branch}); Shapiro decided.`
-              : `Branch forced (${result.branch}) by override.`}
+            {result.override
+              ? (result.override === 'auto'
+                  ? `Branch chosen automatically (${result.branch}); Shapiro decided.`
+                  : `Branch forced (${result.branch}) by override.`)
+              : (typeof result.note === 'string' ? result.note : '')}
           </div>
         </>
       ) : kind && kind !== 'scalar' ? (
-        // Distribution / timeseries metrics: stats path not yet
-        // wired (B.7). Show a graph-only note so the absence isn't
-        // a surprise.
+        // Distribution / timeseries metrics with no stats result.
+        // For distributions: either grouping is paired (K-S not
+        // applicable) or the user set distMode=off. Timeseries has
+        // no stats path implemented yet.
         <div style={{
           color: 'var(--text-muted)',
           fontStyle: 'italic',
           fontSize: '0.95em',
         }}>
           {kind === 'distribution'
-            ? 'Per-cell ECDF overlay — formal stats (per-cell median MW / K-S) coming in B.7.'
-            : 'Group mean ± SEM time series — formal stats coming in B.7.'}
+            ? 'Distribution stats turned off in the wizard. The graph above shows the per-cell ECDFs.'
+            : 'Group mean ± SEM time series — no formal stats path.'}
         </div>
       ) : null}
     </div>

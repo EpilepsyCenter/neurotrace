@@ -350,7 +350,7 @@ export function FPspWindow({
   const updateCursors = useCallback((next: Partial<CursorPositions>) => {
     useAppStore.getState().setCursors(next)
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       const merged = { ...useAppStore.getState().cursors, ...next }
       ch.postMessage({ type: 'cursor-update', cursors: merged })
       ch.close()
@@ -538,9 +538,9 @@ export function FPspWindow({
       // Push to this window's store (so the read-out row updates).
       useAppStore.getState().setCursors(newCursors)
       // Broadcast so the MAIN window's cursor state updates too — its
-      // viewer can only adopt via the neurotrace-sync channel.
+      // viewer can only adopt via the tracer-sync channel.
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         const merged = { ...useAppStore.getState().cursors, ...newCursors }
         ch.postMessage({ type: 'cursor-update', cursors: merged })
         ch.close()
@@ -637,7 +637,7 @@ export function FPspWindow({
       // leave the analysis-window's mini-viewer on the previous sweep).
       setPreviewSweep(p.sweepIndices[0])
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'sweep-update', sweep: p.sweepIndices[0] })
         ch.close()
       } catch { /* ignore */ }

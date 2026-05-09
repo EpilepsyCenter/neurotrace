@@ -2,7 +2,7 @@
 import Base from '../layouts/Base.astro';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const link = (p: string) => `${base}${p}`;
-const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const repo = 'https://github.com/EpilepsyCenter/tracer';
 const releases = `${repo}/releases`;
 
 const stages = [
@@ -11,7 +11,7 @@ const stages = [
     num: '01',
     title: 'Open a recording',
     kicker: 'Drag · drop · tree',
-    body: 'Drag a .dat or .abf file into the workspace. NeuroTrace builds a group → series → sweep tree from the file\'s native protocol metadata. No converters, no intermediate CSVs. The recording stays where it is — the analysis sits in a sidecar next to it.',
+    body: 'Drag a .dat or .abf file into the workspace. TRACER builds a group → series → sweep tree from the file\'s native protocol metadata. No converters, no intermediate CSVs. The recording stays where it is — the analysis sits in a sidecar next to it.',
     bullets: [
       ['HEKA Patchmaster', 'Direct .dat reader. Group/series/sweep structure preserved, channel units and protocols loaded.'],
       ['Axon Binary Format', 'Direct .abf reader for v1 and v2 files.'],
@@ -60,7 +60,7 @@ const stages = [
     body: 'Two routes. Per-recording: Trace Export window for figure-quality SVG / PNG / PDF / JPG plus per-event CSVs. Cross-recording: Cohort module for aggregated stats and plots, exported to CSV / Excel / Prism .pzfx so the figure lands in your existing GraphPad workflow.',
     bullets: [
       ['Templates', 'Save a Trace Export configuration (which channels, scale bars, cursors visible, palette) and reuse it across cells in a study.'],
-      ['Sidecar always saved', 'Whatever you exported, the .neurotrace sidecar carries the parameters you used. Reopen the file in six months — every window comes back exactly.'],
+      ['Sidecar always saved', 'Whatever you exported, the .tracer sidecar carries the parameters you used. Reopen the file in six months — every window comes back exactly.'],
     ],
   },
   {
@@ -76,7 +76,7 @@ const stages = [
   },
 ];
 ---
-<Base title="NeuroTrace — Workflow">
+<Base title="TRACER — Workflow">
 <style>
 .stage{padding:80px 0;border-bottom:1px solid var(--border);}
 .stage .head{display:grid;grid-template-columns:80px 1fr auto;gap:24px;align-items:baseline;margin-bottom:18px;}
@@ -123,7 +123,7 @@ const stages = [
   <div class="meta">
     <span><strong>6</strong> stages</span>
     <span><strong>14</strong> windows</span>
-    <span><strong>0.6.2</strong> current build</span>
+    <span><strong>0.7.0</strong> current build</span>
     <span class="led ok">No CLI required</span>
   </div>
 </div></header>
@@ -163,9 +163,9 @@ const stages = [
   <div class="wrap">
     <div class="eyebrow">Try it</div>
     <h2>Drop a recording in.<em> The rest is interface.</em></h2>
-    <p>NeuroTrace runs entirely on your machine. No account, no upload, no telemetry.</p>
+    <p>TRACER runs entirely on your machine. No account, no upload, no telemetry.</p>
     <div class="btns">
-      <a class="btn-lg primary" href={releases}>Download v0.6.2 ↓</a>
+      <a class="btn-lg primary" href={releases}>Download v0.7.0 ↓</a>
       <a class="btn-lg" href={link('/features')}>See the features →</a>
     </div>
   </div>

@@ -212,7 +212,7 @@ export function CursorAnalysisWindow({
   // persistence is handled there: the main window loads per-file
   // blobs from electron prefs on file open, saves on every change,
   // and broadcasts the whole `cursorAnalyses` map to this window via
-  // the `neurotrace-sync` BroadcastChannel. We just read/write the
+  // the `tracer-sync` BroadcastChannel. We just read/write the
   // store by (group, series) key; main handles disk.
 
   const [localData, setLocalData] = useState<CursorAnalysisData>(() => {
@@ -276,7 +276,7 @@ export function CursorAnalysisWindow({
     const next = { ...useAppStore.getState().cursorAnalyses, [storeKey]: localData }
     useAppStore.setState({ cursorAnalyses: next })
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses: next })
       ch.close()
     } catch { /* ignore */ }

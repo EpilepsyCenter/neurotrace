@@ -1,15 +1,15 @@
-# NeuroTrace — Vector exports
+# TRACER — Vector exports
 
 Open any `.svg` in Affinity Designer (File → Open, or drag in).
 Shapes come in fully editable; strokes, colors, curves all preserved.
 
 ## Files
 
-- `NeuroTrace-mark.svg` — the Scope icon, ink on transparent (512×512)
-- `NeuroTrace-mark-reversed.svg` — Scope on ink background
-- `NeuroTrace-lockup-horizontal.svg` — icon + wordmark, side by side
-- `NeuroTrace-lockup-stacked.svg` — icon above wordmark, centered
-- `NeuroTrace-wordmark.svg` — wordmark only
+- `TRACER-mark.svg` — the Scope icon, ink on transparent (512×512)
+- `TRACER-mark-reversed.svg` — Scope on ink background
+- `TRACER-lockup-horizontal.svg` — icon + wordmark, side by side
+- `TRACER-lockup-stacked.svg` — icon above wordmark, centered
+- `TRACER-wordmark.svg` — wordmark only
 
 ## Colors (hex)
 

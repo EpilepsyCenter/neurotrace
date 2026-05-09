@@ -8,7 +8,7 @@ export function ResultsTable() {
   // ---- BroadcastChannel for pushing results to detached window ----
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-results')
+      const ch = new BroadcastChannel('tracer-results')
       channelRef.current = ch
 
       ch.onmessage = (ev) => {

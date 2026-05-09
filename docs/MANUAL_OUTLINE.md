@@ -1,4 +1,4 @@
-# NeuroTrace User Manual — Structural Outline
+# TRACER User Manual — Structural Outline
 
 Hierarchical reference of every user-facing surface, parameter, and
 persistence slot. Structure is split into Part I (general app) and
@@ -279,7 +279,7 @@ fine.
 ## 1. Getting Started
 
 ### App shell (Electron)
-- Window title: "NeuroTrace"
+- Window title: "TRACER"
 - Min size: 1000×700 px
 - Window bounds persisted in `preferences.json` → `windowBounds`
 - Backend: Python FastAPI subprocess on a dynamically-allocated local port (fallback `8321`)
@@ -530,11 +530,11 @@ Three rows (Baseline, Peak, Fit), each with:
 
 Inside each per-file slot, per-series keying is always `${group}:${series}`.
 
-### Sidecar file (`{recordingPath}.neurotrace`, JSON)
+### Sidecar file (`{recordingPath}.tracer`, JSON)
 Created on first analysis run. Top-level shape:
 ```json
 {
-  "neurotrace_version": "...",
+  "tracer_version": "...",
   "created": "...",
   "recording": {"source_file": "...", "format": "..."},
   "analyses": {
@@ -560,7 +560,7 @@ Created on first analysis run. Top-level shape:
 }
 ```
 
-### Cross-window sync (`BroadcastChannel('neurotrace-sync')`)
+### Cross-window sync (`BroadcastChannel('tracer-sync')`)
 - `state-request` / `state-update`, `cursor-update`, `sweep-update`, `selection-update`,
   `bursts-update`, `iv-update`, `fpsp-update`, `cursor-analyses-update`, `paired-update`,
   `excluded-update`, `averaged-update`, `burst-form-params-update`, `detection-filter`,

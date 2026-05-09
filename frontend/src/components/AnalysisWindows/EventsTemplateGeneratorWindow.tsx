@@ -132,7 +132,7 @@ export function EventsTemplateGeneratorWindow({
   const updateCursors = useCallback((next: Partial<CursorPositions>) => {
     setCursors(next)
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       const merged = { ...useAppStore.getState().cursors, ...next }
       ch.postMessage({ type: 'cursor-update', cursors: merged })
       ch.close()
@@ -216,7 +216,7 @@ export function EventsTemplateGeneratorWindow({
       } catch { /* ignore */ }
     })()
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'events-session-update'
             && ev.data.eventsWindowSession) {

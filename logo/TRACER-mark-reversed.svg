@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64" fill="none">
-  <title>NeuroTrace — Scope mark (reversed on ink)</title>
+  <title>TRACER — Scope mark (reversed on ink)</title>
   <rect width="64" height="64" fill="#0F1722"></rect>
   <rect x="8" y="8" width="48" height="48" rx="4" stroke="#B9CCDE" stroke-width="1.5"></rect>
   <g opacity="0.22" stroke="#B9CCDE" stroke-width="0.6">

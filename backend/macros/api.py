@@ -14,7 +14,7 @@ from analysis.base import get_analysis
 from utils.filters import lowpass_filter, highpass_filter, bandpass_filter, median_filter
 
 
-class NeuroTraceMacroAPI:
+class TracerMacroAPI:
     """The `stf` object available in macro scripts."""
 
     def __init__(self, recording: Recording):
@@ -193,5 +193,5 @@ class NeuroTraceMacroAPI:
         })
 
 
-def create_macro_api(recording: Recording) -> NeuroTraceMacroAPI:
-    return NeuroTraceMacroAPI(recording)
+def create_macro_api(recording: Recording) -> TracerMacroAPI:
+    return TracerMacroAPI(recording)

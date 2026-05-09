@@ -74,7 +74,7 @@ export default function App() {
     // keeps the user-action / view diagnostics consistent.
     let ch: BroadcastChannel | null = null
     try {
-      ch = new BroadcastChannel('neurotrace-sync')
+      ch = new BroadcastChannel('tracer-sync')
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'open-bug-report') setShowBugReport(true)
       }

@@ -108,7 +108,7 @@ export function TagToast() {
         const existing = (await api.readSidecar(filePath)) ?? {}
         await api.writeSidecar(filePath, {
           ...existing,
-          format: 'neurotrace-sidecar',
+          format: 'tracer-sidecar',
           version: (existing as any).version ?? 2,
           meta: next,
         })
@@ -118,7 +118,7 @@ export function TagToast() {
     // and other windows refresh their meta view.
     useAppStore.setState({ recordingMeta: next })
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.postMessage({
         type: 'meta-update',
         file_path: filePath,

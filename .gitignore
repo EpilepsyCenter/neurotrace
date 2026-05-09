@@ -33,7 +33,7 @@ heka_test_files/
 # Per-recording sidecars are user-local — they sit next to private
 # recordings and carry analysis state, not code. Excluded so test
 # folders don't accidentally leak into commits.
-*.neurotrace
+*.tracer
 
 # Local environment
 .env
@@ -60,6 +60,7 @@ preferences.json
 # Claude Code scratch
 .claude/
 .vite/
+.astro/
 
 # Internal contributor / agent notes — kept locally, not published.
 # Public-facing docs are README.md (root) and docs/MANUAL*.md.

@@ -18,7 +18,7 @@ interface LayoutState extends PanelLayout {
   initLayout: () => Promise<void>
 }
 
-const LS_KEY = 'neurotrace-layout'
+const LS_KEY = 'tracer-layout'
 
 const defaults: PanelLayout = {
   leftCollapsed: false,

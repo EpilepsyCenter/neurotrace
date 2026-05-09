@@ -1,4 +1,4 @@
-# PyInstaller spec for the NeuroTrace backend.
+# PyInstaller spec for the TRACER backend.
 #
 # Produces a onedir bundle at `backend-dist/` with the executable named `main`.
 # This layout is consumed by electron/main.ts: in production it spawns
@@ -52,7 +52,7 @@ datas += [(str(BACKEND / 'assets' / 'fonts'), 'assets/fonts')]
 
 # The base conda env includes deeplabcut/torch/PyQt/etc. — PyInstaller's
 # module-graph pulls them in transitively through optional neo/scipy
-# hooks. None are used by NeuroTrace, so drop them aggressively.
+# hooks. None are used by TRACER, so drop them aggressively.
 # NOTE: ``pandas`` and ``matplotlib`` USED to live in this list back
 # when the only entry points were trace-viewing. Phase B (Cohort
 # Analysis) made both of them required at runtime — pingouin pulls

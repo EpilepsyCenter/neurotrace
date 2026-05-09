@@ -1,6 +1,6 @@
 {
-  "name": "neurotrace",
-  "version": "0.6.2",
+  "name": "tracer",
+  "version": "0.7.0",
   "description": "Electrophysiology analysis software",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -37,8 +37,8 @@
     "vite-plugin-electron-renderer": "^0.14.6"
   },
   "build": {
-    "appId": "com.neurotrace.app",
-    "productName": "NeuroTrace",
+    "appId": "com.tracer.app",
+    "productName": "TRACER",
     "files": [
       "dist/**/*",
       "dist-electron/**/*"

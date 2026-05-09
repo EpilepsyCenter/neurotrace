@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 500 120" fill="none">
-  <title>NeuroTrace — Wordmark only</title>
+  <title>TRACER — Wordmark only</title>
   <text x="12" y="78" font-family="IBM Plex Sans, Helvetica, Arial, sans-serif" font-size="64" letter-spacing="-1">
-    <tspan font-weight="300" fill="#2B3A4A">Neuro</tspan><tspan font-weight="500" fill="#0F1722">Trace</tspan>
+    <tspan font-weight="500" fill="#0F1722">T</tspan><tspan font-weight="300" fill="#2B3A4A">RACER</tspan>
   </text>
 </svg>

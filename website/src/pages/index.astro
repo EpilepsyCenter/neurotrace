@@ -2,10 +2,10 @@
 import Base from '../layouts/Base.astro';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const link = (p: string) => `${base}${p}`;
-const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const repo = 'https://github.com/EpilepsyCenter/tracer';
 const releases = `${repo}/releases`;
 ---
-<Base title="NeuroTrace — Patch-clamp & field-recording analysis">
+<Base title="TRACER — Patch-clamp & field-recording analysis">
 <style>
 /* ═══════ HERO ═══════ */
 .hero{padding:72px 0 80px;border-bottom:1px solid var(--border);position:relative;overflow:hidden;background:var(--bg-primary);}
@@ -265,14 +265,14 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
 <header class="hero"><div class="wrap"><div class="grid">
   <div>
     <div class="hero-meta-top">
-      <span class="led ok">Build <strong>0.6.2</strong></span>
+      <span class="led ok">Build <strong>0.7.0</strong></span>
       <span class="sepv"></span>
       <span class="chip">macOS · Linux · Windows</span>
     </div>
     <h1>Analyze patch-clamp<br><em>&amp; field recordings.</em></h1>
-    <p class="lead">NeuroTrace reads your <span class="mono">.dat</span> and <span class="mono">.abf</span> files, runs the analyses you actually use — events, kinetics, AP counting, fEPSP slopes — and exports clean figures. Locally, offline, on your machine.</p>
+    <p class="lead">TRACER reads your <span class="mono">.dat</span> and <span class="mono">.abf</span> files, runs the analyses you actually use — events, kinetics, AP counting, fEPSP slopes — and exports clean figures. Locally, offline, on your machine.</p>
     <div class="cta">
-      <a class="btn-lg primary" href={releases}>Download v0.6.2 ↓</a>
+      <a class="btn-lg primary" href={releases}>Download v0.7.0 ↓</a>
       <a class="btn-lg" href={link('/features')}>See what's inside →</a>
     </div>
     <div class="meta">
@@ -431,7 +431,7 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
         </div>
         <div class="step">
           <div class="n">04</div>
-          <div><h4>Export &amp; archive</h4><p>Publication-ready SVG / PDF / PNG figures. CSV / Excel / Prism summary tables. A <span class="mono">.neurotrace</span> sidecar next to the recording — every selection, cursor and parameter, restored on reopen.</p></div>
+          <div><h4>Export &amp; archive</h4><p>Publication-ready SVG / PDF / PNG figures. CSV / Excel / Prism summary tables. A <span class="mono">.tracer</span> sidecar next to the recording — every selection, cursor and parameter, restored on reopen.</p></div>
         </div>
       </div>
 
@@ -461,7 +461,7 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
 <br>
 <span class="ok">✓</span> <span class="path">events.csv</span>           <span class="mute">142 rows · per-event</span><br>
 <span class="ok">✓</span> <span class="path">events.svg</span>           <span class="mute">trace + ticks</span><br>
-<span class="ok">✓</span> <span class="path">cell_a2.dat.neurotrace</span> <span class="mute">sidecar saved</span>
+<span class="ok">✓</span> <span class="path">cell_a2.dat.tracer</span> <span class="mute">sidecar saved</span>
           </div>
         </div>
       </div>
@@ -498,7 +498,7 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
       </div>
     </div>
     <blockquote>
-      <em>"</em>Patch-clamp analysis tools have been good enough for a long time — and old enough to show. NeuroTrace runs the same working day on a stack you'd actually choose today: a viewer that doesn't stutter on long recordings, filters that update live, a sidecar that records every parameter you used, cohort stats and batch automation in the same app. No licences to renew. No scripts to inherit.<em>"</em>
+      <em>"</em>Patch-clamp analysis tools have been good enough for a long time — and old enough to show. TRACER runs the same working day on a stack you'd actually choose today: a viewer that doesn't stutter on long recordings, filters that update live, a sidecar that records every parameter you used, cohort stats and batch automation in the same app. No licences to renew. No scripts to inherit.<em>"</em>
     </blockquote>
   </div>
 </section>
@@ -507,7 +507,7 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
 <section class="inst-section" id="in-labs">
   <div class="wrap">
     <div class="eyebrow">In labs · coming soon</div>
-    <p class="sub" style="margin:0 0 18px;">If your group is using NeuroTrace and would like to be listed, open an issue on GitHub and we'll add you here.</p>
+    <p class="sub" style="margin:0 0 18px;">If your group is using TRACER and would like to be listed, open an issue on GitHub and we'll add you here.</p>
     <div class="institutions">
       <div class="inst placeholder">Your lab<br>here</div>
       <div class="inst placeholder">Your lab<br>here</div>
@@ -522,11 +522,11 @@ section .sub{font-size:15px;line-height:1.6;color:var(--text-secondary);max-widt
 <!-- ══════ CTA ══════ -->
 <section class="cta-big">
   <div class="wrap">
-    <div class="eyebrow">v0.6.2 · Released</div>
+    <div class="eyebrow">v0.7.0 · Released</div>
     <h2>Get back to <em>the science.</em></h2>
     <p>Open source, MIT licensed. macOS Apple Silicon, Windows, and Linux installers built on every release. No account, no telemetry, no upload.</p>
     <div class="btns">
-      <a class="btn-lg primary" href={releases}>Download NeuroTrace 0.6.2 ↓</a>
+      <a class="btn-lg primary" href={releases}>Download TRACER 0.7.0 ↓</a>
       <a class="btn-lg" href={link('/docs')}>Read the docs →</a>
     </div>
     <div style="margin-top:40px;">

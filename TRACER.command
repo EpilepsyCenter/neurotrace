@@ -1,5 +1,5 @@
 #!/bin/bash
-# Double-click this file to launch NeuroTrace in development mode.
+# Double-click this file to launch TRACER in development mode.
 # It starts both the Python backend and the Electron + Vite frontend.
 
 cd "$(dirname "$0")"

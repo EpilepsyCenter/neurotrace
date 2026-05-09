@@ -92,7 +92,7 @@ export function ResistanceWindow({
     setCurrentSeries(mainSeries)
     if (mainTrace != null) setCurrentChannel(mainTrace)
   }, [mainGroup, mainSeries, mainTrace])
-  // Form state lives in the app store so the .neurotrace sidecar can
+  // Form state lives in the app store so the .tracer sidecar can
   // round-trip it across sessions. ``setForm`` patches only the
   // fields the caller passes; everything else stays intact.
   const resistanceForm = useAppStore((s) => s.resistanceForm)
@@ -394,7 +394,7 @@ export function ResistanceWindow({
   const updateCursors = useCallback((next: Partial<CursorPositions>) => {
     useAppStore.getState().setCursors(next)
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       const merged = { ...useAppStore.getState().cursors, ...next }
       ch.postMessage({ type: 'cursor-update', cursors: merged })
       ch.close()
@@ -461,7 +461,7 @@ export function ResistanceWindow({
     const nextResults = { ...prev, [key]: [...existing, ...newRows] }
     useAppStore.setState({ resistanceResults: nextResults })
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.postMessage({
         type: 'resistance-update',
         resistanceResults: nextResults,
@@ -481,7 +481,7 @@ export function ResistanceWindow({
     delete nextResults[key]
     useAppStore.setState({ resistanceResults: nextResults })
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.postMessage({
         type: 'resistance-update',
         resistanceResults: nextResults,
@@ -650,7 +650,7 @@ export function ResistanceWindow({
       }
       useAppStore.setState({ resistanceResults: nextResults })
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'resistance-update', resistanceResults: nextResults })
         ch.close()
       } catch { /* ignore */ }

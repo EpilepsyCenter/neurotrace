@@ -1,4 +1,4 @@
-"""NeuroTrace Python Backend — FastAPI server for electrophysiology analysis."""
+"""TRACER Python Backend — FastAPI server for electrophysiology analysis."""
 
 import argparse
 import sys
@@ -27,12 +27,12 @@ from api.trace_export import router as trace_export_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown."""
-    print("NeuroTrace backend starting...")
+    print("TRACER backend starting...")
     yield
-    print("NeuroTrace backend shutting down...")
+    print("TRACER backend shutting down...")
 
 
-app = FastAPI(title="NeuroTrace Backend", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="TRACER Backend", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

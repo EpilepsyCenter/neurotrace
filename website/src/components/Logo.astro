@@ -8,7 +8,7 @@ const base = import.meta.env.BASE_URL;
 const { size = 22, showVersion = true, href = base } = Astro.props;
 ---
 <a class="brand" href={href}>
-  <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-label="NeuroTrace mark">
+  <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-label="TRACER mark">
     <rect x="8" y="8" width="48" height="48" rx="2" stroke="#14130f" stroke-width="2"></rect>
     <path d="M10 38 H24" stroke="#14130f" stroke-width="2.2" stroke-linecap="round"></path>
     <path d="M24 38 C 27 38 28.5 38 29.5 33 L 31 22 C 31.5 19 33 19 33.5 22 L 35.5 46 C 36 49 37.5 49 38.5 46 L 40 40" stroke="#14130f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -17,5 +17,5 @@ const { size = 22, showVersion = true, href = base } = Astro.props;
   <span class="wm" style={size <= 20 ? 'font-size:15px;' : ''}>
     <span class="l">Neuro</span><span class="h">Trace</span>
   </span>
-  {showVersion && <span class="version">v0.6.2</span>}
+  {showVersion && <span class="version">v0.7.0</span>}
 </a>

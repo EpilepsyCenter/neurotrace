@@ -130,7 +130,7 @@ export function AnalysisWindow({ view }: { view: string }) {
   // Listen for cursor + sweep updates from the main window
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
 
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'cursor-update' && ev.data.cursors) {

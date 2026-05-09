@@ -5,10 +5,10 @@ import { createServer } from 'net'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'fs'
 
 // Pin the app name BEFORE the app ready event so the macOS application
-// menu + dock both read "NeuroTrace" instead of "Electron". In packaged
+// menu + dock both read "TRACER" instead of "Electron". In packaged
 // builds electron-builder bakes ``productName`` into the bundle's
 // Info.plist, but in dev the menu bar otherwise shows "Electron".
-app.setName('NeuroTrace')
+app.setName('TRACER')
 
 // Absolute path to the app icon PNG. electron-builder auto-generates
 // the platform-native icons (icns / ico) from this PNG at package
@@ -47,7 +47,7 @@ async function startPythonBackend(port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     pythonProcess = spawn(pythonPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NEUROTRACE_PORT: String(port) },
+      env: { ...process.env, TRACER_PORT: String(port) },
     })
 
     pythonProcess.stdout?.on('data', (data: Buffer) => {
@@ -130,7 +130,7 @@ function createWindow() {
     y: bounds.y,
     minWidth: 1000,
     minHeight: 700,
-    title: 'NeuroTrace',
+    title: 'TRACER',
     icon: ICON_PATH,
     // macOS: tuck the traffic-light controls into the toolbar by
     // hiding the native title bar but keeping the OS buttons inset
@@ -194,7 +194,7 @@ ipcMain.handle('open-file-dialog', async (event) => {
 
 ipcMain.handle('open-folder-dialog', async (_event, defaultPath?: string) => {
   // Folder picker for the Cohort Analysis module — the user picks the
-  // directory of ``.neurotrace`` sidecars they want to aggregate.
+  // directory of ``.tracer`` sidecars they want to aggregate.
   // Falls back to the system home dir when no anchor is supplied.
   // Triggered from any window (main or analysis), so we look up the
   // sender's BrowserWindow rather than assuming ``mainWindow``.
@@ -272,11 +272,11 @@ ipcMain.handle('set-preferences', (_event, prefs: Record<string, unknown>) => {
 })
 
 // -----------------------------------------------------------------
-// Per-recording sidecar (.neurotrace JSON next to the recording file)
+// Per-recording sidecar (.tracer JSON next to the recording file)
 // -----------------------------------------------------------------
 //
 // Convention: for a recording at ``/path/to/file.dat``, the sidecar
-// lives at ``/path/to/file.dat.neurotrace``. Appending the extension
+// lives at ``/path/to/file.dat.tracer``. Appending the extension
 // (rather than replacing) keeps things unambiguous when labs have
 // same-stemmed files in different formats.
 //
@@ -285,7 +285,7 @@ ipcMain.handle('set-preferences', (_event, prefs: Record<string, unknown>) => {
 // any parse / IO error; the caller treats that as "no sidecar".
 
 function sidecarPathFor(recordingPath: string): string {
-  return `${recordingPath}.neurotrace`
+  return `${recordingPath}.tracer`
 }
 
 ipcMain.handle('read-sidecar', (_event, recordingPath: string) => {
@@ -297,7 +297,7 @@ ipcMain.handle('read-sidecar', (_event, recordingPath: string) => {
     const parsed = JSON.parse(raw)
     // Basic shape guard — reject anything that doesn't look like ours.
     if (parsed && typeof parsed === 'object'
-        && parsed.format === 'neurotrace-sidecar') {
+        && parsed.format === 'tracer-sidecar') {
       return parsed
     }
     return null
@@ -314,7 +314,7 @@ ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<
     const tmp = `${path}.tmp`
     // Always stamp format + saved_at so the file is self-describing.
     const withMeta = {
-      format: 'neurotrace-sidecar',
+      format: 'tracer-sidecar',
       version: 1,
       saved_at: new Date().toISOString(),
       ...payload,
@@ -330,10 +330,10 @@ ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<
 })
 
 // -----------------------------------------------------------------
-// Cohort session files (.neurocohort) — Phase B.9
+// Cohort session files (.tracer_cohort) — Phase B.9
 // -----------------------------------------------------------------
 //
-// Cohort-level counterpart to the per-recording ``.neurotrace``
+// Cohort-level counterpart to the per-recording ``.tracer``
 // sidecar. Stores a single cohort run as a portable JSON document:
 // folder + analysis type, wizard state, selected metrics, stats
 // results, graph customisation prefs. Read/written atomically via
@@ -344,7 +344,7 @@ ipcMain.handle('write-sidecar', (_event, recordingPath: string, payload: Record<
 //
 // Path convention: the renderer picks the path via the standard
 // open / save dialog. By default we suggest
-// ``<folder>/<basename>.neurocohort`` so a cohort folder
+// ``<folder>/<basename>.tracer_cohort`` so a cohort folder
 // keeps its session next to the data. Users can save anywhere.
 
 ipcMain.handle('read-cohort-session', (_event, sessionPath: string) => {
@@ -355,7 +355,7 @@ ipcMain.handle('read-cohort-session', (_event, sessionPath: string) => {
     const parsed = JSON.parse(raw)
     // Shape guard — reject anything that isn't ours.
     if (parsed && typeof parsed === 'object'
-        && parsed.format === 'neurocohort-session') {
+        && parsed.format === 'tracer-cohort-session') {
       return parsed
     }
     return null
@@ -370,7 +370,7 @@ ipcMain.handle('write-cohort-session', (_event, sessionPath: string, payload: Re
     if (!sessionPath) return false
     const tmp = `${sessionPath}.tmp`
     const withMeta = {
-      format: 'neurocohort-session',
+      format: 'tracer-cohort-session',
       version: 1,
       saved_at: new Date().toISOString(),
       ...payload,
@@ -386,10 +386,10 @@ ipcMain.handle('write-cohort-session', (_event, sessionPath: string, payload: Re
 })
 
 // -----------------------------------------------------------------
-// Trace Export figure sessions (.neurotrace_figure) — Phase C
+// Trace Export figure sessions (.tracer_figure) — Phase C
 // -----------------------------------------------------------------
 //
-// Cross-recording figure-state counterpart to ``.neurocohort``. Stores
+// Cross-recording figure-state counterpart to ``.tracer_cohort``. Stores
 // the entire Trace Export window state (items + style + axes +
 // scalebar + legend + figure size) so users can resume the same
 // figure later without re-picking sources or re-styling. Same atomic
@@ -402,7 +402,7 @@ ipcMain.handle('read-figure-session', (_event, sessionPath: string) => {
     const raw = readFileSync(sessionPath, 'utf-8')
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object'
-        && parsed.format === 'neurotrace-figure-session') {
+        && parsed.format === 'tracer-figure-session') {
       return parsed
     }
     return null
@@ -417,7 +417,7 @@ ipcMain.handle('write-figure-session', (_event, sessionPath: string, payload: Re
     if (!sessionPath) return false
     const tmp = `${sessionPath}.tmp`
     const withMeta = {
-      format: 'neurotrace-figure-session',
+      format: 'tracer-figure-session',
       version: 1,
       saved_at: new Date().toISOString(),
       ...payload,
@@ -439,13 +439,13 @@ ipcMain.handle('open-figure-session-dialog', async (event) => {
     title: 'Open figure session',
     properties: ['openFile'],
     filters: [
-      { name: 'NeuroTrace Figure Session', extensions: ['neurotrace_figure'] },
+      { name: 'TRACER Figure Session', extensions: ['tracer_figure'] },
     ],
   })
   return result.canceled || !result.filePaths.length ? null : result.filePaths[0]
 })
 
-// Dedicated open dialog with the .neurocohort filter pre-set so
+// Dedicated open dialog with the .tracer_cohort filter pre-set so
 // users see only their session files. Returns the chosen path or
 // null if cancelled.
 ipcMain.handle('open-cohort-session-dialog', async (event) => {
@@ -458,7 +458,7 @@ ipcMain.handle('open-cohort-session-dialog', async (event) => {
     title: 'Open cohort session',
     properties: ['openFile'],
     filters: [
-      { name: 'NeuroTrace Cohort Session', extensions: ['neurocohort'] },
+      { name: 'TRACER Cohort Session', extensions: ['tracer_cohort'] },
     ],
   })
   return result.canceled || !result.filePaths.length ? null : result.filePaths[0]
@@ -497,7 +497,7 @@ ipcMain.handle('list-folder-recordings', (_event, anchorPath: string) => {
       // Skip hidden files and the sidecars themselves (they live next
       // to recordings; we list the recordings).
       if (name.startsWith('.')) continue
-      if (name.endsWith('.neurotrace')) continue
+      if (name.endsWith('.tracer')) continue
       if (name.endsWith('.tmp')) continue
       const ext = name.split('.').pop()?.toLowerCase() ?? ''
       if (!RECORDING_EXTENSIONS.has(ext)) continue
@@ -514,7 +514,7 @@ ipcMain.handle('list-folder-recordings', (_event, anchorPath: string) => {
         try {
           const parsed = JSON.parse(readFileSync(sidecarPath, 'utf-8'))
           if (parsed && typeof parsed === 'object'
-              && parsed.format === 'neurotrace-sidecar'
+              && parsed.format === 'tracer-sidecar'
               && parsed.meta && typeof parsed.meta === 'object') {
             meta = parsed.meta
           }
@@ -606,7 +606,7 @@ ipcMain.handle('open-analysis-window', (_event, analysisType: string) => {
     y: bounds.y,
     minWidth: 500,
     minHeight: 400,
-    title: `NeuroTrace — ${title}`,
+    title: `TRACER — ${title}`,
     icon: ICON_PATH,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),

@@ -1195,7 +1195,7 @@ export function TraceViewer() {
   // ================================================================
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-axis-range')
+      const ch = new BroadcastChannel('tracer-axis-range')
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'set-axis-range') {
           const u = plotRef.current

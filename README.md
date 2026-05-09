@@ -1,16 +1,16 @@
-# NeuroTrace
+# TRACER
 
 A modern electrophysiology analysis desktop app inspired by [Stimfit](https://github.com/neurodroid/stimfit). Electron shell + React/TypeScript/Vite frontend + Python FastAPI backend. All numerical work lives in Python; the frontend renders and handles interaction.
 
-Current release: **v0.6.2**. macOS Apple-Silicon DMG, Windows NSIS, and Linux AppImage installers are built automatically by GitHub Actions on each tag — see the [releases page](https://github.com/EpilepsyCenter/neurotrace/releases).
+Current release: **v0.7.0**. macOS Apple-Silicon DMG, Windows NSIS, and Linux AppImage installers are built automatically by GitHub Actions on each tag — see the [releases page](https://github.com/EpilepsyCenter/tracer/releases).
 
-![NeuroTrace](logo/NeuroTrace-lockup-horizontal.png)
+![TRACER](logo/TRACER-lockup-horizontal.png)
 
-**[Website](https://epilepsycenter.github.io/neurotrace/)** · **[Releases](https://github.com/EpilepsyCenter/neurotrace/releases)** · **[Manual](docs/MANUAL.md)**
+**[Website](https://epilepsycenter.github.io/tracer/)** · **[Releases](https://github.com/EpilepsyCenter/tracer/releases)** · **[Manual](docs/MANUAL.md)**
 
 ## What it does
 
-Open a recording, navigate the group → series → sweep tree, and run analysis modules over the trace. Each module has its own window with a continuous-mode viewer + draggable cursor regions, a parameter sidebar, and a results table you can curate. Detection results are kept in a sidecar JSON (`recording.dat.neurotrace`) next to the recording, so reopening the file restores everything — selections, cursors, every module's last run.
+Open a recording, navigate the group → series → sweep tree, and run analysis modules over the trace. Each module has its own window with a continuous-mode viewer + draggable cursor regions, a parameter sidebar, and a results table you can curate. Detection results are kept in a sidecar JSON (`recording.dat.tracer`) next to the recording, so reopening the file restores everything — selections, cursors, every module's last run.
 
 ## Analysis modules
 
@@ -43,7 +43,7 @@ HEKA Patchmaster (`.dat`), Axon Binary Format (`.abf`), and 50+ other formats vi
 
 ## Persistence model
 
-Per-recording state lives in a `.neurotrace` JSON sidecar next to the recording file. The sidecar carries:
+Per-recording state lives in a `.tracer` JSON sidecar next to the recording file. The sidecar carries:
 
 - All analysis results (events, bursts, AP, IV, fPSP, paired, cursors, resistance).
 - Form / parameter state for each module (so reopening a recording lands you back on the exact same configuration).
@@ -56,7 +56,7 @@ Atomic write via Electron IPC; debounced save on every change.
 ## Architecture
 
 ```
-NeuroTrace/
+TRACER/
 ├── electron/           # Electron main process + preload (IPC bridge, sidecar I/O)
 ├── frontend/           # React + TypeScript + Vite UI
 │   └── src/

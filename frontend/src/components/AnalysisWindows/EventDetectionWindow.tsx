@@ -60,7 +60,7 @@ function channelsForSeries(fileInfo: FileInfo | null, group: number, series: num
 }
 
 // Cursor-band colors — match the baseline cursor convention used
-// everywhere else in NeuroTrace (FPsp, IV, Cursor, Resistance, AP).
+// everywhere else in TRACER (FPsp, IV, Cursor, Resistance, AP).
 const CURSOR_COLOR = '#64b5f6'   // blue (matches baseline cursors elsewhere)
 
 /** Per-template peak colors — index 0 = primary, 1 = 2nd, 2 = 3rd.
@@ -252,7 +252,7 @@ export function EventDetectionWindow({
   // the user see rise + decay without having to zoom manually.
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.onmessage = (ev) => {
         if (ev.data?.type !== 'events-navigate-to') return
         const t = Number(ev.data.timeS)
@@ -504,7 +504,7 @@ export function EventDetectionWindow({
       await api.setPreferences({ ...prefs, eventsWindowSession: next })
       // Notify any open sub-windows.
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'events-session-update', eventsWindowSession: next })
         ch.close()
       } catch { /* ignore */ }
@@ -574,7 +574,7 @@ export function EventDetectionWindow({
   const cursorBroadcastRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
     try {
-      cursorBroadcastRef.current = new BroadcastChannel('neurotrace-sync')
+      cursorBroadcastRef.current = new BroadcastChannel('tracer-sync')
     } catch { /* ignore */ }
     return () => {
       try { cursorBroadcastRef.current?.close() } catch { /* ignore */ }
@@ -2145,7 +2145,7 @@ function TemplatePanel({
 /** Download the whole template library as a JSON file. */
 function exportTemplatesJSON(entries: Record<string, EventsTemplate>) {
   const payload = {
-    format: 'neurotrace-event-templates',
+    format: 'tracer-event-templates',
     version: 1,
     templates: Object.values(entries),
   }
@@ -2153,7 +2153,7 @@ function exportTemplatesJSON(entries: Record<string, EventsTemplate>) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'neurotrace_event_templates.json'
+  a.download = 'tracer_event_templates.json'
   a.click()
   URL.revokeObjectURL(url)
 }

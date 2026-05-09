@@ -62,7 +62,7 @@ interface ThemeState {
   initTheme: () => Promise<void>
 }
 
-const LS_KEY = 'neurotrace-theme-prefs'
+const LS_KEY = 'tracer-theme-prefs'
 
 interface PersistedPrefs {
   theme?: ThemeName

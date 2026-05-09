@@ -55,7 +55,7 @@ export function ResultsApp() {
   // that share the same origin via Vite dev server or file:// protocol).
   useEffect(() => {
     try {
-      const channel = new BroadcastChannel('neurotrace-results')
+      const channel = new BroadcastChannel('tracer-results')
       channel.onmessage = (ev) => {
         if (ev.data?.type === 'results-update') {
           setResults(ev.data.results ?? [])

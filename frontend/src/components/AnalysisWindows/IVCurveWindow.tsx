@@ -207,7 +207,7 @@ export function IVCurveWindow({
   const updateCursors = useCallback((next: Partial<CursorPositions>) => {
     useAppStore.getState().setCursors(next)
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       const merged = { ...useAppStore.getState().cursors, ...next }
       ch.postMessage({ type: 'cursor-update', cursors: merged })
       ch.close()
@@ -341,7 +341,7 @@ export function IVCurveWindow({
     const p = entry?.points[idx]
     if (p != null) {
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'sweep-update', sweep: p.sweepIndex })
         ch.close()
       } catch { /* ignore */ }

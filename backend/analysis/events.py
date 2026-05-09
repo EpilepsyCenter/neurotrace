@@ -1179,7 +1179,7 @@ class EventRecord:
     template_idx: Optional[int] = None
     # User-assigned curation group (1–5; None = ungrouped). Used for
     # filtering / coloring in the results table + viewer markers.
-    # Round-trips through the .neurotrace sidecar like every other
+    # Round-trips through the .tracer sidecar like every other
     # field. Detection never sets this; assignment is purely manual.
     group: Optional[int] = None
 

@@ -1,7 +1,7 @@
 name: Deploy website
 
 # Builds the Astro site under website/ and deploys to GitHub Pages.
-# Final URL: https://epilepsycenter.github.io/neurotrace/
+# Final URL: https://epilepsycenter.github.io/tracer/
 
 on:
   push:

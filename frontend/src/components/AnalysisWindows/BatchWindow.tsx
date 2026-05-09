@@ -3,7 +3,7 @@
  *
  * Workflow:
  *   1. Pick a TEMPLATE file (an already-analyzed recording).
- *   2. The window scans its .neurotrace sidecar and derives a "recipe
+ *   2. The window scans its .tracer sidecar and derives a "recipe
  *      set": for every analysis blob in `analyses.*`, look up the
  *      ``${group}:${series}`` key in `meta.series_tags` and record
  *      ``(tag → analysis_type, params, channel)``. Manual events /
@@ -32,7 +32,7 @@ import { displayGroupSeries } from '../../utils/groupSeriesKey'
 // window decoupled from the per-analysis data definitions.
 type AnyBlob = Record<string, unknown>
 
-/** Every analysis-type slot the .neurotrace sidecar carries. The order
+/** Every analysis-type slot the .tracer sidecar carries. The order
  *  here matches the order of recipes shown in the table — events first
  *  (most common), resistance last. Used both for iterating sidecar
  *  slots during scan and for the recipe-extraction emit calls below
@@ -376,8 +376,8 @@ export function BatchWindow({ backendUrl }: Props) {
     setDiagSeriesTags({})
     try {
       const sidecar = (await api.readSidecar(path)) as SidecarShape | null
-      if (!sidecar || sidecar.format !== 'neurotrace-sidecar') {
-        throw new Error('No NeuroTrace sidecar found for this file. Open + analyse it once first.')
+      if (!sidecar || sidecar.format !== 'tracer-sidecar') {
+        throw new Error('No TRACER sidecar found for this file. Open + analyse it once first.')
       }
       const { recipes, warnings } = extractRecipes(sidecar)
       // Always commit the diagnostic + meta state, even with 0 recipes
@@ -1718,7 +1718,7 @@ async function openTagsForFile(filePath: string) {
     await api.setPreferences({ ...prefs, metadataFocusPath: filePath })
   } catch { /* fall through — broadcast still works for open windows */ }
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'metadata-focus-file', file_path: filePath })
     ch.close()
   } catch { /* ignore */ }

@@ -31,7 +31,7 @@ import { displayGroupSeries } from '../../utils/groupSeriesKey'
  *   - B.6: graph panel (dot plots + ECDF / time-series overlays)
  *   - B.7: stats table panel
  *   - B.8: export (Prism / Excel / _cells.xlsx)
- *   - B.9: .neurocohort session save/load
+ *   - B.9: .tracer_cohort session save/load
  */
 
 interface AnalysesIndex {
@@ -595,7 +595,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
   const [distReferenceTag, setDistReferenceTag] = useState<string>('')
 
   // ------------------------------------------------------------------
-  // Session file (.neurocohort) — Phase B.9
+  // Session file (.tracer_cohort) — Phase B.9
   // ------------------------------------------------------------------
   // ``sessionPath`` is the file the current state is associated with;
   // null for an untitled session. ``Save`` writes to that path,
@@ -617,7 +617,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
   // subsequent aggregations don't accidentally trigger.
   const [pendingSessionRunStats, setPendingSessionRunStats] = useState(false)
   // Ref (NOT state) used to suppress the reset-on-aggregate-change
-  // effects below while a ``.neurocohort`` load is in flight.
+  // effects below while a ``.tracer_cohort`` load is in flight.
   // ``sessionLoading`` (a state variable) can't do this reliably
   // because applySession's ``try/finally`` flips it back to false
   // synchronously, BEFORE the async ``runAggregate`` lands the new
@@ -910,7 +910,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
   //     graph that shows those tags. Set once, propagates everywhere.
   //   * perMetric — axis range, labels, title, log scales, and
   //     kind-specific toggles. Stays with the metric.
-  // Persistence lives in the ``.neurocohort`` session file (B.9):
+  // Persistence lives in the ``.tracer_cohort`` session file (B.9):
   // saving the session writes ``graph_prefs``; opening restores
   // them via ``applySession``. The cohort window itself keeps the
   // prefs in memory only — closing without saving discards them
@@ -1091,7 +1091,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
   const themeName = useThemeStore((s) => s.theme)
 
   // ------------------------------------------------------------------
-  // Session file (.neurocohort) — Phase B.9 save / open.
+  // Session file (.tracer_cohort) — Phase B.9 save / open.
   //
   // ``buildSession`` collects in-memory state into a JSON-serialisable
   // blob; ``applySession`` restores it (kicking off a fresh aggregate
@@ -1227,13 +1227,13 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
     }
     let target = path
     if (!target) {
-      // Save As — suggest <folder-basename>.neurocohort when we have
-      // a folder; otherwise just ``cohort.neurocohort``.
+      // Save As — suggest <folder-basename>.tracer_cohort when we have
+      // a folder; otherwise just ``cohort.tracer_cohort``.
       const defaultName = folder
-        ? `${folder.split(/[/\\]/).pop() || 'cohort'}.neurocohort`
-        : 'cohort.neurocohort'
+        ? `${folder.split(/[/\\]/).pop() || 'cohort'}.tracer_cohort`
+        : 'cohort.tracer_cohort'
       const picked = await api.saveFileDialog?.(defaultName, [
-        { name: 'NeuroTrace Cohort Session', extensions: ['neurocohort'] },
+        { name: 'TRACER Cohort Session', extensions: ['tracer_cohort'] },
       ])
       if (!picked) return false
       target = picked
@@ -1583,7 +1583,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
             onClick={openSession}
             disabled={sessionLoading}
             style={{ padding: '4px 10px' }}
-            title="Open a saved cohort session (.neurocohort) — restores folder, wizard state, selected metrics, stats, and graph styling."
+            title="Open a saved cohort session (.tracer_cohort) — restores folder, wizard state, selected metrics, stats, and graph styling."
           >Open…</button>
           <button
             className="btn"
@@ -1592,7 +1592,7 @@ export function CohortWindow({ backendUrl }: { backendUrl: string }) {
             style={{ padding: '4px 10px' }}
             title={sessionPath
               ? `Save changes to ${sessionPath.split(/[/\\]/).pop()}`
-              : 'Save the current session as a .neurocohort file.'}
+              : 'Save the current session as a .tracer_cohort file.'}
           >{sessionPath
               ? (sessionDirty ? 'Save*' : 'Save')
               : 'Save…'}</button>
@@ -4562,7 +4562,7 @@ function EmptyState() {
       maxWidth: 640,
     }}>
       <div style={{ fontSize: 'var(--font-size-base)', marginBottom: 8 }}>
-        Pick the folder of <code style={mono}>.neurotrace</code> sidecars you
+        Pick the folder of <code style={mono}>.tracer</code> sidecars you
         want to aggregate, choose an analysis type, then click <b>Aggregate</b>.
       </div>
       <div style={{ fontSize: 'var(--font-size-sm)' }}>

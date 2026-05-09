@@ -9,7 +9,7 @@ graph rendering, and export endpoints come in later phases.
   extractor registry knows about. Drives the wizard's analysis-type
   dropdown so the UI doesn't need to hardcode the list.
 
-- ``POST /api/cohort/aggregate`` — walk a folder of ``.neurotrace``
+- ``POST /api/cohort/aggregate`` — walk a folder of ``.tracer``
   sidecars and return per-cell metric rows for the chosen analysis.
   Optional ``file_filter`` and ``series_filter`` honor the user's
   per-file checkbox selection and per-recording series trimming
@@ -39,7 +39,7 @@ router = APIRouter()
 
 
 class AggregateRequest(BaseModel):
-    folder: str = Field(..., description="Absolute path to the folder containing .neurotrace sidecars.")
+    folder: str = Field(..., description="Absolute path to the folder containing .tracer sidecars.")
     analysis_type: str = Field(
         ..., description="One of the keys returned by /api/cohort/analyses."
     )

@@ -103,7 +103,7 @@ export function Welcome() {
 
       <div className="welcome-inner">
         <div className="welcome-hero">
-          <img src={lockup} alt="NeuroTrace" className="welcome-lockup" />
+          <img src={lockup} alt="TRACER" className="welcome-lockup" />
           <div className="welcome-tagline">
             ELECTROPHYSIOLOGY · WORKBENCH
           </div>

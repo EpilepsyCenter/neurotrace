@@ -220,7 +220,7 @@ export function CursorPanel() {
   const channelRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       channelRef.current = ch
       ch.onmessage = (ev) => {
         // Cross-window file close — when another window (currently
@@ -347,7 +347,7 @@ export function CursorPanel() {
         // Recording-level metadata pushed from the metadata window
         // (file tags / per-series tags / cell_id / notes / toast
         // suppression). Adopt into the main store so the auto-save
-        // subscriber persists it to the .neurotrace sidecar — the
+        // subscriber persists it to the .tracer sidecar — the
         // metadata window can't write to disk itself because it
         // doesn't own the recording.filePath link.
         if (ev.data?.type === 'meta-update' && ev.data.recordingMeta !== undefined) {
@@ -434,7 +434,7 @@ export function CursorPanel() {
 
   const applyAxisRange = () => {
     try {
-      const ch = new BroadcastChannel('neurotrace-axis-range')
+      const ch = new BroadcastChannel('tracer-axis-range')
       const range: any = {}
       if (xMin !== '' && xMax !== '') range.x = { min: parseFloat(xMin), max: parseFloat(xMax) }
       if (yMin !== '' && yMax !== '') range.y = { min: parseFloat(yMin), max: parseFloat(yMax) }

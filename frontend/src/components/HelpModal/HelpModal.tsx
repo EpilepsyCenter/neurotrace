@@ -76,7 +76,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
         <div className="help-header">
           <div className="help-title">
             <Icon name="help" size={16} />
-            Help &middot; NeuroTrace
+            Help &middot; TRACER
           </div>
           <button
             className="btn btn-compact btn-ghost"

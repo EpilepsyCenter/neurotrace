@@ -10,7 +10,7 @@ import { computeBurstTrainIds } from '../utils/burstTrains'
 export type TrainModule = 'bursts' | 'events' | 'ap'
 
 /** All train-detection form state for one recording, keyed first by
- *  module then by `${group}:${series}`. Persisted in the .neurotrace
+ *  module then by `${group}:${series}`. Persisted in the .tracer
  *  sidecar; results are NOT stored — they are recomputed on demand
  *  from the existing event/burst/spike timestamps. */
 export type TrainParamsBundle = Record<TrainModule, Record<string, TrainParams>>
@@ -156,7 +156,7 @@ const EMPTY_VISIBLE_TRACES: number[] = []
 /** Broadcast I-V state to other windows — analogous to _broadcastBursts. */
 function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'iv-update', ivCurves })
     ch.close()
   } catch { /* ignore */ }
@@ -164,7 +164,7 @@ function _broadcastIVCurves(ivCurves: Record<string, IVCurveData>) {
 
 function _broadcastFPsp(fpspCurves: Record<string, FPspData>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'fpsp-update', fpspCurves })
     ch.close()
   } catch { /* ignore */ }
@@ -172,7 +172,7 @@ function _broadcastFPsp(fpspCurves: Record<string, FPspData>) {
 
 function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisData>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'cursor-analyses-update', cursorAnalyses })
     ch.close()
   } catch { /* ignore */ }
@@ -180,7 +180,7 @@ function _broadcastCursorAnalyses(cursorAnalyses: Record<string, CursorAnalysisD
 
 function _broadcastAP(apAnalyses: Record<string, APData>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'ap-update', apAnalyses })
     ch.close()
   } catch { /* ignore */ }
@@ -243,7 +243,7 @@ function _migrateEventsAnalyses(
 }
 
 // ---------------------------------------------------------------------------
-// Per-recording sidecar (.neurotrace JSON next to the recording file)
+// Per-recording sidecar (.tracer JSON next to the recording file)
 // ---------------------------------------------------------------------------
 //
 // All analysis params + results get round-tripped through this one file so
@@ -349,7 +349,7 @@ export function parseOverrideKey(key: string): { channel: number; fileUnits: str
  *  - ``yellow`` — file-level tags present but no series tagged yet.
  *  - ``green``  — file-level tags present AND ≥ 1 series carries a tag.
  *
- *  See ``NeuroTrace_modules_spec.md`` for the rationale (we
+ *  See ``TRACER_modules_spec.md`` for the rationale (we
  *  deliberately don't require every series to be tagged). */
 export type MetaStatus = 'red' | 'yellow' | 'green'
 
@@ -362,7 +362,7 @@ export function getMetaStatus(meta: SidecarMeta | null | undefined): MetaStatus 
 }
 
 type SidecarPayload = {
-  format: 'neurotrace-sidecar'
+  format: 'tracer-sidecar'
   version: number
   saved_at?: string
   app_version?: string
@@ -420,7 +420,7 @@ async function _loadSidecar(filePath: string): Promise<SidecarPayload | null> {
   if (!api?.readSidecar || !filePath) return null
   try {
     const parsed = await api.readSidecar(filePath)
-    if (parsed && (parsed as any).format === 'neurotrace-sidecar') {
+    if (parsed && (parsed as any).format === 'tracer-sidecar') {
       return parsed as unknown as SidecarPayload
     }
     return null
@@ -429,7 +429,7 @@ async function _loadSidecar(filePath: string): Promise<SidecarPayload | null> {
 
 function _sidecarPayloadFromState(state: AppState): SidecarPayload {
   return {
-    format: 'neurotrace-sidecar',
+    format: 'tracer-sidecar',
     version: SIDECAR_VERSION,
     app_version: '0.5.0',
     recording_name: state.recording?.filePath?.split(/[/\\]/).pop(),
@@ -491,7 +491,7 @@ async function _saveSidecar(filePath: string, state: AppState): Promise<void> {
 
 function _broadcastScaleOverrides(scaleOverrides: ScaleOverrides) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'scale-overrides-update', scaleOverrides })
     ch.close()
   } catch { /* ignore */ }
@@ -499,7 +499,7 @@ function _broadcastScaleOverrides(scaleOverrides: ScaleOverrides) {
 
 function _broadcastEvents(eventsAnalyses: Record<string, EventsData>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'events-update', eventsAnalyses })
     ch.close()
   } catch { /* ignore */ }
@@ -510,7 +510,7 @@ function _broadcastPaired(
   pairedForm: PairedFormState,
 ) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'paired-update', pairedAnalyses, pairedForm })
     ch.close()
   } catch { /* ignore */ }
@@ -536,7 +536,7 @@ function _broadcastEventsTemplates(
   entries: Record<string, EventsTemplate>,
 ) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({
       type: 'events-templates-update',
       eventsTemplates: { selectedId, entries },
@@ -616,7 +616,7 @@ export function defaultEventsParams(): EventsParams {
 
 function _broadcastExcludedSweeps(excludedSweeps: Record<string, number[]>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'excluded-update', excludedSweeps })
     ch.close()
   } catch { /* ignore */ }
@@ -624,18 +624,18 @@ function _broadcastExcludedSweeps(excludedSweeps: Record<string, number[]>) {
 
 function _broadcastAveragedSweeps(averagedSweeps: Record<string, AveragedSweep[]>) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'averaged-update', averagedSweeps })
     ch.close()
   } catch { /* ignore */ }
 }
 
 /** Broadcast field-burst state + detection filter to other windows via the
- *  shared `neurotrace-sync` channel. Called from the analysis window's store
+ *  shared `tracer-sync` channel. Called from the analysis window's store
  *  after every detection run so markers appear in the main viewer. */
 function _broadcastBursts(fieldBursts: Record<string, FieldBurstsData>, params: FieldBurstsParams) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'bursts-update', fieldBursts })
     // Also push the detection filter config so the main viewer can adopt it
     // (keeps the visual-trace and burst-marker y-values aligned).
@@ -665,7 +665,7 @@ function _broadcastBurstFormParams(
   burstFormParams: Record<string, FieldBurstsParams>,
 ) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'burst-form-params-update', burstFormParams })
     ch.close()
   } catch { /* ignore */ }
@@ -676,7 +676,7 @@ function _broadcastBurstFormParams(
  *  or edits the train sidepanel in one of the three windows. */
 function _broadcastTrainParams(trainParams: TrainParamsBundle) {
   try {
-    const ch = new BroadcastChannel('neurotrace-sync')
+    const ch = new BroadcastChannel('tracer-sync')
     ch.postMessage({ type: 'train-params-update', trainParams })
     ch.close()
   } catch { /* ignore */ }
@@ -1359,7 +1359,7 @@ export interface EventRow {
   templateIdx: number | null
   /** Curation group (1–5). Set manually via the digit-key + click
    *  flow on the main events viewer. Null = ungrouped. Used for
-   *  filtering / coloring. Round-trips via the .neurotrace sidecar. */
+   *  filtering / coloring. Round-trips via the .tracer sidecar. */
   group: number | null
 }
 
@@ -1698,7 +1698,7 @@ interface AppState {
    *  overrides — that way switching series faithfully restores the
    *  whole filter context, no matter which slot ("Default" or a
    *  specific channel) the user toggled. Round-trips through the
-   *  .neurotrace sidecar; ``selectSweep`` restores it on series
+   *  .tracer sidecar; ``selectSweep`` restores it on series
    *  change, and both ``setFilter`` and ``setFilterFor`` keep the
    *  current-series slot in sync. */
   filtersBySeries: Record<string, { filter: FilterState; filtersByChannel: Record<number, FilterState> }>
@@ -1783,7 +1783,7 @@ interface AppState {
   /** Per-series burst-detection *form* state (method, baseline mode,
    *  all numeric params, filter fields). Survives window close even if
    *  the user never clicked Run. Keyed by `${group}:${series}`;
-   *  persisted per-recording in the .neurotrace sidecar. */
+   *  persisted per-recording in the .tracer sidecar. */
   burstFormParams: Record<string, FieldBurstsParams>
 
   /** Train-grouping form state for the Burst, Event, and AP windows.
@@ -2257,7 +2257,7 @@ interface AppState {
    *  navigation / selection stays put. */
   replaceEvent: (group: number, series: number, idx: number, row: EventRow) => void
   /** Assign or clear the curation group for one event. ``groupNum``
-   *  must be 1–5 or null (clear). Round-trips via the .neurotrace
+   *  must be 1–5 or null (clear). Round-trips via the .tracer
    *  sidecar like any other event field. */
   setEventGroup: (group: number, series: number, idx: number, groupNum: number | null) => void
 
@@ -3027,7 +3027,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // window's adopt-handler.
     if (recording?.filePath) {
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'file-close' })
         ch.close()
       } catch { /* ignore */ }
@@ -3118,7 +3118,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         } catch { /* ignore */ }
       }
-      // Try the per-recording sidecar first. If a ``<file>.neurotrace``
+      // Try the per-recording sidecar first. If a ``<file>.tracer``
       // sits next to the recording it carries every analysis slice
       // in one shot — load-and-broadcast everything, then skip the
       // legacy prefs loads below. When the sidecar is absent we fall
@@ -3141,7 +3141,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (recording?.filePath) {
         const sidecar = await _loadSidecar(recording.filePath)
         if (sidecar) {
-          const bc = new BroadcastChannel('neurotrace-sync')
+          const bc = new BroadcastChannel('tracer-sync')
           const post = (msg: any) => { try { bc.postMessage(msg) } catch { /* ignore */ } }
           const a = sidecar.analyses ?? {}
           const patch: Partial<AppState> = {}
@@ -3309,7 +3309,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ recordingMetaReady: true })
       }
 
-      // No prefs fallback: the .neurotrace sidecar is the only
+      // No prefs fallback: the .tracer sidecar is the only
       // persistence layer. Files without a sidecar simply load
       // empty per-analysis state. The legacy ``saved*`` prefs
       // helpers were removed — see the deleted block in this file
@@ -3410,7 +3410,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // stays in lockstep — same broadcast type the detection
       // window listens for.
       try {
-        const ch = new BroadcastChannel('neurotrace-sync')
+        const ch = new BroadcastChannel('tracer-sync')
         ch.postMessage({ type: 'detection-filter', filter: nextFilter })
         ch.close()
       } catch { /* ignore */ }
@@ -3659,7 +3659,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- Excluded sweeps ----
   //
-  // Persistence lives in the .neurotrace sidecar alongside the other
+  // Persistence lives in the .tracer sidecar alongside the other
   // analysis slices. Cross-window sync flows through BroadcastChannel
   // "excluded-update" — the main window's CursorPanel adopts it on
   // receipt, exactly like the other analysis slices.
@@ -4118,7 +4118,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     // Propagate to other windows (main viewer) so markers clear there too.
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.postMessage({ type: 'bursts-update', fieldBursts: get().fieldBursts })
       ch.close()
     } catch { /* ignore */ }
@@ -5867,7 +5867,7 @@ function diagFromResponse(m: any): FieldBurstsDiag | undefined {
 
 // All per-recording analysis state (events / bursts / AP / IV / FPsp /
 // cursor / resistance + auxiliaries like excluded + averaged sweeps)
-// persists exclusively through the .neurotrace sidecar — the
+// persists exclusively through the .tracer sidecar — the
 // debounced subscriber lives below this block. The legacy per-slice
 // Electron-prefs writers were removed; sidecar is the only source of
 // truth for files we open.
@@ -5889,7 +5889,7 @@ useAppStore.subscribe((state) => {
 // ---------------------------------------------------------------------------
 // Per-recording sidecar auto-save.
 //
-// One subscriber watches all the slices that belong in the .neurotrace
+// One subscriber watches all the slices that belong in the .tracer
 // sidecar. On any change it schedules a debounced write — coalescing bursts
 // of updates (typing a param into a NumInput, dragging cursors, etc.) into
 // a single file write. Runs in parallel with the legacy per-slice prefs

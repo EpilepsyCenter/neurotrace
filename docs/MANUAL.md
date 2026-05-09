@@ -1,6 +1,6 @@
-# NeuroTrace User Manual
+# TRACER User Manual
 
-NeuroTrace is a desktop application for analysing electrophysiology
+TRACER is a desktop application for analysing electrophysiology
 recordings. It reads HEKA `.dat`, Axon `.abf`, and plain-text traces,
 and provides interactive tools for measuring passive properties,
 synaptic responses, action potentials, spontaneous events, and
@@ -21,9 +21,9 @@ explained next to the parameters that select them.
 
 ## 1. Getting Started
 
-### Launching NeuroTrace
+### Launching TRACER
 
-NeuroTrace runs as a single desktop application. When it starts, it
+TRACER runs as a single desktop application. When it starts, it
 spawns a local Python backend in the background; all numerical work
 (filtering, fitting, peak detection, file reading) happens there,
 while the window you see is responsible only for display and
@@ -44,7 +44,7 @@ way next time.
 ### First launch — the welcome surface
 
 Until you load a recording, the centre of the window is taken up by
-a **welcome surface**: NeuroTrace's lockup, a one-line summary of
+a **welcome surface**: TRACER's lockup, a one-line summary of
 what the application does, and three ways of getting started.
 
 - **Open file…** — the large primary button opens the same file
@@ -60,7 +60,7 @@ what the application does, and three ways of getting started.
   in front of you while no recording is open.
 
 A short *SUPPORTED* line at the bottom of the surface lists the
-formats NeuroTrace can read.
+formats TRACER can read.
 
 The welcome surface is purely a landing experience — the moment a
 file opens, it is replaced by the trace viewer, and reopens only if
@@ -69,10 +69,10 @@ you reach a state where no recording is loaded again.
 ### Opening a recording
 
 Click the **Open File** button at the left of the toolbar to pick a
-recording. NeuroTrace does not install a separate menu bar of its
+recording. TRACER does not install a separate menu bar of its
 own — every command lives on the toolbar (or in the **command
 palette**, see chapter 8) — so this is the single entry point for
-loading data. NeuroTrace's primary, fully-tested formats are:
+loading data. TRACER's primary, fully-tested formats are:
 
 | Format | Extension | Notes |
 |---|---|---|
@@ -80,7 +80,7 @@ loading data. NeuroTrace's primary, fully-tested formats are:
 | Axon Binary | `.abf` | ABF1 and ABF2; gap-free and episodic |
 | Plain text | `.csv`, `.tsv`, `.txt`, `.atf` | Routed through the **Text Import Wizard** for column mapping and unit assignment |
 
-In addition, NeuroTrace can open a wider range of formats through
+In addition, TRACER can open a wider range of formats through
 the [Neo](https://neuralensemble.org/neo/) library — including
 Axograph (`.axgd`, `.axgx`), WinWCP (`.wcp`), Spike2 (`.smr`),
 NWB (`.nwb`), NIX (`.nix`), NeoHDF5 (`.h5`), Plexon (`.plx`),
@@ -100,7 +100,7 @@ appears in the toolbar.
 ![Main window overview](screenshots/main-window-overview.png)
 
 To switch to a different recording, simply open another file —
-NeuroTrace replaces the current one. There is no separate close
+TRACER replaces the current one. There is no separate close
 command; closing the application window quits the program.
 
 ### Recent files
@@ -113,14 +113,14 @@ bottom of the list empties it.
 
 ![Recent files dropdown](screenshots/toolbar-open-file-dropdown.png)
 
-If a recently-opened file has been moved or deleted, NeuroTrace will
+If a recently-opened file has been moved or deleted, TRACER will
 report the failure and remove the entry from the list.
 
 ### Per-recording state
 
 Whenever you run an analysis, mark sweeps as excluded, build an
-averaged sweep, or change a per-channel filter, NeuroTrace writes
-the result to a small JSON sidecar named `<recording>.neurotrace`
+averaged sweep, or change a per-channel filter, TRACER writes
+the result to a small JSON sidecar named `<recording>.tracer`
 placed next to the original file. The sidecar contains analysis
 results, UI state, and any custom labels — but never a copy of the
 raw signal. Reopening the recording later restores everything from
@@ -138,7 +138,7 @@ help icon) — or run **Report a bug** from the command palette
 happened in plain language; you do not need a GitHub account, the
 form is anonymous by default, and submission stays inside the app.
 
-Alongside your description NeuroTrace attaches a small block of
+Alongside your description TRACER attaches a small block of
 diagnostic context: app version, OS, the analysis window you were
 in, the recording's format and group/series count, the most recent
 error message, and a random submission ID. Filenames, file paths,
@@ -388,7 +388,7 @@ single series at a time. Each row carries:
 
 - **A type badge** — *VC* (voltage clamp), *CC* (current clamp), or
   *FP* (field potential) — colour-coded so you can tell at a glance
-  what kind of recording you are looking at. NeuroTrace guesses the
+  what kind of recording you are looking at. TRACER guesses the
   type from the series label, the protocol, and the holding
   potential; if it is wrong, you can override the channel units in
   the **Scaling** dialog.
@@ -464,7 +464,7 @@ what you see.
 
 A typical electrophysiology recording contains far more samples
 than the screen has pixels, so showing every sample would be
-expensive and pointless. NeuroTrace decimates the visible region
+expensive and pointless. TRACER decimates the visible region
 down to roughly four thousand points using **LTTB** — the
 **Largest-Triangle-Three-Buckets** algorithm — before handing the
 result to the plot. LTTB divides the time axis into buckets and,
@@ -529,7 +529,7 @@ SVG by the backend.)
 For episodic recordings — one sweep per protocol step — there is
 nothing fancy to navigate: the toolbar's `←` / `→` buttons step
 between sweeps. For **continuous** recordings, where a single sweep
-can run for many minutes, NeuroTrace switches into a viewport-based
+can run for many minutes, TRACER switches into a viewport-based
 mode:
 
 - The plot shows a time-window of the full sweep at a time.
@@ -551,7 +551,7 @@ modifying the step size.
 
 ### Cursors
 
-Cursors are the foundation of every measurement in NeuroTrace.
+Cursors are the foundation of every measurement in TRACER.
 Three independent **pairs** are available, drawn as translucent
 shaded bands across the plot:
 
@@ -613,7 +613,7 @@ floating off in the original sample frame.
 
 When the file contains a reconstructable stimulus — for HEKA
 recordings, this means a `.pgf` protocol file is present alongside
-the `.dat` — NeuroTrace draws the stimulus on the secondary Y axis
+the `.dat` — TRACER draws the stimulus on the secondary Y axis
 in the colour assigned to the stimulus slot in **Settings**. The
 stimulus is a regular trace as far as the viewer is concerned, with
 its own checkbox in the **Traces** dropdown.
@@ -651,7 +651,7 @@ response — peaks and troughs stay where they were, just smoothed.
 Edge handling uses constant (edge-value) padding rather than the
 default odd-reflection, which avoids ringing at the very start of
 traces that begin away from zero. For very short signals (fewer
-samples than `6 × n_sections`), NeuroTrace falls back to a one-way
+samples than `6 × n_sections`), TRACER falls back to a one-way
 `sosfilt` so the filter still runs without raising an error.
 
 Filters are stored per channel in the sidecar, so each channel can
@@ -722,7 +722,7 @@ Field Potential window can place the baseline and response windows
 relative to the stimulus onset detected from the protocol file.
 When this happens, the values appear in the cursor inputs and the
 shaded bands move on the plot. You are always free to nudge them
-afterwards; nothing in NeuroTrace will overwrite a manual edit
+afterwards; nothing in TRACER will overwrite a manual edit
 without asking.
 
 ### Filter
@@ -739,7 +739,7 @@ cell on the same recording stays unfiltered.
 
 The toolbar chapter introduced the **Settings** popover at a glance.
 This chapter covers what each setting does in a little more detail
-and explains how NeuroTrace's two-axis approach to appearance —
+and explains how TRACER's two-axis approach to appearance —
 **theme** and **palette** — is meant to be used. All settings here
 are global: they apply to every window and every recording.
 
@@ -748,7 +748,7 @@ are global: they apply to every window and every recording.
 A **palette** is a coordinated set of colours; a **theme** is the
 light or dark variant of that palette. The two are independent,
 which means there are six combinations available rather than the
-usual two. NeuroTrace ships with three palettes:
+usual two. TRACER ships with three palettes:
 
 - **Precision** — the default for new installs. A high-contrast,
   neutral scheme tuned for working under daylight: clean
@@ -758,7 +758,7 @@ usual two. NeuroTrace ships with three palettes:
   interface to step out of the way.
 
 - **Classic** — neutral greys with cool blue accents. The look of
-  earlier NeuroTrace builds, kept as an option for users who prefer
+  earlier TRACER builds, kept as an option for users who prefer
   it.
 
 - **Telegraph** — warm and high-contrast. The dark variant is
@@ -804,7 +804,7 @@ comfortably to leave more room for plots.
 
 ### Trace colours
 
-NeuroTrace gives every channel its own colour slot so that, once
+TRACER gives every channel its own colour slot so that, once
 you have settled on (say) blue for the patched cell and red for the
 field electrode, that mapping persists across files. Six slots are
 provided: five for recorded channels (1 through 5) and one for the
@@ -829,7 +829,7 @@ be set per sweep.
 
 ## 7. Where Your Work is Stored
 
-NeuroTrace persists state in two places. Understanding which is
+TRACER persists state in two places. Understanding which is
 which makes the difference between a setting that follows the
 recording around and one that follows you, the user, around.
 
@@ -837,8 +837,8 @@ recording around and one that follows you, the user, around.
 
 Global, user-level state is written to a small **preferences.json**
 file inside the platform's standard application-data directory
-(`~/Library/Application Support/NeuroTrace` on macOS,
-`%APPDATA%\NeuroTrace` on Windows, `~/.config/NeuroTrace` on
+(`~/Library/Application Support/TRACER` on macOS,
+`%APPDATA%\TRACER` on Windows, `~/.config/TRACER` on
 Linux). This file holds:
 
 - **Window bounds** — the size, position, and maximised state of
@@ -851,14 +851,14 @@ Linux). This file holds:
 It also holds a few per-file caches that mirror what is in the
 sidecar (excluded sweeps, averaged sweeps, saved analysis results,
 form parameters, and the like), keyed by file path. These exist so
-that NeuroTrace can restore your view of a recording before it has
+that TRACER can restore your view of a recording before it has
 finished loading the sidecar from disk; the sidecar is the
 authoritative copy.
 
 ### The recording sidecar
 
 Per-recording state is written to a JSON file named
-`<recording>.neurotrace`, placed next to the recording itself. It
+`<recording>.tracer`, placed next to the recording itself. It
 contains everything that is specific to that file:
 
 - **Analysis results** — Cursor Measurements, Resistance, I-V
@@ -870,13 +870,13 @@ contains everything that is specific to that file:
   averaged sweeps (with their underlying samples), the per-channel
   zero-offset states, the visible-traces list, and the per-channel
   filter configurations.
-- **Metadata** — the version of NeuroTrace that created the file,
+- **Metadata** — the version of TRACER that created the file,
   the timestamp, and a reference back to the source recording.
 
 When you move a recording to a different machine, copy its sidecar
 along with it and everything you have done — exclusions, averages,
 analyses, filters — comes with the file. If the sidecar is missing,
-NeuroTrace opens the recording cleanly and writes a fresh one the
+TRACER opens the recording cleanly and writes a fresh one the
 first time you make a change worth saving. Sidecars do not store a
 copy of the raw recording, so they stay small even for long
 experiments. The one exception is averaged sweeps, whose computed
@@ -927,7 +927,7 @@ example, to open the **Cursor Measurements** window, press `⌘K`
 and start typing *cursors*. Each Part II chapter notes the
 keyword that brings up its window.
 
-NeuroTrace does not install a native menu bar, so opening a file
+TRACER does not install a native menu bar, so opening a file
 has no dedicated keyboard shortcut: use the toolbar's **Open File**
 button, drop a file onto the welcome surface, or open the command
 palette and pick an entry from the *Recent* list. (The help modal
@@ -966,7 +966,7 @@ Most analysis-window tables share a common set of shortcuts:
 - **⌘C / Ctrl+C** copies the current selection as TSV (where wired).
 
 Pasting any of these into a spreadsheet preserves the column layout,
-so building a working figure from a NeuroTrace results table is
+so building a working figure from a TRACER results table is
 usually a matter of selecting, copying, and pasting.
 
 ---
@@ -975,7 +975,7 @@ usually a matter of selecting, copying, and pasting.
 
 The chapters that follow each cover one analysis window. Every
 window opens as its own desktop window — separate from the main
-NeuroTrace window — and stays in sync with the main view through a
+TRACER window — and stays in sync with the main view through a
 shared sweep selection and cursor state. Several windows can be
 open at once; closing them does not lose your work, because each
 saves its results into the recording's sidecar. Where a window
@@ -986,7 +986,7 @@ inline next to the parameter that selects them.
 
 ## 9. Cursor Measurements
 
-The **Cursor Measurements** window is the workhorse of NeuroTrace.
+The **Cursor Measurements** window is the workhorse of TRACER.
 It takes the same idea as the cursor pair on the main viewer — a
 pre-stimulus baseline window and a post-stimulus peak window — and
 multiplies it: up to ten independent **slots**, each with its own
@@ -1084,7 +1084,7 @@ Each slot card carries:
   optimiser's iteration limit (`max iter`), function-tolerance
   (`ftol`), and parameter-tolerance (`xtol`), plus a list of named
   initial-guess inputs for each parameter of the chosen function.
-  Leave these blank to let NeuroTrace pick reasonable starting
+  Leave these blank to let TRACER pick reasonable starting
   values; fill them in only when you are fighting a stubborn fit.
   A **reset guesses** button clears any overrides.
 
@@ -1221,7 +1221,7 @@ units, and all slopes in *units per second*.
   the cursor.
 - **rise time 10–90 %** and **rise time 20–80 %** — the time the
   trace takes to climb from 10 % (or 20 %) of the signed amplitude
-  to 90 % (or 80 %). NeuroTrace finds the two crossing points
+  to 90 % (or 80 %). TRACER finds the two crossing points
   walking back from the peak and **interpolates linearly between
   adjacent samples** so the result is not quantised to the sample
   rate. If either crossing cannot be found inside the cursor (for
@@ -1321,7 +1321,7 @@ The expected input is a sweep that contains a small, brief command
 step — typically a 5 mV depolarising pulse for VC, lasting a few
 tens of milliseconds — applied against an otherwise stable baseline.
 You do not need to mark the step yourself: when the recording's
-HEKA `.pgf` is available, NeuroTrace reads the step amplitude from
+HEKA `.pgf` is available, TRACER reads the step amplitude from
 the protocol and pre-fills it for you.
 
 ### When to use this window
@@ -1372,7 +1372,7 @@ Unlike Cursor Measurements, there is no separate **fit** cursor:
 the fit window is taken automatically from the peak of the
 capacitive transient onward, with its length set by the **Fit
 duration** parameter described below. This keeps the workflow
-simple — you mark where the pulse is, NeuroTrace finds the
+simple — you mark where the pulse is, TRACER finds the
 transient inside it.
 
 Cursor positions are shown read-only at the top of the left panel
@@ -1519,7 +1519,7 @@ acceptable when Rin ≫ Rs — typical for healthy cells. For cells
 where the input resistance is low (sick cells, leaky seals), the
 reported Cm should be treated as approximate.
 
-NeuroTrace also applies a sanity filter: any computed Cm outside
+TRACER also applies a sanity filter: any computed Cm outside
 the range 0.1 pF to 2 000 pF is dropped from the row rather than
 displayed, on the grounds that anything outside that window is
 overwhelmingly more likely to be a fit artefact than a real
@@ -1586,7 +1586,7 @@ The window supports both modes of recording symmetrically:
   in mV. The slope is now a resistance directly; multiplied by the
   unit factor it is reported in MΩ as input resistance.
 
-In either case NeuroTrace works out the directionality from the
+In either case TRACER works out the directionality from the
 units of the recorded channel, so you do not have to tell it which
 mode the recording is in.
 
@@ -1658,11 +1658,11 @@ re-running.
 
 Each sweep in an I-V protocol carries a different level of
 injected stimulus, and the analysis needs to know what that level
-is to plot it against the response. NeuroTrace offers two ways of
+is to plot it against the response. TRACER offers two ways of
 supplying it.
 
 **Auto** — the default — reads the level out of the recording's
-HEKA `.pgf` protocol file. NeuroTrace picks the channel most
+HEKA `.pgf` protocol file. TRACER picks the channel most
 likely to be the actual command (heuristically, the one with the
 largest range and an active *do-write* flag) and, for each sweep,
 uses the most-deflected segment value of that channel as the
@@ -1684,7 +1684,7 @@ HEKA recordings whose protocol metadata is missing. Pick **Manual
 
 The window shows the formula as a small caption under the inputs to
 make the convention explicit. Negative values and zero steps are
-allowed; NeuroTrace uses whatever you supply.
+allowed; TRACER uses whatever you supply.
 
 If you leave the window in Auto on a recording that does not have
 a usable stimulus, the run aborts with a clear message asking you
@@ -1737,7 +1737,7 @@ currently selected as the Y metric, baseline-subtracted).
 
 ### The I-V line
 
-Once at least two points are present, NeuroTrace fits a straight
+Once at least two points are present, TRACER fits a straight
 line through them using ordinary least-squares linear regression.
 The fit is computed client-side directly from the per-sweep table,
 so switching the Y metric immediately re-fits without going back
@@ -1800,7 +1800,7 @@ which point you had highlighted on the curve.
 ## 12. Action Potentials
 
 The **Action Potentials** window is the largest analysis module in
-NeuroTrace, and the natural reach for any current-clamp recording
+TRACER, and the natural reach for any current-clamp recording
 where individual spikes matter. It detects spikes, counts them,
 turns them into firing-rate and frequency-adaptation summaries,
 fits per-spike kinetics (threshold, amplitude, rise, decay,
@@ -2040,7 +2040,7 @@ that sweep; the corresponding F–I point is highlighted.
 
 The lower-right of the Counting tab shows the cell's F–I curve as
 a scatter plot, one point per sweep, with the injected current on
-the X axis and the firing rate on the Y axis. NeuroTrace gets the
+the X axis and the firing rate on the Y axis. TRACER gets the
 per-sweep current in one of two ways.
 
 - **Auto** (default) — reads the stimulus channel reconstructed
@@ -2075,7 +2075,7 @@ choose how it is computed:
   an Im channel; resolves the step level more precisely than
   *record* when the protocol carries a smooth ramp inside the
   step.
-- **Ramp (`ramp`)** — for ramp protocols, NeuroTrace linearly
+- **Ramp (`ramp`)** — for ramp protocols, TRACER linearly
   interpolates between *start Im* and *end Im* over the *start*-to-
   *end* time window, evaluating at the time of the first AP's
   peak. The **Auto-fill** button next to the ramp fields parses
@@ -2097,7 +2097,7 @@ the decay, and the AHPs are detected on each spike.
 #### Choosing a threshold method
 
 The single most important parameter on this tab is the **Threshold
-method** — how NeuroTrace decides where the AP threshold is on
+method** — how TRACER decides where the AP threshold is on
 each spike. Eight methods are offered, grouped by family.
 
 | Method | Selector | What it computes |
@@ -2216,7 +2216,7 @@ without re-running everything. The pattern is the same as in the
 Burst, Event and Paired windows.
 
 - **Adding a spike** — left-click on the spike viewer at the time
-  you want a peak. NeuroTrace snaps to the nearest local Vm
+  you want a peak. TRACER snaps to the nearest local Vm
   maximum within ±*Min distance / 2* and adds a spike there. If
   the click is closer to an existing spike than *Min distance*,
   it is rejected (you cannot accidentally double up).
@@ -2256,7 +2256,7 @@ kinetics table.
 
 ## 13. Event Detection
 
-The **Event Detection** module is NeuroTrace's workflow for
+The **Event Detection** module is TRACER's workflow for
 spontaneous synaptic events: miniature EPSCs and IPSCs,
 spontaneous postsynaptic currents, and any other repetitive
 short-lived deflection that appears without an explicit trigger.
@@ -2414,7 +2414,7 @@ detection to a portion of each sweep.
 
 ### Per-event kinetics
 
-Once events have been picked, NeuroTrace measures a standard set
+Once events have been picked, TRACER measures a standard set
 of kinetics on each one. Every detected and every manually-added
 event carries these fields:
 
@@ -2624,7 +2624,7 @@ the detection window is currently showing.
 
 ### Honest gaps
 
-The Events module is the largest in NeuroTrace and a few corners
+The Events module is the largest in TRACER and a few corners
 are still rough. Most visibly:
 
 - The **Histogram** and **Rate** tabs (planned amplitude / IEI /
@@ -3388,7 +3388,7 @@ or paste.
 
 ## 17. Metadata
 
-The **Metadata** window is where you tell NeuroTrace what each
+The **Metadata** window is where you tell TRACER what each
 recording is. It manages free-form **tags** at two levels —
 file-level tags for the recording as a whole, and per-series
 tags for individual series within it — plus a recording-level
@@ -3401,7 +3401,7 @@ your data means.
 The Metadata window is unusual in two ways. First, it does not
 require a recording to be open: it browses the active recording's
 folder and lets you tag *any* file in it, opened or not, by
-reading and writing each file's `.neurotrace` sidecar directly.
+reading and writing each file's `.tracer` sidecar directly.
 Second, it offers **batch tagging** across multiple files at
 once — useful for an experimental cohort where every cell needs
 the same genotype tag.
@@ -3513,7 +3513,7 @@ operation.
 
 ### Persistence and cross-window updates
 
-Metadata is stored in each file's `.neurotrace` sidecar under a
+Metadata is stored in each file's `.tracer` sidecar under a
 `meta` block, keyed by `cell_id`, `animal_id`, `notes`,
 `group_tags`, and `series_tags`. After every write, the metadata
 window broadcasts a `meta-update` message; the **Tree Navigator**
@@ -3668,7 +3668,7 @@ template can be applied to a future figure and styled
 consistently. Templates live in the global preferences file.
 
 **Open…** and **Save…** save and reload a complete *session* —
-items, processing, and styling — to a `.neurotrace_figure` JSON
+items, processing, and styling — to a `.tracer_figure` JSON
 file. Sessions are useful when you need to come back to the same
 figure two weeks later and remember exactly which sweeps you
 chose.
@@ -3850,7 +3850,7 @@ the sidecars and rolls everything up.
 It does **not** run analyses itself. Every cell that contributes
 to a Cohort result was analysed previously, either by hand in an
 analysis window or by the Batch window. Cohort reads the
-`.neurotrace` sidecars and aggregates the values stored there.
+`.tracer` sidecars and aggregates the values stored there.
 
 *Reach this window from the toolbar's **Cohort…** button, or
 press `⌘K` and type **cohort**.*
@@ -3874,7 +3874,7 @@ becomes available as the previous one is filled in.
 2. **Analysis type** — pick which analysis the comparison is
    about (Events, AP, Resistance, I-V Curve, fEPSP I-O, fEPSP
    PPR, fEPSP LTP, Bursts, Cursors, Paired).
-3. **Aggregate** — Cohort reads every `.neurotrace` sidecar in
+3. **Aggregate** — Cohort reads every `.tracer` sidecar in
    the folder and reports how many cells were found, how many
    were skipped (no tags, no analysis, parse error).
 4. **Wizard** — design the comparison: comparison shape
@@ -3981,7 +3981,7 @@ Three buttons sit at the bottom right.
 
 Cohort state — folder, analysis type, comparison shape, tag
 selection, metric selection, graph customisations — can be saved
-to a `.neurocohort` JSON session file via Save / Open. Reopening
+to a `.tracer_cohort` JSON session file via Save / Open. Reopening
 the file restores the wizard exactly, recomputes the aggregate,
 and shows the same stats and graphs. Sessions are global rather
 than per-recording.
@@ -4124,7 +4124,7 @@ CSV exports follow the same split:
 
 ### Persistence
 
-Train **parameters** are saved per-recording in the `.neurotrace`
+Train **parameters** are saved per-recording in the `.tracer`
 sidecar under `train_params.<module>[group:series]`. Train
 **results** are not saved — they are recomputed from the events
 list on demand whenever a window opens, a manual edit happens, or

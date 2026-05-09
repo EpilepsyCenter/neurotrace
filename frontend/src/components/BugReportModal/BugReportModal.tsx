@@ -6,7 +6,7 @@ import {
 /**
  * In-app bug-report modal. Hosts a Tally form (form ID ``ZjvoQB``)
  * inside an iframe so researchers can submit bugs without leaving
- * NeuroTrace and without needing a GitHub / Google account.
+ * TRACER and without needing a GitHub / Google account.
  *
  * The user-visible fields (title, description, severity, …) live
  * inside the Tally form. The hidden fields (app version, OS, last
@@ -162,7 +162,7 @@ export function BugReportModal({
                 <iframe
                   ref={iframeRef}
                   src={embedUrl}
-                  title="NeuroTrace bug report"
+                  title="TRACER bug report"
                   style={{
                     width: '100%', minHeight: 580,
                     border: 'none', display: 'block',

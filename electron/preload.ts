@@ -10,11 +10,11 @@ function getPrefsPath(): string {
   const home = homedir()
   const p = platform()
   if (p === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'neurotrace', 'preferences.json')
+    return join(home, 'Library', 'Application Support', 'tracer', 'preferences.json')
   } else if (p === 'win32') {
-    return join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'neurotrace', 'preferences.json')
+    return join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'tracer', 'preferences.json')
   } else {
-    return join(process.env.XDG_CONFIG_HOME || join(home, '.config'), 'neurotrace', 'preferences.json')
+    return join(process.env.XDG_CONFIG_HOME || join(home, '.config'), 'tracer', 'preferences.json')
   }
 }
 
@@ -67,7 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setPreferences: (prefs: Record<string, unknown>): Promise<boolean> => ipcRenderer.invoke('set-preferences', prefs),
 
   // Per-recording sidecar files. Each recording at ``<path>`` has an
-  // optional ``<path>.neurotrace`` JSON next to it carrying all
+  // optional ``<path>.tracer`` JSON next to it carrying all
   // analysis params + results for that recording. Writes are atomic
   // (tmp + rename). Reads return null when absent or corrupt.
   readSidecar: (recordingPath: string): Promise<Record<string, unknown> | null> =>
@@ -75,7 +75,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeSidecar: (recordingPath: string, payload: Record<string, unknown>): Promise<boolean> =>
     ipcRenderer.invoke('write-sidecar', recordingPath, payload),
 
-  // Cohort session (.neurocohort) — Phase B.9 portable cohort-run
+  // Cohort session (.tracer_cohort) — Phase B.9 portable cohort-run
   // file. Same atomic-write semantics as the per-recording sidecar.
   // Reads return null on missing / corrupt / wrong-format files so
   // the renderer can treat absence as "no session" without throwing.
@@ -86,7 +86,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openCohortSessionDialog: (): Promise<string | null> =>
     ipcRenderer.invoke('open-cohort-session-dialog'),
 
-  // Trace Export figure sessions (.neurotrace_figure). Same shape as
+  // Trace Export figure sessions (.tracer_figure). Same shape as
   // the cohort session — atomic write, format-tagged JSON, dedicated
   // open-dialog with the right filter so users see only figure files.
   readFigureSession: (sessionPath: string): Promise<Record<string, unknown> | null> =>

@@ -274,10 +274,10 @@ interface TraceExportState {
 
   // ----- Sessions --------------------------------------------------------
   /** Hydrate every slice the user can edit from a session payload.
-   *  Used when opening a .neurotrace_figure JSON file. */
+   *  Used when opening a .tracer_figure JSON file. */
   loadSessionPayload: (payload: SessionPayload) => void
   /** Build a serializable snapshot of the entire working figure for
-   *  saving to .neurotrace_figure JSON. */
+   *  saving to .tracer_figure JSON. */
   buildSessionPayload: () => SessionPayload
 }
 

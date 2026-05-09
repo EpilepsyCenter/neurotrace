@@ -150,8 +150,8 @@ export function TraceExportWindow({ backendUrl, fileInfo }: Props) {
   async function handleSaveSession() {
     const api = window.electronAPI
     if (!api) return
-    const path = await api.saveFileDialog('figure.neurotrace_figure', [
-      { name: 'NeuroTrace Figure Session', extensions: ['neurotrace_figure'] },
+    const path = await api.saveFileDialog('figure.tracer_figure', [
+      { name: 'TRACER Figure Session', extensions: ['tracer_figure'] },
     ])
     if (!path) return
     const ok = await api.writeFigureSession(path, buildSessionPayload() as unknown as Record<string, unknown>)
@@ -364,7 +364,7 @@ export function TraceExportWindow({ backendUrl, fileInfo }: Props) {
         <button
           className="btn"
           onClick={handleOpenSession}
-          title="Open a saved figure session (.neurotrace_figure)"
+          title="Open a saved figure session (.tracer_figure)"
         >Open…</button>
         <button
           className="btn"

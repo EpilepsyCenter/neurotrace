@@ -1,6 +1,6 @@
-# NeuroTrace website
+# TRACER website
 
-Static marketing site for [NeuroTrace](https://github.com/marcoledri/neurotrace), built with [Astro](https://astro.build).
+Static marketing site for [TRACER](https://github.com/marcoledri/tracer), built with [Astro](https://astro.build).
 
 Source for the design tokens (Telegraph theme: vellum paper, warm ink, amber LED accent, 2 px radii) lives in `src/styles/global.css`. Shared layout in `src/layouts/Base.astro`. Pages under `src/pages/`.
 
@@ -28,12 +28,12 @@ npm run preview    # serve the built site
 
 The site is fully static — `npm run build` writes plain HTML to `dist/`. Drop it on GitHub Pages, Netlify, S3, or any static host.
 
-When you wire up a real host, set `site` and (if needed) `base` in `astro.config.mjs`. Example for GitHub Pages at `marcoledri.github.io/neurotrace`:
+When you wire up a real host, set `site` and (if needed) `base` in `astro.config.mjs`. Example for GitHub Pages at `marcoledri.github.io/tracer`:
 
 ```js
 export default defineConfig({
   site: 'https://marcoledri.github.io',
-  base: '/neurotrace',
+  base: '/tracer',
   trailingSlash: 'ignore',
 });
 ```

@@ -2,7 +2,7 @@
 import Base from '../layouts/Base.astro';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const link = (p: string) => `${base}${p}`;
-const repo = 'https://github.com/EpilepsyCenter/neurotrace';
+const repo = 'https://github.com/EpilepsyCenter/tracer';
 const releases = `${repo}/releases`;
 
 const blocks = [
@@ -14,7 +14,7 @@ const blocks = [
     chips: ['10 slots', 'Per-recording'],
     lead: 'Up to ten user-configurable measurement slots per recording. Each slot is a named pair of cursor regions plus a metric (baseline, peak, amplitude, rise time, decay τ, half-width, integrated area). Cursors are draggable; values update live.',
     bullets: [
-      ['Slot management', 'Name, save, reorder, duplicate, and delete slots from the sidebar. Slot configuration is persisted per recording in the .neurotrace sidecar.'],
+      ['Slot management', 'Name, save, reorder, duplicate, and delete slots from the sidebar. Slot configuration is persisted per recording in the .tracer sidecar.'],
       ['Quick measure', 'Click anywhere on the trace to read out time/value at that exact sample — works on the LTTB-decimated viewer because we binary-search the time array, not the index.'],
     ],
   },
@@ -105,10 +105,10 @@ const blocks = [
   {
     id: 'persistence',
     num: '09',
-    kicker: '.neurotrace sidecar JSON · atomic write · debounced save',
+    kicker: '.tracer sidecar JSON · atomic write · debounced save',
     title: 'Sidecar persistence',
     chips: ['Per-recording', 'Reproducible'],
-    lead: 'Every analysis result, every form parameter, every cursor position, every excluded sweep is persisted to a plain JSON sidecar (recording.dat.neurotrace) next to the recording. Reopen a file in six months — every window comes back exactly where you left it.',
+    lead: 'Every analysis result, every form parameter, every cursor position, every excluded sweep is persisted to a plain JSON sidecar (recording.dat.tracer) next to the recording. Reopen a file in six months — every window comes back exactly where you left it.',
     bullets: [
       ['What it carries', 'Analysis results (events, bursts, AP, IV, fPSP, paired, cursors, resistance), form state per module, train-grouping params per series, recording metadata, excluded/averaged sweeps, scale overrides, per-series filter overrides.'],
       ['Atomic IO', 'Electron main process writes via temp-file rename. Debounced 1 s after any change. No corruption on crash, no half-written sidecars.'],
@@ -140,7 +140,7 @@ const blocks = [
   },
 ];
 ---
-<Base title="NeuroTrace — Features">
+<Base title="TRACER — Features">
 <style>
 .feature-block{padding:88px 0;border-bottom:1px solid var(--border);}
 .feature-block .head{display:grid;grid-template-columns:80px 1fr auto;gap:24px;align-items:baseline;margin-bottom:24px;}
@@ -183,7 +183,7 @@ const blocks = [
   <div class="meta">
     <span><strong>11</strong> modules</span>
     <span><strong>50+</strong> file formats</span>
-    <span><strong>0.6.2</strong> current build</span>
+    <span><strong>0.7.0</strong> current build</span>
     <span class="led ok">MIT licensed</span>
   </div>
 </div></header>
@@ -221,12 +221,12 @@ const blocks = [
 
 <section class="cta-big">
   <div class="wrap">
-    <div class="eyebrow">v0.6.2 · Released</div>
+    <div class="eyebrow">v0.7.0 · Released</div>
     <h2>Read the docs.<em> Then run it.</em></h2>
     <p>User manual is bundled into the app and lives in the repository at <span class="mono" style="background:var(--dark-bg-3);padding:1px 6px;border-radius:var(--rad);color:var(--dark-text);">docs/MANUAL.md</span>.</p>
     <div class="btns">
       <a class="btn-lg primary" href={link('/docs')}>Open the docs →</a>
-      <a class="btn-lg" href={releases}>Download v0.6.2 ↓</a>
+      <a class="btn-lg" href={releases}>Download v0.7.0 ↓</a>
     </div>
   </div>
 </section>

@@ -133,7 +133,7 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
   const channelRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       channelRef.current = ch
       ch.onmessage = (ev) => {
         const data = ev.data as any
@@ -394,7 +394,7 @@ export function MetadataWindow({ backendUrl, fileInfo }: {
       const nextMeta = updater(prevMeta)
       const payload = {
         ...existing,
-        format: 'neurotrace-sidecar',
+        format: 'tracer-sidecar',
         version: existing.version ?? 2,
         meta: nextMeta,
       }

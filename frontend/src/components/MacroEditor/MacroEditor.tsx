@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
 
-const DEFAULT_MACRO = `# NeuroTrace Python Macro
+const DEFAULT_MACRO = `# TRACER Python Macro
 # Available API: stf.get_trace(), stf.get_sampling_rate(), stf.measure_peak(), etc.
 
 import numpy as np

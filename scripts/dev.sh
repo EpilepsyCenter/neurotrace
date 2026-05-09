@@ -6,7 +6,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "Starting NeuroTrace development environment..."
+echo "Starting TRACER development environment..."
 
 # Install Python dependencies if needed
 if ! python3 -c "import fastapi" 2>/dev/null; then

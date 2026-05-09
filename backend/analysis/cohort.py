@@ -1,7 +1,7 @@
-"""Cohort-level metric extraction from ``.neurotrace`` sidecars.
+"""Cohort-level metric extraction from ``.tracer`` sidecars.
 
 This is the foundation of the Cohort Analysis module (Phase B in
-``NeuroTrace_modules_spec.md``). It does not run statistics or render
+``TRACER_modules_spec.md``). It does not run statistics or render
 plots — it just walks a folder of sidecar JSON files and produces a
 flat per-cell table of metrics for downstream stats / graphs / export.
 
@@ -49,7 +49,7 @@ import numpy as np
 
 from .trains import group_into_trains
 
-# Recording extensions that carry a ``.neurotrace`` sidecar. Mirrors
+# Recording extensions that carry a ``.tracer`` sidecar. Mirrors
 # ``RECORDING_EXTENSIONS`` in ``electron/main.ts`` so a cohort scan
 # sees the same files the metadata window does.
 RECORDING_EXTS = {'.dat', '.abf', '.h5', '.nwb', '.wcp', '.axgd', '.smr'}
@@ -1541,7 +1541,7 @@ DEFAULT_METRICS: dict[str, dict[str, list[str]]] = {
 # ---------------------------------------------------------------------
 
 def _list_sidecars(folder: Path) -> list[Path]:
-    """Return sorted absolute paths to ``.neurotrace`` sidecars next to
+    """Return sorted absolute paths to ``.tracer`` sidecars next to
     every recording-shaped file in ``folder``. Files without sidecars
     are skipped — they can't have been tagged."""
     out: list[Path] = []
@@ -1552,7 +1552,7 @@ def _list_sidecars(folder: Path) -> list[Path]:
             continue
         if entry.suffix.lower() not in RECORDING_EXTS:
             continue
-        sidecar = entry.with_name(entry.name + '.neurotrace')
+        sidecar = entry.with_name(entry.name + '.tracer')
         if sidecar.exists():
             out.append(sidecar)
     return out
@@ -1569,7 +1569,7 @@ def _load_sidecar(path: Path) -> Optional[dict]:
         return None
     if not isinstance(data, dict):
         return None
-    if data.get('format') != 'neurotrace-sidecar':
+    if data.get('format') != 'tracer-sidecar':
         return None
     return data
 
@@ -1585,7 +1585,7 @@ def aggregate_folder(
     Parameters
     ----------
     folder
-        Absolute path to a directory containing ``.neurotrace`` files.
+        Absolute path to a directory containing ``.tracer`` files.
     analysis_type
         One of :data:`EXTRACTORS` keys.
     file_filter
@@ -1625,9 +1625,9 @@ def aggregate_folder(
     skipped_no_analysis: list[dict] = []
 
     for sidecar_path in sidecars:
-        # Recording path = sidecar path with the ``.neurotrace`` suffix
-        # stripped (sidecars are named ``recording.dat.neurotrace``).
-        recording_path = str(sidecar_path)[: -len('.neurotrace')]
+        # Recording path = sidecar path with the ``.tracer`` suffix
+        # stripped (sidecars are named ``recording.dat.tracer``).
+        recording_path = str(sidecar_path)[: -len('.tracer')]
         if file_filter_set is not None and recording_path not in file_filter_set:
             continue
         sidecar = _load_sidecar(sidecar_path)

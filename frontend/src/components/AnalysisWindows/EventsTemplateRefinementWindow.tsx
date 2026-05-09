@@ -74,7 +74,7 @@ export function EventsTemplateRefinementWindow({
       } catch { /* ignore */ }
     })()
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'events-session-update'
             && ev.data.eventsWindowSession) {

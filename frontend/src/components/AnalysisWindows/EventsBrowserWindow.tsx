@@ -76,7 +76,7 @@ export function EventsBrowserWindow({
       } catch { /* ignore */ }
     })()
     try {
-      const ch = new BroadcastChannel('neurotrace-sync')
+      const ch = new BroadcastChannel('tracer-sync')
       ch.onmessage = (ev) => {
         if (ev.data?.type === 'events-session-update' && ev.data.eventsWindowSession) {
           const s = ev.data.eventsWindowSession
@@ -727,7 +727,7 @@ function EventBrowserPanel({
               // window's BroadcastChannel listener consumes this.
               if (!ev) return
               try {
-                const ch = new BroadcastChannel('neurotrace-sync')
+                const ch = new BroadcastChannel('tracer-sync')
                 ch.postMessage({
                   type: 'events-navigate-to',
                   timeS: ev.peakTimeS,

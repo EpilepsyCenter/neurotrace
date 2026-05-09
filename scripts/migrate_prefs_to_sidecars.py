@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """One-shot migration: copy analyses from the legacy Electron prefs
-file into ``.neurotrace`` sidecars next to each recording.
+file into ``.tracer`` sidecars next to each recording.
 
 Why this exists
 ---------------
-Before the sidecar persistence layer landed, NeuroTrace stored every
-analysis under ``~/Library/Application Support/neurotrace/preferences.json``
+Before the sidecar persistence layer landed, TRACER stored every
+analysis under ``~/Library/Application Support/tracer/preferences.json``
 keyed by ``saved<Slice>[recording_path]``. Files with prefs entries
 load fine when opened in the app (the legacy hydration path runs),
 but the **cohort module reads only sidecars** — it has no knowledge
@@ -21,7 +21,7 @@ Usage
 -----
     python3 scripts/migrate_prefs_to_sidecars.py [--dry-run]
 
-Reads ``~/Library/Application Support/neurotrace/preferences.json``
+Reads ``~/Library/Application Support/tracer/preferences.json``
 (macOS path; tweak for your platform if needed). For every recording
 path that has at least one ``saved<Slice>`` entry:
 
@@ -65,7 +65,7 @@ PREFS_TO_SIDECAR = {
 def _prefs_path() -> Path:
     """macOS prefs location. Adjust for win32 / linux as needed."""
     home = Path.home()
-    return home / 'Library' / 'Application Support' / 'neurotrace' / 'preferences.json'
+    return home / 'Library' / 'Application Support' / 'tracer' / 'preferences.json'
 
 
 def _load_sidecar(path: Path) -> dict:
@@ -122,12 +122,12 @@ def main():
         if not os.path.exists(rp):
             skipped_missing += 1
             continue
-        sidecar_path = Path(str(rp) + '.neurotrace')
+        sidecar_path = Path(str(rp) + '.tracer')
         existing = _load_sidecar(sidecar_path)
         # Start with the existing sidecar as the base; merge in only
         # slices the sidecar doesn't already have data for.
         next_payload = dict(existing)
-        next_payload.setdefault('format', 'neurotrace-sidecar')
+        next_payload.setdefault('format', 'tracer-sidecar')
         next_payload.setdefault('version', 2)
         analyses = dict(next_payload.get('analyses') or {})
 

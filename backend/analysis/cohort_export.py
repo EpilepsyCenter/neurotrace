@@ -361,7 +361,7 @@ def _write_cells_wide_sheet(ws, paired: list[tuple[dict, str]],
                              meta_fields: list[str]) -> None:
     # ``series_key`` is exported in the storage form (0-indexed
     # ``g:s`` or ``g:s:subtype``) — that's the join key the rest of
-    # NeuroTrace uses internally and matches the .neurotrace sidecar.
+    # TRACER uses internally and matches the .tracer sidecar.
     # The HEKA / Patchmaster UIs show it 1-indexed (Group 1, Series 4
     # = ``0:3`` here); apply +1 to both numeric components if you need
     # to cross-reference against the recording in HEKA.

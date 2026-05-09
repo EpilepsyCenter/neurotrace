@@ -7,8 +7,8 @@ const trimmedBase = base.replace(/\/$/, '');
 const route = pathname.startsWith(trimmedBase) ? pathname.slice(trimmedBase.length) || '/' : pathname;
 const isActive = (path: string) => route === path || route === path + '/';
 const link = (p: string) => `${trimmedBase}${p}`;
-const releasesHref = 'https://github.com/EpilepsyCenter/neurotrace/releases';
-const repoHref = 'https://github.com/EpilepsyCenter/neurotrace';
+const releasesHref = 'https://github.com/EpilepsyCenter/tracer/releases';
+const repoHref = 'https://github.com/EpilepsyCenter/tracer';
 ---
 <nav class="site-nav"><div class="wrap nav">
   <Logo />

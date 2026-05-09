@@ -14,7 +14,7 @@ jobs:
         include:
           - os: macos-14       # Apple Silicon runner
             arch: arm64
-            artifact: NeuroTrace-mac-arm64
+            artifact: TRACER-mac-arm64
             builder_flags: --mac dmg --arm64
             freeze: bash scripts/build-backend.sh
           # Intel Mac build intentionally disabled for the 0.2.x series —
@@ -22,17 +22,17 @@ jobs:
           # if an Intel artefact is ever needed again.
           - os: windows-latest
             arch: x64
-            artifact: NeuroTrace-win-x64
+            artifact: TRACER-win-x64
             builder_flags: --win nsis --x64
             freeze: pwsh scripts/build-backend.ps1
           - os: ubuntu-latest
             arch: x64
-            artifact: NeuroTrace-linux-x64
+            artifact: TRACER-linux-x64
             builder_flags: --linux AppImage --x64
             freeze: bash scripts/build-backend.sh
           - os: ubuntu-24.04-arm       # GH-provided ARM64 runner (free for public repos)
             arch: arm64
-            artifact: NeuroTrace-linux-arm64
+            artifact: TRACER-linux-arm64
             builder_flags: --linux AppImage --arm64
             freeze: bash scripts/build-backend.sh
 

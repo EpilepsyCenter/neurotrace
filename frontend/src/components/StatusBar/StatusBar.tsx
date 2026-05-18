@@ -52,7 +52,7 @@ export function StatusBar() {
         <span className={hostClass}>
           {window.electronAPI ? 'Electron' : 'Browser'}
         </span>
-        <span className="led">TRACER v0.4.0</span>
+        <span className="led">TRACER v{typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'}</span>
       </div>
     </div>
   )

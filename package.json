@@ -1,6 +1,6 @@
 {
   "name": "tracer",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Electrophysiology analysis software",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -47,6 +47,10 @@
       {
         "from": "backend-dist",
         "to": "backend"
+      },
+      {
+        "from": "build/lockup.png",
+        "to": "lockup.png"
       }
     ],
     "mac": {

@@ -16,7 +16,25 @@ app.setName('TRACER')
 // / taskbar / window chrome picks it up live.
 const ICON_PATH = join(__dirname, '..', 'build', 'icon.png')
 
+// Splash lockup — bundled via ``extraResources`` so it lives at
+// ``<resources>/lockup.png`` in packaged builds, and read straight
+// from ``build/`` during dev. We inline it as a base64 data URI in
+// the splash HTML so the splash window can stay a self-contained
+// ``data:`` URL with no file:// fetches at runtime.
+function loadSplashLockupDataUri(): string {
+  const path = app.isPackaged
+    ? join(process.resourcesPath, 'lockup.png')
+    : join(__dirname, '..', 'build', 'lockup.png')
+  try {
+    const buf = readFileSync(path)
+    return `data:image/png;base64,${buf.toString('base64')}`
+  } catch {
+    return ''
+  }
+}
+
 let mainWindow: BrowserWindow | null = null
+let splashWindow: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
 let backendPort: number = 0
 
@@ -118,6 +136,117 @@ function saveWindowBounds() {
 }
 
 // -----------------------------------------------------------------
+// Splash screen — shown immediately on app launch so the user has
+// visual feedback while the Python backend cold-starts (can take
+// 20–30s on first run under Gatekeeper / SmartScreen). Frameless,
+// always-on-top, destroyed once the main window is ready-to-show.
+// HTML is inlined as a data URL so there's no extra file to bundle.
+// -----------------------------------------------------------------
+function buildSplashHtml(lockupDataUri: string): string {
+  const lockupTag = lockupDataUri
+    ? `<img class="lockup" src="${lockupDataUri}" alt="TRACER Suite" />`
+    // Fallback: text wordmark if the lockup file is missing for any
+    // reason (corrupt install, dev before ``build/lockup.png`` exists).
+    : `<div class="wordmark"><span class="t">T</span><span class="rest">RACER Suite</span></div>`
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #f7f8fa;
+    color: #2b3a4a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "IBM Plex Sans", Helvetica, Arial, sans-serif;
+    -webkit-user-select: none;
+    overflow: hidden;
+  }
+  .wrap {
+    height: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    border: 1px solid #d6dbe2;
+    border-radius: 10px;
+    box-sizing: border-box;
+    padding: 0 32px;
+  }
+  .lockup {
+    width: 360px; max-width: 100%; height: auto;
+    image-rendering: -webkit-optimize-contrast;
+  }
+  .wordmark {
+    font-size: 40px; letter-spacing: -1px; line-height: 1;
+  }
+  .wordmark .t { color: #0f1722; font-weight: 500; }
+  .wordmark .rest { color: #2b3a4a; font-weight: 300; }
+  .status {
+    font-size: 11px; color: #6b7280; letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .bar {
+    width: 240px; height: 3px; background: #e5e9ef;
+    border-radius: 999px; overflow: hidden;
+  }
+  .bar::after {
+    content: ""; display: block; width: 40%; height: 100%;
+    background: #2b3a4a; border-radius: 999px;
+    animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    50%  { transform: translateX(150%); }
+    100% { transform: translateX(250%); }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    ${lockupTag}
+    <div class="bar"></div>
+    <div class="status">Starting backend…</div>
+  </div>
+</body>
+</html>`
+}
+
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 460,
+    height: 260,
+    frame: false,
+    resizable: false,
+    movable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    transparent: false,
+    backgroundColor: '#f7f8fa',
+    icon: ICON_PATH,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  const html = buildSplashHtml(loadSplashLockupDataUri())
+  splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+  splashWindow.once('ready-to-show', () => {
+    splashWindow?.show()
+  })
+  splashWindow.on('closed', () => {
+    splashWindow = null
+  })
+}
+
+function closeSplash() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.destroy()
+  }
+  splashWindow = null
+}
+
+// -----------------------------------------------------------------
 // Main window
 // -----------------------------------------------------------------
 function createWindow() {
@@ -132,6 +261,12 @@ function createWindow() {
     minHeight: 700,
     title: 'TRACER',
     icon: ICON_PATH,
+    // Stay hidden until React has painted at least once so the user
+    // never sees a flash of empty chrome between the splash closing
+    // and the UI showing. Paired with the splash window's destroy()
+    // in the ``ready-to-show`` handler below.
+    show: false,
+    backgroundColor: '#f7f8fa',
     // macOS: tuck the traffic-light controls into the toolbar by
     // hiding the native title bar but keeping the OS buttons inset
     // at the top-left. The renderer adds left padding to ``.toolbar``
@@ -156,6 +291,11 @@ function createWindow() {
   } else {
     mainWindow.loadFile(join(__dirname, '..', 'dist', 'index.html'))
   }
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.show()
+    closeSplash()
+  })
 
   mainWindow.on('resize', saveWindowBounds)
   mainWindow.on('move', saveWindowBounds)
@@ -681,6 +821,11 @@ ipcMain.handle('get-platform', () => process.platform)
 // App lifecycle
 // -----------------------------------------------------------------
 app.whenReady().then(async () => {
+  // Show the splash immediately so the user has visual feedback
+  // during backend cold-start. ``createWindow`` will destroy it once
+  // the main window's first paint is ready.
+  createSplashWindow()
+
   try {
     backendPort = await findFreePort()
     console.log(`Starting Python backend on port ${backendPort}...`)
@@ -691,6 +836,12 @@ app.whenReady().then(async () => {
   }
 
   createWindow()
+
+  // Safety net: if ``ready-to-show`` never fires (hung renderer,
+  // missing index.html, etc.) the splash would stay on top forever.
+  // Force-close it after a generous wait so the user can at least
+  // interact with whatever did paint.
+  setTimeout(() => closeSplash(), 90_000)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

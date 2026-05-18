@@ -8,6 +8,16 @@ Current release: **v0.7.1**. macOS Apple-Silicon DMG, Windows NSIS, and Linux Ap
 
 **[Website](https://epilepsycenter.github.io/tracer/)** · **[Releases](https://github.com/EpilepsyCenter/tracer/releases)** · **[Manual](docs/MANUAL.md)**
 
+## Install
+
+No build required — pre-built installers for every supported platform are attached to each tagged release on the [releases page](https://github.com/EpilepsyCenter/tracer/releases/latest):
+
+- **macOS (Apple Silicon)** — `TRACER-<version>.dmg`. Open the DMG and drag TRACER to Applications. The app is not notarized yet, so on first launch macOS will block it; either right-click → Open, or run `xattr -dr com.apple.quarantine /Applications/TRACER.app` once.
+- **Windows (x64)** — `TRACER Setup <version>.exe` (NSIS installer). SmartScreen may warn the first time — click *More info* → *Run anyway*.
+- **Linux (x64 / arm64)** — `TRACER-<version>.AppImage`. `chmod +x` it and double-click, or run it from a terminal. On Ubuntu 22.04+ you may need `sudo apt install libfuse2` (or use `--appimage-extract-and-run`).
+
+No separate Python or Node install is needed — the backend is bundled inside the installer.
+
 ## What it does
 
 Open a recording, navigate the group → series → sweep tree, and run analysis modules over the trace. Each module has its own window with a continuous-mode viewer + draggable cursor regions, a parameter sidebar, and a results table you can curate. Detection results are kept in a sidecar JSON (`recording.dat.tracer`) next to the recording, so reopening the file restores everything — selections, cursors, every module's last run.
@@ -76,13 +86,15 @@ TRACER/
 
 Electron spawns the FastAPI backend as a child process on a local port (defaults to 8321). The frontend talks to it over HTTP.
 
-## Requirements
+## Developing
+
+> Only needed if you want to modify TRACER or build it yourself. Regular users should grab an installer from the [releases page](https://github.com/EpilepsyCenter/tracer/releases/latest) — no compiler toolchain required.
+
+Requirements:
 
 - **Node.js** 22.6+ (the train-parity test uses native TS type stripping).
 - **Python** 3.10+
 - **npm**
-
-## Getting started
 
 ```bash
 npm install

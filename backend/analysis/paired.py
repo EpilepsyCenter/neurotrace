@@ -347,15 +347,38 @@ def _measure_trial(
         # Rise / decay / τ via measure_event_kinetics. Direction is
         # inferred from amplitude sign when caller asked for 'auto'.
         # We pass the FULL post array and the absolute peak index so
-        # the function's own baseline estimation has enough context;
-        # decay_search_ms is sized to the remaining post window so the
-        # fit doesn't run past the truncation guard.
+        # the function's own baseline estimation has enough context.
+        #
+        # Kinetics search windows are deliberately INDEPENDENT of the
+        # user's peak-search bounds (post_search_start_s / end_s and
+        # the post_ms setting). Those bounds exist to keep spontaneous
+        # events out of PEAK detection — users often keep them
+        # conservatively short so a failure followed by a spontaneous
+        # EPSC doesn't get mis-identified as the evoked response. But
+        # once we've locked onto the evoked peak, rise and decay
+        # should be measured across the event's natural extent
+        # regardless of how short the search window was; otherwise
+        # rise_ms / decay_ms / τ silently come back None for any
+        # event whose foot or tail spills outside the user's cursors.
         ek_dir = ("positive" if amplitude > 0 else "negative") \
             if peak_direction == "auto" else \
             ("positive" if peak_direction == "positive" else "negative")
-        decay_search_samples = max(1, post_b - peak_idx_abs)
-        decay_search_ms_eff = float(decay_search_samples / sr * 1000.0)
-        baseline_search_ms_eff = float((pre_idx - bl_a) / sr * 1000.0) if bl_a < pre_idx else 5.0
+        # Forward (decay): full remaining trace, bounded only by the
+        # next trial's stim (minus a 0.2 ms guard so the next
+        # stimulus artifact doesn't pollute the exponential fit).
+        decay_end_abs = n
+        if next_pre_idx is not None and next_pre_idx > peak_idx_abs:
+            guard = max(1, int(round(0.0002 * sr)))
+            decay_end_abs = min(decay_end_abs, next_pre_idx - guard)
+        decay_search_ms_eff = max(
+            2.0, float(decay_end_abs - peak_idx_abs) / sr * 1000.0,
+        )
+        # Backward (rise / foot): adaptive — enough to span the
+        # stim → peak interval plus a 20 ms baseline buffer, floored
+        # at 30 ms for very fast events. measure_event_kinetics
+        # clips internally to the start of the trace.
+        stim_to_peak_ms = max(0.0, (peak_idx_abs - pre_idx) / sr * 1000.0)
+        baseline_search_ms_eff = max(30.0, stim_to_peak_ms + 20.0)
         try:
             ek = measure_event_kinetics(
                 post, sr, peak_idx_abs,

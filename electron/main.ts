@@ -117,7 +117,11 @@ function loadWindowBounds(): { x?: number; y?: number; width: number; height: nu
       if (prefs.windowBounds) return prefs.windowBounds
     }
   } catch { /* ignore */ }
-  return { width: 1400, height: 900 }
+  // 1080p-safe — leaves ~80 px of vertical margin for the macOS menu
+  // bar + dock so the window doesn't immediately exceed the screen on
+  // common laptop displays. Users on bigger monitors can resize once
+  // and the new bounds get persisted.
+  return { width: 1600, height: 1000 }
 }
 
 function saveWindowBounds() {
@@ -706,10 +710,13 @@ function loadAnalysisWindowBounds(analysisType: string): { x?: number; y?: numbe
       if (bounds) return bounds
     }
   } catch { /* ignore */ }
-  // The manual viewer has a TOC sidebar + content pane and benefits
-  // from a roomier default than the analysis windows.
+  // 1080p-safe default for every analysis window — large enough to
+  // render the params sidebar + multi-panel results without immediate
+  // resizing (the old 900×650 clipped AP's F-I curve and Paired's STA
+  // / Stats grid badly on first open) while still fitting a 1920×1080
+  // display with margin for the macOS menu bar + dock.
   if (analysisType === 'manual') return { width: 1080, height: 760 }
-  return { width: 900, height: 650 }
+  return { width: 1400, height: 950 }
 }
 
 function saveAnalysisWindowBounds(analysisType: string) {

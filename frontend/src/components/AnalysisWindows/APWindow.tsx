@@ -5,7 +5,7 @@ import {
   useAppStore,
   APData, APDetectionMethod, APDetectionParams, APKineticsParams,
   APThresholdMethod, APRampParams, APRheobaseMode, APManualEdits,
-  APPoint,
+  APPoint, APPerSweep,
 } from '../../stores/appStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
@@ -875,6 +875,19 @@ export function APWindow({
                 style={{ flex: 1, fontSize: 'var(--font-size-label)' }}>
                 Clear edits
               </button>
+              <APExportDropdown
+                stretch
+                placement="up"
+                disabled={!entry || (entry.perSweep.length === 0 && entry.perSpike.length === 0)}
+                onCounting={() => entry && exportApCountingCSV(
+                  entry.perSweep, fileInfo?.fileName ?? 'recording', group, series,
+                )}
+                onKinetics={() => entry && exportApKineticsCSV(
+                  entry.perSpike, fileInfo?.fileName ?? 'recording', group, series,
+                )}
+                countingCount={entry?.perSweep.length ?? 0}
+                kineticsCount={entry?.perSpike.length ?? 0}
+              />
             </div>
           </div>
           {error && (
@@ -1692,6 +1705,161 @@ function APTrainsPanel({
       </div>
     </div>
   )
+}
+
+function APExportDropdown({
+  disabled, onCounting, onKinetics, countingCount, kineticsCount,
+  placement = 'down', stretch = false,
+}: {
+  disabled: boolean
+  onCounting: () => void
+  onKinetics: () => void
+  countingCount: number
+  kineticsCount: number
+  /** ``up`` opens the popover above the button — use this when the
+   *  button sits at the bottom of a panel (e.g. the Run footer). */
+  placement?: 'down' | 'up'
+  /** When true, the button fills its container (used in the Run
+   *  footer's flex row alongside Clear / Clear edits). */
+  stretch?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDocDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocDown)
+    return () => document.removeEventListener('mousedown', onDocDown)
+  }, [open])
+  const popoverPosition = placement === 'up'
+    ? { bottom: 'calc(100% + 4px)' as const }
+    : { top: 'calc(100% + 4px)' as const }
+  return (
+    <div ref={rootRef} style={{
+      position: 'relative',
+      ...(stretch ? { flex: 1, display: 'flex' } : null),
+    }}>
+      <button className="btn" disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          fontSize: 'var(--font-size-label)',
+          padding: stretch ? undefined : '4px 12px',
+          ...(stretch ? { flex: 1 } : null),
+        }}
+        title="Export per-sweep counts or per-spike kinetics to CSV">
+        Export CSV ▾
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', ...popoverPosition, right: 0,
+          background: 'var(--bg-primary)',
+          border: '1px solid var(--border)', borderRadius: 4,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          minWidth: 200, zIndex: 10, padding: 4,
+          display: 'flex', flexDirection: 'column', gap: 2,
+        }}>
+          <button className="btn"
+            onClick={() => { onCounting(); setOpen(false) }}
+            disabled={countingCount === 0}
+            style={{
+              textAlign: 'left', padding: '6px 10px',
+              fontSize: 'var(--font-size-label)',
+              display: 'flex', justifyContent: 'space-between', gap: 12,
+            }}
+            title="Per-sweep spike counts, rate, ISI, SFA, LV, Im">
+            <span>Counting (per sweep)</span>
+            <span style={{ color: 'var(--text-muted)' }}>{countingCount}</span>
+          </button>
+          <button className="btn"
+            onClick={() => { onKinetics(); setOpen(false) }}
+            disabled={kineticsCount === 0}
+            style={{
+              textAlign: 'left', padding: '6px 10px',
+              fontSize: 'var(--font-size-label)',
+              display: 'flex', justifyContent: 'space-between', gap: 12,
+            }}
+            title="Per-spike threshold, peak, amplitude, rise/decay, half-width, AHP">
+            <span>Kinetics (per spike)</span>
+            <span style={{ color: 'var(--text-muted)' }}>{kineticsCount}</span>
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function exportApCountingCSV(
+  perSweep: APPerSweep[],
+  fileName: string,
+  group: number,
+  series: number,
+) {
+  if (perSweep.length === 0) return
+  const header = [
+    'file', 'group', 'series', 'sweep',
+    'spike_count', 'spike_rate_hz', 'im_mean_pa',
+    'first_spike_latency_s', 'mean_isi_s', 'sfa_divisor', 'local_variance',
+  ]
+  const rows = perSweep.map((p) => [
+    JSON.stringify(fileName),
+    group, series, p.sweep + 1,
+    p.spikeCount,
+    p.spikeRateHz != null ? p.spikeRateHz.toFixed(4) : '',
+    p.imMean != null ? p.imMean.toFixed(3) : '',
+    p.firstSpikeLatency != null ? p.firstSpikeLatency.toFixed(6) : '',
+    p.meanISI != null ? p.meanISI.toFixed(6) : '',
+    p.sfaDivisor != null ? p.sfaDivisor.toFixed(4) : '',
+    p.localVariance != null ? p.localVariance.toFixed(4) : '',
+  ])
+  const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  const name = fileName.replace(/\.[^.]+$/, '') + '_ap_counting.csv'
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = name; a.click()
+  URL.revokeObjectURL(url)
+}
+
+function exportApKineticsCSV(
+  perSpike: APPoint[],
+  fileName: string,
+  group: number,
+  series: number,
+) {
+  if (perSpike.length === 0) return
+  const header = [
+    'file', 'group', 'series', 'sweep', 'spike_index',
+    'threshold_vm', 'threshold_t_s', 'peak_vm', 'peak_t_s',
+    'amplitude_mv', 'rise_time_s', 'decay_time_s', 'half_width_s',
+    'fahp_vm', 'fahp_t_s', 'mahp_vm', 'mahp_t_s',
+    'max_rise_slope_mv_ms', 'max_decay_slope_mv_ms', 'manual',
+  ]
+  const rows = perSpike.map((s) => [
+    JSON.stringify(fileName),
+    group, series, s.sweep + 1, s.spikeIndex + 1,
+    s.thresholdVm.toFixed(4), s.thresholdT.toFixed(6),
+    s.peakVm.toFixed(4), s.peakT.toFixed(6),
+    s.amplitudeMv.toFixed(4),
+    s.riseTimeS != null ? s.riseTimeS.toFixed(6) : '',
+    s.decayTimeS != null ? s.decayTimeS.toFixed(6) : '',
+    s.halfWidthS != null ? s.halfWidthS.toFixed(6) : '',
+    s.fahpVm != null ? s.fahpVm.toFixed(4) : '',
+    s.fahpT != null ? s.fahpT.toFixed(6) : '',
+    s.mahpVm != null ? s.mahpVm.toFixed(4) : '',
+    s.mahpT != null ? s.mahpT.toFixed(6) : '',
+    s.maxRiseSlopeMvMs != null ? s.maxRiseSlopeMvMs.toFixed(4) : '',
+    s.maxDecaySlopeMvMs != null ? s.maxDecaySlopeMvMs.toFixed(4) : '',
+    s.manual ? '1' : '0',
+  ])
+  const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  const name = fileName.replace(/\.[^.]+$/, '') + '_ap_kinetics.csv'
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = name; a.click()
+  URL.revokeObjectURL(url)
 }
 
 function exportApTrainsCSV(

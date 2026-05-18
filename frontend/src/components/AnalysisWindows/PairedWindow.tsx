@@ -8,7 +8,7 @@ import {
 import { useThemeStore } from '../../stores/themeStore'
 import { NumInput } from '../common/NumInput'
 import { sampleTraceYAt } from '../../utils/sampleTraceY'
-import { useRowSelection, buildTSV } from '../../utils/rowSelection'
+import { useRowSelection, buildTSV, copyTextToClipboard } from '../../utils/rowSelection'
 import { useRowCopyMenu } from '../common/RowCopyMenu'
 import { usePlotMenu } from '../common/PlotMenu'
 
@@ -720,15 +720,35 @@ export function PairedWindow({
                   style={{ width: 60 }} />
               </div>
             )}
-            <button className="btn"
-              onClick={() => clearPairedAnalysis(group, series)}
-              disabled={!stored}
-              style={{
-                fontSize: 'var(--font-size-label)', padding: '4px 10px',
-              }}
-              title="Clear stored results for this series">
-              Clear results
-            </button>
+            <div style={{
+              display: 'flex', gap: 6, marginTop: 2,
+              borderTop: '1px solid var(--border)', paddingTop: 6,
+            }}>
+              <button className="btn"
+                onClick={() => clearPairedAnalysis(group, series)}
+                disabled={!stored}
+                style={{
+                  flex: 1,
+                  fontSize: 'var(--font-size-label)', padding: '4px 10px',
+                }}
+                title="Clear stored results for this series">
+                Clear results
+              </button>
+              <button className="btn"
+                onClick={() => stored && exportPairedTrialsCSV(
+                  stored.perTrial,
+                  fileInfo?.fileName ?? 'recording',
+                  group, series,
+                )}
+                disabled={!stored || stored.perTrial.length === 0}
+                style={{
+                  flex: 1,
+                  fontSize: 'var(--font-size-label)', padding: '4px 10px',
+                }}
+                title="Export per-trial measurements to CSV">
+                Export CSV
+              </button>
+            </div>
             {runError && (
               <div style={{
                 color: '#e57373', fontSize: 'var(--font-size-label)',
@@ -849,7 +869,13 @@ export function PairedWindow({
             display: 'flex', flexDirection: 'column',
           }}>
             {tab === 'trials' && <TrialsTab data={stored} />}
-            {tab === 'statistics' && <StatisticsTab data={stored} />}
+            {tab === 'statistics' && (
+              <StatisticsTab
+                data={stored}
+                fileName={fileInfo?.fileName ?? 'recording'}
+                group={group} series={series}
+              />
+            )}
             {tab === 'sta' && <STATab data={stored} />}
           </div>
         </div>
@@ -2340,6 +2366,49 @@ function fmt(n: number | null | undefined, decimals = 2): string {
   return n.toFixed(decimals)
 }
 
+function exportPairedTrialsCSV(
+  trials: PairedTrial[],
+  fileName: string,
+  group: number,
+  series: number,
+) {
+  if (trials.length === 0) return
+  const header = [
+    'file', 'group', 'series', 'sweep', 'trial_idx',
+    'pre_t_s', 'pre_amp', 'baseline_mean', 'baseline_sd',
+    'post_peak', 'post_peak_t_s', 'amplitude', 'success',
+    'latency_ms', 'rise_ms', 'decay_ms', 'tau_decay_ms', 'half_width_ms',
+    'truncated', 'manual', 'manual_failure',
+  ]
+  const rows = trials.map((t) => [
+    JSON.stringify(fileName),
+    group, series, t.sweep + 1, t.trialIdx + 1,
+    t.preTS.toFixed(6),
+    t.preAmp.toFixed(4),
+    t.baselineMean.toFixed(4),
+    t.baselineSd.toFixed(4),
+    t.postPeak.toFixed(4),
+    t.postPeakTS.toFixed(6),
+    t.amplitude.toFixed(4),
+    t.success ? '1' : '0',
+    t.latencyMs != null ? t.latencyMs.toFixed(4) : '',
+    t.riseMs != null ? t.riseMs.toFixed(4) : '',
+    t.decayMs != null ? t.decayMs.toFixed(4) : '',
+    t.decayTauMs != null ? t.decayTauMs.toFixed(4) : '',
+    t.halfWidthMs != null ? t.halfWidthMs.toFixed(4) : '',
+    t.truncated ? '1' : '0',
+    t.manual ? '1' : '0',
+    t.postManualFailure ? '1' : '0',
+  ])
+  const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n')
+  const name = fileName.replace(/\.[^.]+$/, '') + '_paired_trials.csv'
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = name; a.click()
+  URL.revokeObjectURL(url)
+}
+
 function TrialsTab({ data }: { data: PairedData | null }) {
   const headers = [
     'Sweep', '#', 'pre t (s)', 'amplitude',
@@ -2434,7 +2503,14 @@ function TrialsTab({ data }: { data: PairedData | null }) {
   )
 }
 
-function StatisticsTab({ data }: { data: PairedData | null }) {
+function StatisticsTab({
+  data, fileName, group, series,
+}: {
+  data: PairedData | null
+  fileName: string
+  group: number
+  series: number
+}) {
   if (!data) {
     return <Empty msg="Run analysis to see statistics." />
   }
@@ -2470,7 +2546,24 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
           textTransform: 'uppercase', letterSpacing: 0.4,
           borderBottom: '1px solid var(--border)',
           background: 'var(--bg-secondary)',
-        }}>Series summary</div>
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span>Series summary</span>
+          <button className="btn"
+            onClick={() => {
+              const headerRow = ['file', 'group', 'series', ...items.map((it) => it.label)]
+              const dataRow = [fileName, group, series, ...items.map((it) => it.value)]
+              copyTextToClipboard(buildTSV(headerRow, [dataRow]))
+            }}
+            title="Copy series-summary table as TSV (paste into Excel / Sheets)"
+            style={{
+              marginLeft: 'auto',
+              fontSize: 'var(--font-size-xs)',
+              padding: '1px 8px', textTransform: 'none', letterSpacing: 0,
+            }}>
+            Copy CSV
+          </button>
+        </div>
         <table style={{
           width: '100%', borderCollapse: 'collapse',
           fontSize: 'var(--font-size-label)', fontFamily: 'var(--font-mono)',
@@ -2499,7 +2592,28 @@ function StatisticsTab({ data }: { data: PairedData | null }) {
           textTransform: 'uppercase', letterSpacing: 0.4,
           borderBottom: '1px solid var(--border)',
           background: 'var(--bg-secondary)',
-        }}>Paired-pulse ratios</div>
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span>Paired-pulse ratios</span>
+          <button className="btn"
+            onClick={() => {
+              const headerRow = ['file', 'group', 'series', 'pulse_n', 'ratio_n_over_1', 'n_sweeps']
+              const dataRows = s.pprN1.map((p) => [
+                fileName, group, series, p.n,
+                p.ratio.toFixed(4), p.nSweeps,
+              ])
+              copyTextToClipboard(buildTSV(headerRow, dataRows))
+            }}
+            disabled={s.pprN1.length === 0}
+            title="Copy PPR table as TSV (paste into Excel / Sheets)"
+            style={{
+              marginLeft: 'auto',
+              fontSize: 'var(--font-size-xs)',
+              padding: '1px 8px', textTransform: 'none', letterSpacing: 0,
+            }}>
+            Copy CSV
+          </button>
+        </div>
         {s.pprN1.length === 0 ? (
           <div style={{
             padding: 12, color: 'var(--text-muted)',
